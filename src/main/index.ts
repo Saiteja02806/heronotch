@@ -7,6 +7,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   Notification,
   powerMonitor,
   screen,
@@ -908,6 +909,10 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     app.setAppUserModelId('com.notch.dashboard')
+    // Native widgets (the select popup, date pickers, scrollbars) follow this,
+    // not just the page CSS. Without it the select menu is a white Windows list
+    // with near-white option labels.
+    nativeTheme.themeSource = 'dark'
     logLine(
       `start v${app.getVersion()} packaged=${app.isPackaged} exe=${process.execPath} userData=${app.getPath('userData')}`
     )

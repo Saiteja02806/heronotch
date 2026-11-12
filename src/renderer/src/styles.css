@@ -19,6 +19,15 @@
   --sans: 'Inter Variable', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
   --serif: 'Instrument Serif', Georgia, 'Times New Roman', serif;
   --mono: 'JetBrains Mono Variable', 'Cascadia Code', ui-monospace, monospace;
+  color-scheme: dark;
+}
+
+/* Native dropdowns (selects), date/time pickers and number spinners follow the
+   page's color scheme. Without this the select popup uses the light Windows
+   theme, leaving the light option labels unreadable on a white list. */
+select option {
+  background-color: #101113;
+  color: var(--ink);
 }
 
 * {
