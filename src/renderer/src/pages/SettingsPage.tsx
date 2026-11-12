@@ -34,12 +34,13 @@ import { useVaultPicker } from '../hooks/useVaultPicker'
 import { ACCENTS } from '../lib/theme'
 import { formatTime } from '../lib/time'
 
-type Section = 'appearance' | 'notch' | 'obsidian' | 'spotify' | 'about'
+type Section = 'appearance' | 'notch' | 'obsidian' | 'ai' | 'spotify' | 'about'
 
 const SECTIONS: { id: Section; label: string; icon: typeof Palette }[] = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'notch', label: 'Notch', icon: PanelTop },
   { id: 'obsidian', label: 'Notes', icon: NotebookPen },
+  { id: 'ai', label: 'AI', icon: Sparkles },
   { id: 'spotify', label: 'Spotify', icon: Music2 },
   { id: 'about', label: 'About', icon: Info }
 ]
@@ -101,6 +102,7 @@ export function SettingsPage() {
   const { status, connecting, connect, disconnect } = useMedia()
   const { chooseVault } = useVaultPicker()
   const [version, setVersion] = useState('')
+  const [aiTesting, setAiTesting] = useState(false)
   useEffect(() => {
     void window.notch.getVersion().then(setVersion)
   }, [])
@@ -241,6 +243,28 @@ export function SettingsPage() {
     showToast('Focus lengths saved', `${focus} min focus · ${short} min short · ${long} min long`, 'success')
   }
 
+  const testAi = async (): Promise<void> => {
+    if (!state.settings.aiApiKey.trim()) {
+      showToast('Add an API key first', 'Create a free key at build.nvidia.com.', 'error')
+      return
+    }
+    setAiTesting(true)
+    try {
+      const text = await window.notch.ai.chat([
+        { role: 'user', content: 'Reply with the single word: ready' }
+      ])
+      showToast('NVIDIA connected', text.slice(0, 80), 'success')
+    } catch (error) {
+      showToast(
+        'Connection failed',
+        error instanceof Error ? error.message : 'Check the key and model.',
+        'error'
+      )
+    } finally {
+      setAiTesting(false)
+    }
+  }
+
   return (
     <div className="settings-page">
       <aside className="settings-rail">
@@ -287,6 +311,7 @@ export function SettingsPage() {
               {section === 'appearance' && 'A little more you.'}
               {section === 'notch' && 'Tune the notch.'}
               {section === 'obsidian' && 'Your notes, connected.'}
+          {section === 'ai' && 'Notes, with a little help.'}
               {section === 'spotify' && 'Let the music in.'}
               {section === 'about' && 'Small app, big flow.'}
             </h1>
@@ -599,8 +624,63 @@ export function SettingsPage() {
                   <div><NotebookPen size={14} /><strong>Read & edit</strong><span>Markdown notes with autosave and preview.</span></div>
                   <div><Sparkles size={14} /><strong>Create</strong><span>Notes and folders anywhere inside it.</span></div>
                   <div><ArrowUpRight size={14} /><strong>Open elsewhere</strong><span>Open any file in your default app.</span></div>
-                  <div><ShieldCheck size={14} /><strong>Stay local</strong><span>Your notes never leave this machine.</span></div>
+                  <div><ShieldCheck size={14} /><strong>Stay local</strong><span>Notes stay on this machine unless you use Enhance.</span></div>
                 </div>
+              </section>
+            </div>
+          )}
+
+          {section === 'ai' && (
+            <div className="settings-sections">
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>NVIDIA API</h3>
+                  <p>Free hosted models from build.nvidia.com. The key stays on this machine.</p>
+                </div>
+                <div className="setting-row">
+                  <span className="setting-copy">
+                    <strong>API key</strong>
+                    <small>Create a free key at build.nvidia.com and paste it here.</small>
+                  </span>
+                  <input
+                    className="setting-input"
+                    type="password"
+                    value={state.settings.aiApiKey}
+                    onChange={(event) => updateSettings({ aiApiKey: event.target.value })}
+                    placeholder="nvapi-..."
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="setting-row">
+                  <span className="setting-copy">
+                    <strong>Model</strong>
+                    <small>The model id from the NVIDIA catalog.</small>
+                  </span>
+                  <input
+                    className="setting-input"
+                    value={state.settings.aiModel}
+                    onChange={(event) => updateSettings({ aiModel: event.target.value })}
+                    placeholder="nvidia/llama-3.1-nemotron-70b-instruct"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="button-row">
+                  <button
+                    className="soft-button"
+                    onClick={() => window.notch.openExternal('https://build.nvidia.com/')}
+                  >
+                    <ExternalLink size={13} /> Get a free key
+                  </button>
+                  <button className="primary-button" onClick={() => void testAi()} disabled={aiTesting}>
+                    {aiTesting ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />}
+                    {aiTesting ? 'Testing…' : 'Test connection'}
+                  </button>
+                </div>
+                <p className="settings-note">
+                  Only the note you are editing is sent, and only when you press Enhance or send a
+                  message.
+                </p>
               </section>
             </div>
           )}

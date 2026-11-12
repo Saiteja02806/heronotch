@@ -1,6 +1,6 @@
 {
   "name": "notch",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "private": true,
   "description": "A personal, Obsidian-first notch dashboard for Windows",
   "main": "./out/main/index.js",

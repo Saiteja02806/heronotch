@@ -19,7 +19,7 @@ import type {
 import { todayKey, uid } from '../lib/time'
 
 export type Page = 'home' | 'notes' | 'music' | 'planner' | 'sessions' | 'posture' | 'settings'
-export type SettingsSection = 'appearance' | 'notch' | 'obsidian' | 'spotify' | 'about'
+export type SettingsSection = 'appearance' | 'notch' | 'obsidian' | 'ai' | 'spotify' | 'about'
 
 export interface ToastItem {
   id: string

@@ -129,19 +129,29 @@ Right-click the system tray icon for **Open**, **Collapse**, and **Quit**. Quit 
 
 The collapsed bar is not locked to the top centre. Open **Settings → Notch → Placement**, then drag the small notch on the screen map to any spot — corners, edges or the middle. The position is saved in normalised coordinates, so it survives restarts and adapts to different display sizes. **Preview** collapses the notch immediately so you can see the result. **Reset** returns it to the top centre.
 
-## Obsidian setup
+## Notes folder
 
-1. Open **Notes** (or the Obsidian card on the home view).
-2. Choose **Choose vault** and select the folder that contains your vault's `.obsidian` directory.
-3. Notch reads the vault's structure directly. It ignores `.obsidian`, `.trash`, `.git` and other hidden folders.
-4. Markdown and text files are editable in the built-in editor; other files are listed and can be opened in Obsidian or revealed in Explorer.
-5. The vault is watched for changes, so edits made in Obsidian appear in the file tree automatically. If a note is open and you have no unsaved changes, external edits are pulled into the editor too.
+1. Open **Notes** (or the Notes card on the home view).
+2. Choose **Open folder** and select the folder that holds your Markdown notes.
+3. Notch reads the folder's structure directly. It ignores `.obsidian`, `.trash`, `.git` and other hidden folders.
+4. Markdown and text files are editable in the built-in editor; other files are listed and can be opened in the default app or revealed in Explorer.
+5. The folder is watched for changes, so edits made in another editor appear in the file tree automatically. If a note is open and you have no unsaved changes, external edits are pulled into the editor too.
 6. Use **Expand all** in the tree toolbar to open every folder at once; folder rows show their note count. Notes, folders and files can be created, renamed and moved to trash from the tree.
-7. Drag a note or folder onto another folder to move it there. While dragging, the tree header becomes **Move to vault root**: drop on it to pull the item back out of its folder. A file name that already exists in the target folder is refused instead of overwritten.
+7. Drag a note or folder onto another folder to move it there. While dragging, the tree header becomes **Move to root folder**: drop on it to pull the item back out of its folder. A file name that already exists in the target folder is refused instead of overwritten.
 
-Notes are read and written on the local filesystem by the Electron main process. Paths are validated to stay inside the selected vault, and deletions use the system trash (not a permanent delete). Auto-save runs after 750ms, `Ctrl+S` saves immediately, and the note is flushed synchronously when you leave the page or quit the app. There is no cloud component.
+Notes are read and written on the local filesystem by the Electron main process. Paths are validated to stay inside the selected folder, and deletions use the system trash (not a permanent delete). Auto-save runs after 750ms, `Ctrl+S` saves immediately, and the note is flushed synchronously when you leave the page or quit the app. There is no sync or account layer.
 
-If a vault path moves or is deleted, choose it again in **Settings → Obsidian**.
+If the folder moves or is deleted, choose it again in **Settings → Notes**.
+
+## AI enhance and chat
+
+Notch can enhance a note or answer questions about it using NVIDIA's hosted models.
+
+1. Create a free API key at [build.nvidia.com](https://build.nvidia.com/).
+2. Paste it in **Settings → AI**. Set the **Model** to the model id shown on that model's page; the default is `nvidia/llama-3.1-nemotron-70b-instruct`.
+3. Open a note and press **Enhance** in the editor toolbar.
+
+The drawer offers **Improve**, **Summarize**, **Shorten**, **Fix grammar** and **Continue**, plus a chat box. Assistant replies can be inserted at the cursor or replace the whole note. Only the note you are editing is sent, and only when you press a quick action or send a message; the key is stored in the local app state.
 
 ## Spotify
 
