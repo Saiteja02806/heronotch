@@ -473,12 +473,33 @@ export function SettingsPage() {
                 />
                 <div className="setting-row">
                   <span className="setting-copy">
+                    <strong>Open with</strong>
+                    <small>Hover over the tab, or open it only when you click.</small>
+                  </span>
+                  <select
+                    className="setting-select"
+                    value={state.settings.openTrigger}
+                    onChange={(event) =>
+                      updateSettings({ openTrigger: event.target.value as 'hover' | 'click' })
+                    }
+                  >
+                    <option value="hover">Hover</option>
+                    <option value="click">Click</option>
+                  </select>
+                </div>
+                <div className="setting-row">
+                  <span className="setting-copy">
                     <strong>Open delay</strong>
-                    <small>How long to hover before the notch blooms.</small>
+                    <small>
+                      {state.settings.openTrigger === 'click'
+                        ? 'Only used when opening on hover.'
+                        : 'How long to hover before the notch blooms.'}
+                    </small>
                   </span>
                   <select
                     className="setting-select"
                     value={state.settings.hoverDelay}
+                    disabled={state.settings.openTrigger === 'click'}
                     onChange={(event) => updateSettings({ hoverDelay: Number(event.target.value) })}
                   >
                     <option value={0}>Instant</option>

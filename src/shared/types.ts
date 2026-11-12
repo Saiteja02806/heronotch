@@ -20,6 +20,7 @@ export interface Settings {
   accent: Accent
   vaultPath: string | null
   hoverDelay: number
+  openTrigger: 'hover' | 'click'
   notchPosition: NotchPosition
   notchStyle: NotchStyle
   launchAtLogin: boolean

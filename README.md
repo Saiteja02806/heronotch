@@ -14,7 +14,7 @@ Hover the top-center notch and it unfolds into a full workspace: your Obsidian v
 - **Coding sessions, with a reply box** — reads the local session state of **Codex**, **OpenCode** and **Anti Gravity**, plus their running processes. See live turns, recent conversations, models/tokens, and open a session's project from the notch. Click **Message** on a session to send a follow-up without switching apps. Provider logos make each session instantly identifiable. The board has search, hides subagent noise by default, and the dashboard gets a live session card.
 - **Posture coach** — an always-on local webcam posture score from 0 to 100, adaptive seat setup, slouch alerts, daily good/bad posture totals, and a clear on/off switch. While enabled it keeps watching even when the notch is collapsed. Frames are processed on-device and never stored or uploaded.
 - **Tasks & calendar** — a day planner with month calendar, priorities, times, notes, and reminders (`at time`, `5/10/30/60 min before`). Reminders trigger real Windows notifications and keep the task state in sync.
-- **Personalization** — five accent themes, a live notch preview, your name in the header, hover delay, a drag-anywhere placement map for the collapsed notch, pin behavior, launch at login, notification control, and keyboard shortcuts.
+- **Personalization** - five accent themes, a live notch preview, your name in the header, hover/click opening, hover delay, a drag-anywhere placement map for the collapsed notch, pin behavior, launch at login, notification control, and keyboard shortcuts.
 - **Fast** — everything is local: `json` state, local Markdown, local session databases, local posture inference, no backend.
 
 ## Quick start
@@ -123,7 +123,7 @@ break it.
 | Save note now | `Ctrl` + `S` |
 | Bold / italic in the note editor | `Ctrl` + `B` / `Ctrl` + `I` |
 
-The notch always launches collapsed and opens on hover after the delay set in **Settings → Notch** (140ms by default). While open, it covers the primary display with a blurred snapshot of the desktop so your attention lands on the notch. Click the blurred area, use the **Collapse** arrow in the header, or press `Esc` to close it. `Esc` works even when the notch never took focus, which is the normal case for a hover-open. The notch background is refreshed while collapsed, so the blur reflects the desktop you were just using.
+The notch always launches collapsed. By default it opens on hover after the delay set in **Settings → Notch** (140ms by default); switch **Open with** to **Click** if you would rather it only opens when you click the tab. While open, it covers the primary display with a blurred snapshot of the desktop so your attention lands on the notch. Click the blurred area, use the **Collapse** arrow in the header, or press `Esc` to close it. `Esc` works even when the notch never took focus, which is the normal case for a hover-open. The notch background is refreshed while collapsed, so the blur reflects the desktop you were just using.
 
 Right-click the system tray icon for **Open**, **Collapse**, and **Quit**. Quit from Settings or the tray when you want to stop the app.
 

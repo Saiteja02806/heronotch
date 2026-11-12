@@ -10,6 +10,7 @@ const DEFAULT_SETTINGS: Settings = {
   accent: 'coral',
   vaultPath: null,
   hoverDelay: 140,
+  openTrigger: 'hover',
   notchPosition: { x: 0.5, y: 0 },
   notchStyle: 'minimal',
   launchAtLogin: false,

@@ -125,6 +125,7 @@ function Shell() {
   }, [expanded, state.settings.notchStyle])
 
   const armExpand = (): void => {
+    if (state.settings.openTrigger === 'click') return
     if (expanded || expandTimer.current) return
     if (Date.now() < reopenBlockedUntil.current) return
     expandTimer.current = setTimeout(() => {
