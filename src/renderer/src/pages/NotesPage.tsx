@@ -185,7 +185,7 @@ export function NotesPage() {
   useEffect(() => {
     if (pendingNote === null) return
     if (pendingNote === '') {
-      setEntryDialog({ mode: 'note', parent: currentFolder })
+      void createNoteNow()
     } else {
       void selectFile(pendingNote)
     }
@@ -385,8 +385,34 @@ export function NotesPage() {
     }
   }
 
-  const submitEntry = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault()
+  // The new-note button used to open a dialog asking for a name and a folder.
+  // That is more ceremony than the action needs: create the file immediately
+  // and open it, the same way a scratch pad behaves.
+  const createNoteNow = useCallback(async (): Promise<void> => {
+    if (!vaultPath) return
+    const parent = selectedPath?.split('/').slice(0, -1).join('/') || ''
+    for (let index = 1; index <= 50; index += 1) {
+      const name = index === 1 ? 'Untitled' : `Untitled ${index}`
+      try {
+        const path = await window.notch.obsidian.createFile(vaultPath, parent, name)
+        await loadTree(true)
+        await selectFile(path)
+        showToast('Note created', path, 'success')
+        return
+      } catch (error) {
+        const message = error instanceof Error ? error.message : ''
+        if (message.toLowerCase().includes('already exists')) continue
+        showToast(
+          'Could not create note',
+          message || 'Try again.',
+          'error'
+        )
+        return
+      }
+    }
+  }, [vaultPath, selectedPath, loadTree, selectFile, showToast])
+
+  const submitEntry = async (event: FormEvent<HTMLFormElement>): Promise<void> => {    event.preventDefault()
     if (!vaultPath || !entryDialog) return
     const form = new FormData(event.currentTarget)
     const name = String(form.get('name') || '').trim()
@@ -495,7 +521,7 @@ export function NotesPage() {
             <button className="icon-button subtle" onClick={() => void loadTree()} title="Refresh vault">
               <RefreshCw size={13} className={loadingTree ? 'spin' : ''} />
             </button>
-            <button className="icon-button subtle" onClick={() => setEntryDialog({ mode: 'note', parent: currentFolder })} title="New note">
+            <button className="icon-button subtle" onClick={() => void createNoteNow()} title="New note">
               <FilePlus2 size={14} />
             </button>
             <button className="icon-button subtle" onClick={() => setEntryDialog({ mode: 'folder', parent: currentFolder })} title="New folder">
@@ -552,7 +578,7 @@ export function NotesPage() {
                   >
                     <ListTree size={11} />
                   </button>
-                  <button className="link-button" onClick={() => setEntryDialog({ mode: 'note', parent: currentFolder })}>
+                  <button className="link-button" onClick={() => void createNoteNow()}>
                     <Plus size={11} /> new
                   </button>
                 </div>
@@ -587,7 +613,7 @@ export function NotesPage() {
               {!loadingTree && tree.length === 0 && (
                 <div className="tree-empty">
                   <p>Your vault is empty.</p>
-                  <button className="soft-button" onClick={() => setEntryDialog({ mode: 'note' })}>
+                  <button className="soft-button" onClick={() => void createNoteNow()}>
                     <Plus size={12} /> Create a note
                   </button>
                 </div>
@@ -614,7 +640,7 @@ export function NotesPage() {
             <h2>Pick a thought to continue.</h2>
             <p>Choose a note from the vault, or start a fresh page. Your edits write straight back to Obsidian.</p>
             <div className="note-welcome-actions">
-              <button className="primary-button" onClick={() => setEntryDialog({ mode: 'note', parent: currentFolder })}>
+              <button className="primary-button" onClick={() => void createNoteNow()}>
                 <Plus size={14} /> New note
               </button>
               <button className="soft-button" onClick={() => void loadTree()}>
