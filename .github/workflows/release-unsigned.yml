@@ -61,7 +61,11 @@ jobs:
       - name: Build portable and installer
         shell: pwsh
         run: |
-          npm run dist:win
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw "Renderer build failed (exit $LASTEXITCODE)" }
+          # electron-builder tries to publish on its own when the ref is a tag.
+          # The release step below owns publishing.
+          npx electron-builder --win portable nsis --publish never
           if ($LASTEXITCODE -ne 0) { throw "Unsigned build failed (exit $LASTEXITCODE)" }
 
       - name: Write SHA-256 checksums
