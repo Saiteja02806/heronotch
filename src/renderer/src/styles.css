@@ -143,6 +143,19 @@ select {
     0 0 18px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
+/* The bar's bottom corners are rounded, and Chromium's hit testing follows the
+   radius: the corner pixels are not part of the button. Clicking a few pixels
+   inside the visible corner therefore did nothing. This invisible, enlarged
+   copy of the hit area covers the corners and gives the tab a small tolerance
+   below and beside it. */
+.collapsed-bar::after {
+  content: '';
+  position: absolute;
+  inset: -8px;
+  border-radius: 18px;
+  cursor: pointer;
+}
+
 .collapsed-bar.style-full {
   width: min(400px, calc(100vw - 12px));
   height: 38px;
