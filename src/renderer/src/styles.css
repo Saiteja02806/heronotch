@@ -2579,6 +2579,33 @@ kbd {
   color: var(--ink);
 }
 
+.note-title {
+  cursor: text;
+  transition: color 140ms ease;
+}
+
+.note-title:hover {
+  color: color-mix(in srgb, var(--ink) 78%, var(--accent));
+}
+
+.note-title-input {
+  display: block;
+  width: min(560px, 100%);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: transparent;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 30px;
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+  color: var(--ink);
+  outline: none;
+  caret-color: var(--accent);
+}
+
 .file-meta {
   display: inline-block;
   margin-top: 4px;

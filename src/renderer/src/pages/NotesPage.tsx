@@ -95,6 +95,9 @@ export function NotesPage() {
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [entryDialog, setEntryDialog] = useState<EntryDialog | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [titleDraft, setTitleDraft] = useState<string | null>(null)
+  const titleInputRef = useRef<HTMLInputElement>(null)
+  const titleSkipCommit = useRef(false)
   const currentFolder = selectedPath?.split('/').slice(0, -1).join('/') || ''
   const searchRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -412,7 +415,57 @@ export function NotesPage() {
     }
   }, [vaultPath, selectedPath, loadTree, selectFile, showToast])
 
-  const submitEntry = async (event: FormEvent<HTMLFormElement>): Promise<void> => {    event.preventDefault()
+  // Clicking the big heading edits it in place. The heading is the first `#`
+  // line when the note has one, otherwise the file name; either way the note is
+  // renamed to match so the sidebar, file and heading stay in sync.
+  const commitTitle = async (): Promise<void> => {
+    if (titleDraft === null || !vaultPath || !selectedPath) return
+    const name = titleDraft.trim().replace(/[\\/:*?"<>|]/g, '').replace(/\.md$/i, '').trim()
+    if (!name) {
+      setTitleDraft(null)
+      return
+    }
+    if (name === displayTitle) {
+      setTitleDraft(null)
+      return
+    }
+
+    const stem = selectedPath.split('/').pop()?.replace(/\.md$/i, '') || ''
+    let nextPath = selectedPath
+    if (name !== stem) {
+      try {
+        nextPath = await window.notch.obsidian.rename(vaultPath, selectedPath, name)
+      } catch (error) {
+        showToast(
+          'Could not rename note',
+          error instanceof Error ? error.message : 'Try another name.',
+          'error'
+        )
+        setTitleDraft(null)
+        return
+      }
+    }
+
+    if (/^#\s+.+$/m.test(content)) {
+      const updated = content.replace(/^#\s+.+$/m, `# ${name}`)
+      contentRef.current = updated
+      setContent(updated)
+      dirtyRef.current = true
+    }
+
+    if (nextPath !== selectedPath) {
+      pathRef.current = nextPath
+      setSelectedPath(nextPath)
+      update({ notes: { lastPath: nextPath } })
+      await loadTree(true)
+    }
+    if (dirtyRef.current) await saveNow()
+    setTitleDraft(null)
+    showToast('Renamed', nextPath, 'success')
+  }
+
+  const submitEntry = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault()
     if (!vaultPath || !entryDialog) return
     const form = new FormData(event.currentTarget)
     const name = String(form.get('name') || '').trim()
@@ -669,7 +722,42 @@ export function NotesPage() {
               </div>
               <div className="editor-title-row">
                 <div>
-                  <h1>{displayTitle}</h1>
+                  {titleDraft === null ? (
+                    <h1
+                      className="note-title"
+                      title="Click to rename"
+                      onClick={() => setTitleDraft(displayTitle)}
+                    >
+                      {displayTitle}
+                    </h1>
+                  ) : (
+                    <input
+                      ref={titleInputRef}
+                      className="note-title-input"
+                      value={titleDraft}
+                      onChange={(event) => setTitleDraft(event.target.value)}
+                      onBlur={() => {
+                        if (titleSkipCommit.current) {
+                          titleSkipCommit.current = false
+                          return
+                        }
+                        void commitTitle()
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault()
+                          event.currentTarget.blur()
+                        } else if (event.key === 'Escape') {
+                          event.preventDefault()
+                          titleSkipCommit.current = true
+                          setTitleDraft(null)
+                        }
+                      }}
+                      autoFocus
+                      spellCheck={false}
+                      aria-label="Note title"
+                    />
+                  )}
                   <span className="file-meta">
                     {selectedPath} · {words} words
                   </span>
@@ -692,14 +780,7 @@ export function NotesPage() {
                   <button
                     className="icon-button subtle"
                     title="Rename note"
-                    onClick={() =>
-                      setEntryDialog({
-                        mode: 'rename',
-                        targetPath: selectedPath,
-                        targetName: selectedPath.split('/').pop() || '',
-                        parent: selectedPath.split('/').slice(0, -1).join('/')
-                      })
-                    }
+                    onClick={() => setTitleDraft(displayTitle)}
                   >
                     <Pencil size={13} />
                   </button>
