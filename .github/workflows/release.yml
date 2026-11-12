@@ -8,6 +8,9 @@ name: Build and sign Notch
 # certificate through eSigner CKA. Smart App Control evaluates each loaded
 # binary, so partial signing is not enough.
 #
+# Run this from the Actions tab once a code-signing certificate exists.
+# Tag pushes are handled by release-unsigned.yml, which needs no secrets.
+#
 # Required repository secrets (Settings -> Secrets and variables -> Actions):
 #   ESIGNER_USERNAME      SSL.com account e-mail
 #   ESIGNER_PASSWORD      SSL.com account password
@@ -28,9 +31,6 @@ on:
         description: 'Build without signing (artifacts are local-only, never publish)'
         type: boolean
         default: false
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   contents: read
