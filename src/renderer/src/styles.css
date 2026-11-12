@@ -7676,3 +7676,30 @@ input[type='range']:focus::-webkit-slider-thumb {
 .setting-input:focus {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
+
+/* ----------------------------------------------------------------
+   Planner: upcoming tasks (replaces the coding-sessions card)
+   ---------------------------------------------------------------- */
+
+.upcoming-side {
+  flex: 0 0 auto;
+}
+
+.upcoming-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 5px;
+}
+
+.upcoming-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 6px 8px;
+  text-align: center;
+  font-size: 8.5px;
+  line-height: 1.5;
+  color: var(--muted-2);
+}

@@ -1,15 +1,12 @@
 import {
   Bell,
-  Bot,
   CalendarDays,
   Check,
   ChevronLeft,
   ChevronRight,
   Clock3,
-  ExternalLink,
   ListTodo,
   Plus,
-  RefreshCw,
   Sparkles,
   Trash2,
   X
@@ -29,7 +26,6 @@ import {
   todayKey
 } from '../lib/time'
 import { useApp } from '../state/AppContext'
-import { SessionBadge, relativeSessionTime } from '../components/SessionBits'
 
 interface EditorState {
   task?: Task
@@ -198,11 +194,7 @@ export function PlannerPage() {
     toggleTask,
     deleteTask,
     addTask,
-    setPage,
-    now,
-    sessions,
-    sessionsLoading,
-    refreshSessions
+    now
   } = useApp()
   const selected = parseDateKey(plannerDate)
   const [view, setView] = useState({ year: selected.getFullYear(), month: selected.getMonth() })
@@ -249,12 +241,18 @@ export function PlannerPage() {
       .sort((a, b) => (b.remindAt || 0) - (a.remindAt || 0))
     return [...upcoming, ...overdue].slice(0, 5)
   }, [state.tasks, now])
-  const activeSessions = sessions?.sessions.filter((session) => session.active) || []
-  const sessionPreview = [
-    ...activeSessions,
-    ...(sessions?.sessions || []).filter((session) => !session.active)
-  ].slice(0, 3)
-  const runningApps = sessions?.apps.filter((app) => app.running) || []
+  const today = todayKey()
+  const upcoming = useMemo(() => {
+    const sortKey = (task: Task): string => `${task.date}T${task.time || '99:99'}`
+    const open = state.tasks.filter((task) => !task.done && task.date !== plannerDate)
+    const overdue = open
+      .filter((task) => task.date < today)
+      .sort((a, b) => sortKey(a).localeCompare(sortKey(b)))
+    const later = open
+      .filter((task) => task.date >= today)
+      .sort((a, b) => sortKey(a).localeCompare(sortKey(b)))
+    return [...overdue, ...later].slice(0, 4)
+  }, [state.tasks, plannerDate, today])
   const focusMinutes = state.focusLog
     .filter((session) => dateKey(new Date(session.at)) === plannerDate)
     .reduce((sum, session) => sum + session.minutes, 0)
@@ -433,53 +431,46 @@ export function PlannerPage() {
       </section>
 
       <aside className="planner-side">
-        <div className="side-card sessions-side">
+        <div className="side-card upcoming-side">
           <div className="side-card-head">
-            <span className="eyebrow">
-              <span className={`live-dot ${activeSessions.length ? 'is-live' : ''}`} />
-              Coding sessions
-            </span>
-            <button className="icon-button subtle" onClick={() => void refreshSessions()} title="Refresh sessions">
-              <RefreshCw size={12} className={sessionsLoading ? 'spin' : ''} />
-            </button>
+            <span className="eyebrow">Upcoming{upcoming.length > 0 ? ` · ${upcoming.length}` : ''}</span>
+            <CalendarDays size={13} />
           </div>
-          <div className="sessions-mini-apps">
-            {(sessions?.apps || []).slice(0, 3).map((app) => (
-              <span key={app.provider} className={app.running ? 'is-running' : ''}>
-                <i style={{ background: app.running ? undefined : 'rgba(255,255,255,.22)' }} />
-                {app.label}
-              </span>
-            ))}
-          </div>
-          <div className="sessions-mini-list">
-            {sessionPreview.length === 0 && (
-              <div className="sessions-mini-empty">
-                <Bot size={15} />
-                <span>No sessions found. Start Codex, OpenCode or Anti Gravity.</span>
+          <div className="upcoming-list">
+            {upcoming.length === 0 && (
+              <div className="upcoming-empty">
+                <CalendarDays size={16} />
+                <span>Nothing scheduled after this day.</span>
+                <button className="soft-button compact" onClick={() => setEditor({ date: addDays(plannerDate, 1) })}>
+                  <Plus size={12} /> Plan the next day
+                </button>
               </div>
             )}
-            {sessionPreview.map((session) => (
-              <button
-                key={session.id}
-                className="sessions-mini-row"
-                onClick={() => setPage('sessions')}
-              >
-                <SessionBadge provider={session.provider} size={23} />
-                <span className="sessions-mini-copy">
-                  <strong>{session.title}</strong>
-                  <small>{session.project || session.origin || 'workspace'}</small>
-                </span>
-                {session.active ? (
-                  <span className="session-live">live</span>
-                ) : (
-                  <span className="sessions-mini-time">{relativeSessionTime(session.updatedAt, now)}</span>
-                )}
-              </button>
-            ))}
+            {upcoming.map((task) => {
+              const overdue = task.date < today
+              return (
+                <button
+                  key={task.id}
+                  className={`reminder-item ${overdue ? 'is-overdue' : ''}`}
+                  onClick={() => {
+                    setPlannerDate(task.date)
+                    setEditor({ task, date: task.date })
+                  }}
+                >
+                  <span className="reminder-icon"><CalendarDays size={11} /></span>
+                  <span className="reminder-copy">
+                    <strong>{task.title}</strong>
+                    <small>
+                      {overdue ? 'Overdue · ' : ''}
+                      {formatDateShort(task.date)}
+                      {task.time ? ` · ${task.time}` : ''}
+                    </small>
+                  </span>
+                  {overdue && <span className="overdue-label">due</span>}
+                </button>
+              )
+            })}
           </div>
-          <button className="sessions-open-all" onClick={() => setPage('sessions')}>
-            {runningApps.length} apps running <ExternalLink size={10} />
-          </button>
         </div>
 
         <div className="side-card reminders-side">
@@ -532,9 +523,9 @@ export function PlannerPage() {
             <span>done</span>
           </div>
           <div>
-            <Bot size={13} />
-            <strong>{activeSessions.length}</strong>
-            <span>live</span>
+            <ListTodo size={13} />
+            <strong>{openTasks.length}</strong>
+            <span>open</span>
           </div>
         </div>
       </aside>
