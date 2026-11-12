@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Clock3,
   ExternalLink,
-  Flame,
   ListTodo,
   Plus,
   RefreshCw,
@@ -522,8 +521,8 @@ export function PlannerPage() {
         </div>
 
         <div className="stats-strip">
-          <div>
-            <Flame size={13} />
+          <div title={`${focusMinutes} focused minutes completed on this day`}>
+            <Clock3 size={13} />
             <strong>{focusMinutes}m</strong>
             <span>focus</span>
           </div>
