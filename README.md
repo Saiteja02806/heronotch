@@ -88,6 +88,30 @@ SmartScreen still shows an "unrecognized app" prompt on early downloads until
 the certificate builds reputation; that is normal for direct downloads and is
 not something the installer can avoid.
 
+## Running on a PC with Smart App Control
+
+Smart App Control has no per-app allow list, and it evaluates every DLL a program
+loads. On such a PC the packaged `Notch.exe` cannot start, but Electron's own
+binary is allowed, so running the same code from source works.
+
+On a machine set up that way:
+
+| Shortcut | Where | Purpose |
+| --- | --- | --- |
+| `Notch` | Desktop | Starts the latest `out/` build |
+| `Notch` | Start menu | Same, searchable |
+| `Notch` | Startup folder | Starts at sign-in, so the notch is always there |
+
+Each one runs `node_modules/electron/dist/electron.exe` with the project folder
+as its argument. That path stays valid across `npm install`, so updates do not
+break it.
+
+- Rebuild after changing source: `npm run build`, then relaunch the shortcut.
+- If the shortcut opens nothing, check `%APPDATA%\notch\notch.log` and run
+  `npm install` followed by `npm run build`.
+- To stop it starting at sign-in, delete
+  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Notch.lnk`.
+
 ## Using the notch
 
 | Action | Shortcut |
@@ -99,7 +123,7 @@ not something the installer can avoid.
 | Save note now | `Ctrl` + `S` |
 | Bold / italic in the note editor | `Ctrl` + `B` / `Ctrl` + `I` |
 
-The notch always launches collapsed and opens on hover after the delay set in **Settings → Notch** (140ms by default). While open, it covers the primary display with a blurred snapshot of the desktop so your attention lands on the notch. Click the blurred area, use the **Collapse** arrow in the header, or press `Esc` (when the notch has focus) to close it. The notch background is refreshed while collapsed, so the blur reflects the desktop you were just using.
+The notch always launches collapsed and opens on hover after the delay set in **Settings → Notch** (140ms by default). While open, it covers the primary display with a blurred snapshot of the desktop so your attention lands on the notch. Click the blurred area, use the **Collapse** arrow in the header, or press `Esc` to close it. `Esc` works even when the notch never took focus, which is the normal case for a hover-open. The notch background is refreshed while collapsed, so the blur reflects the desktop you were just using.
 
 Right-click the system tray icon for **Open**, **Collapse**, and **Quit**. Quit from Settings or the tray when you want to stop the app.
 

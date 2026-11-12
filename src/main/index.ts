@@ -143,6 +143,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
       }
       mainWindow.showInactive()
       expanding = null
+      syncEscapeShortcut()
       return true
     })().catch(() => {
       expanding = null
@@ -154,6 +155,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
   expandToken += 1
   expanding = null
   expanded = false
+  syncEscapeShortcut()
   backdrop.resumeBackdropCapture()
   applyBounds()
   if (notify && mainWindow) {
@@ -201,6 +203,29 @@ function smartAppControlState(): 'on' | 'evaluation' | 'off' | 'unknown' {
   } catch {
     // Older Windows builds do not have the key at all.
     return 'unknown'
+  }
+}
+
+function syncEscapeShortcut(): void {
+  // Esc must close the notch even when the window never got focus, which is the
+  // normal case: the notch opens on hover via showInactive(), so keyboard focus
+  // stays in whatever app the user was in. Grab Esc globally only while the
+  // notch is expanded and unfocused; a focused window handles Esc itself, which
+  // keeps "Esc leaves a text field" working inside the notch.
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const want = expanded && !mainWindow.isFocused()
+  const registered = globalShortcut.isRegistered('Escape')
+  try {
+    if (want && !registered) {
+      globalShortcut.register('Escape', () => {
+        logLine('global escape: collapsing notch')
+        void setExpanded(false)
+      })
+    } else if (!want && registered) {
+      globalShortcut.unregister('Escape')
+    }
+  } catch {
+    // If another app owns Esc, the collapse arrow still works.
   }
 }
 
@@ -397,9 +422,14 @@ function createWindow(): void {
     mainWindow = null
   })
   mainWindow.on('blur', () => {
+    syncEscapeShortcut()
     if (expanded && !getState().settings.pinOnOpen) {
       mainWindow?.webContents.send('notch:blur')
     }
+  })
+
+  mainWindow.on('focus', () => {
+    syncEscapeShortcut()
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
