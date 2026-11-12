@@ -257,11 +257,9 @@ export function PlannerPage() {
   ].slice(0, 3)
   const runningApps = sessions?.apps.filter((app) => app.running) || []
   const focusMinutes = state.focusLog
-    .filter((session) => dateKey(new Date(session.at)) === todayKey())
+    .filter((session) => dateKey(new Date(session.at)) === plannerDate)
     .reduce((sum, session) => sum + session.minutes, 0)
-  const doneToday = state.tasks.filter(
-    (task) => task.done && task.date === todayKey()
-  ).length
+  const doneCount = doneTasks.length
   const monthLabel = new Date(view.year, view.month, 1).toLocaleDateString([], {
     month: 'long',
     year: 'numeric'
@@ -487,7 +485,7 @@ export function PlannerPage() {
 
         <div className="side-card reminders-side">
           <div className="side-card-head">
-            <span className="eyebrow">Reminders</span>
+            <span className="eyebrow">Reminders{reminders.length > 0 ? ` · ${reminders.length}` : ''}</span>
             <Bell size={13} />
           </div>
           <div className="reminder-list">
@@ -495,6 +493,9 @@ export function PlannerPage() {
               <div className="reminder-empty">
                 <Bell size={16} />
                 <span>No reminders yet. Add a time to a task and choose when to be nudged.</span>
+                <button className="soft-button compact" onClick={() => setEditor({ date: plannerDate })}>
+                  <Plus size={12} /> Add reminder
+                </button>
               </div>
             )}
             {reminders.map((task) => (
@@ -528,7 +529,7 @@ export function PlannerPage() {
           </div>
           <div>
             <Check size={13} />
-            <strong>{doneToday}</strong>
+            <strong>{doneCount}</strong>
             <span>done</span>
           </div>
           <div>
