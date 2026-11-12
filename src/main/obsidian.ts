@@ -182,11 +182,9 @@ export async function revealEntry(vaultPath: string, relativePath: string | null
   shell.showItemInFolder(full)
 }
 
-export async function openInObsidian(vaultPath: string, relativePath: string): Promise<void> {
-  const vaultName = path.basename(path.resolve(vaultPath))
-  const file = relativePath.replace(/\.md$/i, '')
-  const url = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(file)}`
-  await shell.openExternal(url)
+export async function openFile(vaultPath: string, relativePath: string): Promise<void> {
+  const full = resolveSafe(vaultPath, relativePath)
+  await shell.openPath(full)
 }
 
 async function collectMarkdown(vaultPath: string): Promise<string[]> {

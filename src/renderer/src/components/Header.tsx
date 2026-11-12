@@ -39,7 +39,7 @@ export function Header() {
             {state.settings.userName
               ? `${greeting()}, ${state.settings.userName}`
               : vaultName
-                ? `${vaultName} vault`
+                ? `${vaultName} notes`
                 : 'personal dashboard'}
           </span>
         </div>

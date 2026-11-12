@@ -39,7 +39,7 @@ type Section = 'appearance' | 'notch' | 'obsidian' | 'spotify' | 'about'
 const SECTIONS: { id: Section; label: string; icon: typeof Palette }[] = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'notch', label: 'Notch', icon: PanelTop },
-  { id: 'obsidian', label: 'Obsidian', icon: NotebookPen },
+  { id: 'obsidian', label: 'Notes', icon: NotebookPen },
   { id: 'spotify', label: 'Spotify', icon: Music2 },
   { id: 'about', label: 'About', icon: Info }
 ]
@@ -100,6 +100,10 @@ export function SettingsPage() {
   } = useApp()
   const { status, connecting, connect, disconnect } = useMedia()
   const { chooseVault } = useVaultPicker()
+  const [version, setVersion] = useState('')
+  useEffect(() => {
+    void window.notch.getVersion().then(setVersion)
+  }, [])
   const section = settingsSection as Section
   const setSection = setSettingsSection
   const [name, setName] = useState(state.settings.userName)
@@ -265,7 +269,7 @@ export function SettingsPage() {
         </nav>
         <div className="settings-rail-foot">
           <span className="status-dot online" />
-          Notch 1.0.0
+          Notch {version}
         </div>
       </aside>
 
@@ -282,7 +286,7 @@ export function SettingsPage() {
             <h1>
               {section === 'appearance' && 'A little more you.'}
               {section === 'notch' && 'Tune the notch.'}
-              {section === 'obsidian' && 'Your vault, connected.'}
+              {section === 'obsidian' && 'Your notes, connected.'}
               {section === 'spotify' && 'Let the music in.'}
               {section === 'about' && 'Small app, big flow.'}
             </h1>
@@ -528,7 +532,7 @@ export function SettingsPage() {
             <div className="settings-sections">
               <section className="setting-group">
                 <div className="setting-group-head">
-                  <h3>Vault</h3>
+                  <h3>Notes folder</h3>
                   <p>Notch edits your local Markdown files directly. No sync layer, no account.</p>
                 </div>
                 {state.settings.vaultPath ? (
@@ -544,7 +548,7 @@ export function SettingsPage() {
                   <div className="vault-disconnected">
                     <FolderOpen size={22} />
                     <div>
-                      <strong>No vault connected</strong>
+                      <strong>No folder connected</strong>
                       <span>Choose the folder that holds your notes, folders and attachments.</span>
                     </div>
                   </div>
@@ -552,12 +556,12 @@ export function SettingsPage() {
                 <div className="button-row">
                   <button className="primary-button" onClick={() => void chooseVault()}>
                     <FolderOpen size={14} />
-                    {state.settings.vaultPath ? 'Choose another vault' : 'Choose vault'}
+                    {state.settings.vaultPath ? 'Change folder' : 'Open folder'}
                   </button>
                   {state.settings.vaultPath && (
                     <>
                       <button className="soft-button" onClick={() => void window.notch.obsidian.reveal(state.settings.vaultPath!, null)}>
-                        <ExternalLink size={13} /> Open folder
+                        <ExternalLink size={13} /> Show in Explorer
                       </button>
                       <button className="soft-button" onClick={() => setPage('notes')}>
                         <NotebookPen size={13} /> Open notes
@@ -572,9 +576,9 @@ export function SettingsPage() {
                 </div>
                 <div className="feature-grid">
                   <div><NotebookPen size={14} /><strong>Read & edit</strong><span>Markdown notes with autosave and preview.</span></div>
-                  <div><Sparkles size={14} /><strong>Create</strong><span>Notes and folders anywhere inside the vault.</span></div>
-                  <div><ArrowUpRight size={14} /><strong>Jump out</strong><span>Open any file straight into Obsidian.</span></div>
-                  <div><ShieldCheck size={14} /><strong>Stay local</strong><span>Your vault never leaves this machine.</span></div>
+                  <div><Sparkles size={14} /><strong>Create</strong><span>Notes and folders anywhere inside it.</span></div>
+                  <div><ArrowUpRight size={14} /><strong>Open elsewhere</strong><span>Open any file in your default app.</span></div>
+                  <div><ShieldCheck size={14} /><strong>Stay local</strong><span>Your notes never leave this machine.</span></div>
                 </div>
               </section>
             </div>
@@ -703,7 +707,7 @@ export function SettingsPage() {
                   <span className="about-dot" />
                 </div>
                 <div>
-                  <span className="eyebrow">Notch 1.0.0</span>
+                  <span className="eyebrow">Notch {version}</span>
                   <h3>A calmer top of screen.</h3>
                   <p>
                     Notes, music, focus, coding sessions and the day ahead — folded into the
@@ -729,9 +733,6 @@ export function SettingsPage() {
                   <h3>Links</h3>
                 </div>
                 <div className="button-row">
-                  <button className="soft-button" onClick={() => window.notch.openExternal('https://obsidian.md')}>
-                    <ExternalLink size={13} /> Obsidian
-                  </button>
                   <button className="soft-button" onClick={() => window.notch.openExternal('https://open.spotify.com')}>
                     <ExternalLink size={13} /> Spotify
                   </button>

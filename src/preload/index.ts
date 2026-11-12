@@ -22,6 +22,7 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): () => vo
 const api: NotchApi = {
   getState: () => ipcRenderer.invoke('app:get-state') as Promise<AppState>,
   setState: (patch) => ipcRenderer.invoke('app:set-state', patch) as Promise<AppState>,
+  getVersion: () => ipcRenderer.invoke('app:version') as Promise<string>,
   setExpanded: (value) => ipcRenderer.invoke('notch:set-expanded', value) as Promise<boolean>,
   getExpanded: () => ipcRenderer.invoke('notch:get-expanded') as Promise<boolean>,
   getBackdrop: () => ipcRenderer.invoke('notch:get-backdrop') as Promise<string | null>,
@@ -59,7 +60,7 @@ const api: NotchApi = {
       ipcRenderer.invoke('obsidian:trash', vaultPath, relativePath) as Promise<void>,
     reveal: (vaultPath, relativePath) =>
       ipcRenderer.invoke('obsidian:reveal', vaultPath, relativePath) as Promise<void>,
-    openInObsidian: (vaultPath, relativePath) =>
+    openFile: (vaultPath, relativePath) =>
       ipcRenderer.invoke('obsidian:open-in-app', vaultPath, relativePath) as Promise<void>,
     search: (vaultPath, query) =>
       ipcRenderer.invoke('obsidian:search', vaultPath, query) as Promise<NoteSearchResult[]>

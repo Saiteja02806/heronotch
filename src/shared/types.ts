@@ -251,6 +251,7 @@ export type SpotifyAction =
 
 export interface NotchApi {
   getState: () => Promise<AppState>
+  getVersion: () => Promise<string>
   setState: (patch: AppStatePatch) => Promise<AppState>
   setExpanded: (expanded: boolean) => Promise<boolean>
   getExpanded: () => Promise<boolean>
@@ -279,7 +280,7 @@ export interface NotchApi {
     move: (vaultPath: string, relativePath: string, targetDirectory: string) => Promise<string>
     trash: (vaultPath: string, relativePath: string) => Promise<void>
     reveal: (vaultPath: string, relativePath: string | null) => Promise<void>
-    openInObsidian: (vaultPath: string, relativePath: string) => Promise<void>
+    openFile: (vaultPath: string, relativePath: string) => Promise<void>
     search: (vaultPath: string, query: string) => Promise<NoteSearchResult[]>
   }
   spotify: {

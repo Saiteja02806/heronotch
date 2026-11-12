@@ -614,15 +614,16 @@ function refreshVaultWatcher(force = false): void {
 
 function requireVault(requested?: string): string {
   const vaultPath = getState().settings.vaultPath
-  if (!vaultPath) throw new Error('Choose your Obsidian vault first.')
+  if (!vaultPath) throw new Error('Choose a notes folder first.')
   if (requested && path.resolve(requested) !== path.resolve(vaultPath)) {
-    throw new Error('The vault changed. Reload the notes view.')
+    throw new Error('The notes folder changed. Reload the notes view.')
   }
   return vaultPath
 }
 
 function registerIpc(): void {
   ipcMain.handle('app:get-state', () => getState())
+  ipcMain.handle('app:version', () => app.getVersion())
 
   ipcMain.handle('app:set-state', (_event, patch: AppStatePatch) => {
     const before = getState()
@@ -693,9 +694,9 @@ function registerIpc(): void {
   ipcMain.handle('obsidian:choose-vault', async () => {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Choose your Obsidian vault',
+      title: 'Choose a notes folder',
       properties: ['openDirectory', 'createDirectory'],
-      buttonLabel: 'Use this vault'
+      buttonLabel: 'Use this folder'
     })
     if (result.canceled || !result.filePaths[0]) return null
     const chosen = result.filePaths[0]
@@ -753,7 +754,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('obsidian:open-in-app', async (_event, vaultPath: string, relativePath: string) => {
-    await obsidian.openInObsidian(requireVault(vaultPath), relativePath)
+    await obsidian.openFile(requireVault(vaultPath), relativePath)
   })
 
   ipcMain.handle('obsidian:search', async (_event, vaultPath: string, query: string) => {

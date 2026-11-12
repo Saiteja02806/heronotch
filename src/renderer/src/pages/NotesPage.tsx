@@ -123,7 +123,7 @@ export function NotesPage() {
         setTreeReady(true)
       } catch (error) {
         if (!silent) {
-          showToast('Vault unavailable', error instanceof Error ? error.message : 'Could not read the vault.', 'error')
+          showToast('Folder unavailable', error instanceof Error ? error.message : 'Could not read the folder.', 'error')
         }
       } finally {
         setLoadingTree(false)
@@ -567,15 +567,16 @@ export function NotesPage() {
           <span className="float-note note-two">daily/11-11</span>
           <span className="float-note note-three">read later</span>
         </div>
-        <span className="eyebrow">Obsidian, inside your notch</span>
-        <h1>Your vault, one hover away.</h1>
+        <span className="eyebrow">Notes, inside your notch</span>
+        <h1>Your notes, one hover away.</h1>
         <p>
-          Connect a vault to browse every folder, create notes, rewrite drafts, and jump straight
-          into Obsidian. Nothing syncs anywhere else — Notch works directly with your files.
+          Open a folder of Markdown notes to browse it, create notes and edit drafts in place.
+          Nothing syncs anywhere else — Notch works directly with your files. You can create a new
+          folder in the picker.
         </p>
         <button className="primary-button" onClick={() => void chooseVault()}>
           <FolderOpen size={15} />
-          Choose your vault
+          Open folder
         </button>
         <div className="vault-features">
           <span><FilePlus2 size={13} /> Create notes</span>
@@ -593,12 +594,12 @@ export function NotesPage() {
           <div className="sidebar-vault">
             <span className="vault-avatar">{vaultPath.split(/[\\/]/).filter(Boolean).pop()?.slice(0, 1).toUpperCase()}</span>
             <div>
-              <span className="eyebrow">Vault</span>
+              <span className="eyebrow">Folder</span>
               <strong>{vaultPath.split(/[\\/]/).filter(Boolean).pop()}</strong>
             </div>
           </div>
           <div className="sidebar-actions">
-            <button className="icon-button subtle" onClick={() => void loadTree()} title="Refresh vault">
+            <button className="icon-button subtle" onClick={() => void loadTree()} title="Refresh folder">
               <RefreshCw size={13} className={loadingTree ? 'spin' : ''} />
             </button>
             <button className="icon-button subtle" onClick={() => void createNoteNow()} title="New note">
@@ -662,7 +663,7 @@ export function NotesPage() {
                   void moveNote(source, '')
                 }}
               >
-                <span className="tree-label">{dragPath ? 'Move to vault root' : `${noteCount} notes`}</span>
+                <span className="tree-label">{dragPath ? 'Move to root folder' : `${noteCount} notes`}</span>
                 <div className="tree-toolbar-actions">
                   <button
                     className="link-button"
@@ -710,12 +711,12 @@ export function NotesPage() {
                 }
                 onDelete={(path) => setDeleteTarget(path)}
                 onUnsupported={() =>
-                  showToast('Preview unavailable', 'Notch edits Markdown and text notes. This file will open in Obsidian.', 'default')
+                  showToast('Preview unavailable', 'Notch edits Markdown and text notes. This file opens in your default app.', 'default')
                 }
               />
               {!loadingTree && tree.length === 0 && (
                 <div className="tree-empty">
-                  <p>Your vault is empty.</p>
+                  <p>This folder is empty.</p>
                   <button className="soft-button" onClick={() => void createNoteNow()}>
                     <Plus size={12} /> Create a note
                   </button>
@@ -727,7 +728,7 @@ export function NotesPage() {
 
         <div className="sidebar-footer">
           <button className="sidebar-footer-button" onClick={() => void chooseVault()}>
-            <FolderOpen size={13} /> Switch vault
+            <FolderOpen size={13} /> Open folder
           </button>
           <button className="sidebar-footer-button" onClick={() => void window.notch.obsidian.reveal(vaultPath, null)}>
             <ArrowUpRightIcon /> Reveal
@@ -741,13 +742,13 @@ export function NotesPage() {
             <div className="note-welcome-icon"><FileText size={26} /></div>
             <span className="eyebrow">Nothing open</span>
             <h2>Pick a thought to continue.</h2>
-            <p>Choose a note from the vault, or start a fresh page. Your edits write straight back to Obsidian.</p>
+            <p>Choose a note, or start a fresh page. Your edits write straight back to the file.</p>
             <div className="note-welcome-actions">
               <button className="primary-button" onClick={() => void createNoteNow()}>
                 <Plus size={14} /> New note
               </button>
               <button className="soft-button" onClick={() => void loadTree()}>
-                <RefreshCw size={13} /> Refresh vault
+                <RefreshCw size={13} /> Refresh folder
               </button>
             </div>
             {folders.length > 0 && (
@@ -822,7 +823,7 @@ export function NotesPage() {
                       : saveState === 'saving'
                         ? 'Saving'
                         : saveState === 'saved'
-                          ? 'Saved to Obsidian'
+                          ? 'Saved to file'
                           : dirtyRef.current
                             ? 'Unsaved'
                             : 'Saved to file'}
@@ -836,14 +837,14 @@ export function NotesPage() {
                   </button>
                   <button
                     className="icon-button subtle"
-                    title="Open in Obsidian"
+                    title="Open in default app"
                     onClick={async () => {
                       if (saveTimer.current) {
                         clearTimeout(saveTimer.current)
                         saveTimer.current = null
                       }
                       await saveNow()
-                      void window.notch.obsidian.openInObsidian(vaultPath, selectedPath)
+                      void window.notch.obsidian.openFile(vaultPath, selectedPath)
                     }}
                   >
                     <Wand2 size={13} />
@@ -896,7 +897,7 @@ export function NotesPage() {
 
             <div className="editor-footer">
               <span>{content.length} characters</span>
-              <span>{selectedPath.split('/').length > 1 ? 'Nested note' : 'Vault root'}</span>
+              <span>{selectedPath.split('/').length > 1 ? 'Nested note' : 'Root folder'}</span>
               <span className="footer-path">{selectedPath}</span>
               <button onClick={() => void window.notch.obsidian.reveal(vaultPath, selectedPath)}>
                 Reveal in Explorer
@@ -916,7 +917,7 @@ export function NotesPage() {
               ? 'New folder'
               : 'Rename'
         }
-        eyebrow={entryDialog?.mode === 'rename' ? 'Keep the extension, or change it' : 'Inside your vault'}
+        eyebrow={entryDialog?.mode === 'rename' ? 'Keep the extension, or change it' : 'Inside your notes folder'}
       >
         <form className="entry-form" onSubmit={(event) => void submitEntry(event)}>
           <label>
@@ -932,7 +933,7 @@ export function NotesPage() {
             <label>
               <span>Location</span>
               <select name="parent" defaultValue={entryDialog?.parent || ''}>
-                <option value="">Vault root</option>
+                <option value="">Root folder</option>
                 {folders.map((folder) => (
                   <option key={folder} value={folder}>
                     {folder}
@@ -954,7 +955,7 @@ export function NotesPage() {
 
       <Modal open={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)} title="Move to trash?" eyebrow={deleteTarget || ''}>
         <p className="modal-copy">
-          This sends the item to your system trash. Obsidian will stop seeing it right away.
+          This sends the item to your system trash. It leaves the notes folder right away.
         </p>
         <div className="modal-actions">
           <button className="soft-button" onClick={() => setDeleteTarget(null)}>Keep it</button>

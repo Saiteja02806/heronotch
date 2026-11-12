@@ -16,7 +16,7 @@ export function Footer() {
         <span className={`status-dot ${vaultName ? 'online' : ''}`} />
         <span className="status-label">
           <FolderOpen size={12} />
-          {vaultName || 'No vault'}
+          {vaultName || 'No folder'}
         </span>
         <span className="status-separator" />
         <span className={`status-label ${spotifyLive ? 'online-text' : ''}`}>

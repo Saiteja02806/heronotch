@@ -375,9 +375,9 @@ function ObsidianCard() {
         <div>
           <span className="eyebrow">
             <span className="obsidian-spark" />
-            Obsidian
+            Notes
           </span>
-          <h2 className="card-title">{vaultName || 'Your second brain'}</h2>
+          <h2 className="card-title">{vaultName || 'Your notes'}</h2>
         </div>
         {vaultPath && (
           <button className="icon-button subtle" onClick={() => openNote(state.notes.lastPath || files[0]?.path || '')} title="Open notes">
@@ -393,21 +393,21 @@ function ObsidianCard() {
             <span />
             <span />
           </div>
-          <p>Point Notch at your vault. Read, write and create notes without breaking flow.</p>
+          <p>Open a folder of notes. Read, write and create without breaking flow.</p>
           <button className="soft-button" onClick={() => void chooseVault()}>
             <FolderOpen size={13} />
-            Choose vault
+            Open folder
           </button>
         </div>
       ) : (
         <div className="recent-notes">
-          {loading && <span className="loading-line">Reading vault…</span>}
+          {loading && <span className="loading-line">Reading folder…</span>}
           {!loading && files.length === 0 && (
             <button
               className="soft-button"
               onClick={() => {
                 openNote('')
-                showToast('Vault is empty', 'Create your first note in the Notes tab.', 'default')
+                showToast('Folder is empty', 'Create your first note in the Notes tab.', 'default')
               }}
             >
               <Plus size={13} />
@@ -418,7 +418,7 @@ function ObsidianCard() {
             <button key={file.path} className="recent-note" onClick={() => openNote(file.path)}>
               <FileText size={13} />
               <span className="recent-note-name">{file.name}</span>
-              <span className="recent-note-folder">{file.path.split('/').slice(0, -1).join('/') || 'Vault'}</span>
+              <span className="recent-note-folder">{file.path.split('/').slice(0, -1).join('/') || 'Root'}</span>
               <ChevronRight size={12} />
             </button>
           ))}
@@ -603,7 +603,7 @@ export function Dashboard() {
   return (
     <div className="dashboard">
       <div className="dashboard-sr">
-        {greeting()}. {vaultName ? `${vaultName} vault connected.` : 'No vault connected.'}
+        {greeting()}. {vaultName ? `${vaultName} folder connected.` : 'No notes folder connected.'}
       </div>
       <TimerCard />
       <MusicCard />
