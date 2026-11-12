@@ -276,6 +276,7 @@ export interface NotchApi {
     createFile: (vaultPath: string, directory: string, name: string) => Promise<string>
     createFolder: (vaultPath: string, directory: string, name: string) => Promise<string>
     rename: (vaultPath: string, relativePath: string, nextName: string) => Promise<string>
+    move: (vaultPath: string, relativePath: string, targetDirectory: string) => Promise<string>
     trash: (vaultPath: string, relativePath: string) => Promise<void>
     reveal: (vaultPath: string, relativePath: string | null) => Promise<void>
     openInObsidian: (vaultPath: string, relativePath: string) => Promise<void>

@@ -53,6 +53,8 @@ const api: NotchApi = {
       ipcRenderer.invoke('obsidian:create-folder', vaultPath, directory, name) as Promise<string>,
     rename: (vaultPath, relativePath, nextName) =>
       ipcRenderer.invoke('obsidian:rename', vaultPath, relativePath, nextName) as Promise<string>,
+    move: (vaultPath, relativePath, targetDirectory) =>
+      ipcRenderer.invoke('obsidian:move', vaultPath, relativePath, targetDirectory) as Promise<string>,
     trash: (vaultPath, relativePath) =>
       ipcRenderer.invoke('obsidian:trash', vaultPath, relativePath) as Promise<void>,
     reveal: (vaultPath, relativePath) =>

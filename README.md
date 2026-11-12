@@ -137,6 +137,7 @@ The collapsed bar is not locked to the top centre. Open **Settings → Notch →
 4. Markdown and text files are editable in the built-in editor; other files are listed and can be opened in Obsidian or revealed in Explorer.
 5. The vault is watched for changes, so edits made in Obsidian appear in the file tree automatically. If a note is open and you have no unsaved changes, external edits are pulled into the editor too.
 6. Use **Expand all** in the tree toolbar to open every folder at once; folder rows show their note count. Notes, folders and files can be created, renamed and moved to trash from the tree.
+7. Drag a note or folder onto another folder to move it there. While dragging, the tree header becomes **Move to vault root**: drop on it to pull the item back out of its folder. A file name that already exists in the target folder is refused instead of overwritten.
 
 Notes are read and written on the local filesystem by the Electron main process. Paths are validated to stay inside the selected vault, and deletions use the system trash (not a permanent delete). Auto-save runs after 750ms, `Ctrl+S` saves immediately, and the note is flushed synchronously when you leave the page or quit the app. There is no cloud component.
 

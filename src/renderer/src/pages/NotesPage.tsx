@@ -96,6 +96,8 @@ export function NotesPage() {
   const [entryDialog, setEntryDialog] = useState<EntryDialog | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [titleDraft, setTitleDraft] = useState<string | null>(null)
+  const [dragPath, setDragPath] = useState<string | null>(null)
+  const [rootDrop, setRootDrop] = useState(false)
   const titleInputRef = useRef<HTMLInputElement>(null)
   const titleSkipCommit = useRef(false)
   const currentFolder = selectedPath?.split('/').slice(0, -1).join('/') || ''
@@ -464,6 +466,31 @@ export function NotesPage() {
     showToast('Renamed', nextPath, 'success')
   }
 
+  const moveNote = async (sourcePath: string, targetDirectory: string): Promise<void> => {
+    if (!vaultPath) return
+    const currentDirectory = sourcePath.split('/').slice(0, -1).join('/')
+    if (currentDirectory === targetDirectory) return
+    try {
+      if (dirtyRef.current) await saveNow()
+      const nextPath = await window.notch.obsidian.move(vaultPath, sourcePath, targetDirectory)
+      if (selectedPath === sourcePath) {
+        pathRef.current = nextPath
+        setSelectedPath(nextPath)
+        update({ notes: { lastPath: nextPath } })
+      } else if (selectedPath?.startsWith(`${sourcePath}/`)) {
+        const rebased = `${nextPath}${selectedPath.slice(sourcePath.length)}`
+        pathRef.current = rebased
+        setSelectedPath(rebased)
+        update({ notes: { lastPath: rebased } })
+      }
+      await loadTree(true)
+      if (targetDirectory) setExpanded((current) => new Set(current).add(targetDirectory))
+      showToast('Moved', nextPath, 'success')
+    } catch (error) {
+      showToast('Could not move', error instanceof Error ? error.message : 'Try again.', 'error')
+    }
+  }
+
   const submitEntry = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
     if (!vaultPath || !entryDialog) return
@@ -615,8 +642,27 @@ export function NotesPage() {
             </div>
           ) : (
             <>
-              <div className="tree-toolbar">
-                <span className="tree-label">{noteCount} notes</span>
+              <div
+                className={`tree-toolbar ${dragPath ? 'is-root-target' : ''} ${rootDrop ? 'is-over' : ''}`}
+                onDragOver={(event) => {
+                  if (!dragPath && !event.dataTransfer.types.includes('text/plain')) return
+                  event.preventDefault()
+                  event.stopPropagation()
+                  event.dataTransfer.dropEffect = 'move'
+                  setRootDrop(true)
+                }}
+                onDragLeave={() => setRootDrop(false)}
+                onDrop={(event) => {
+                  const source = event.dataTransfer.getData('text/plain') || dragPath
+                  if (!source) return
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setRootDrop(false)
+                  setDragPath(null)
+                  void moveNote(source, '')
+                }}
+              >
+                <span className="tree-label">{dragPath ? 'Move to vault root' : `${noteCount} notes`}</span>
                 <div className="tree-toolbar-actions">
                   <button
                     className="link-button"
@@ -641,6 +687,10 @@ export function NotesPage() {
                 depth={0}
                 expanded={expanded}
                 selectedPath={selectedPath}
+                dragPath={dragPath}
+                onDragStartPath={setDragPath}
+                onDragEndPath={() => setDragPath(null)}
+                onMove={(source, target) => void moveNote(source, target)}
                 onToggleFolder={(path) =>
                   setExpanded((current) => {
                     const next = new Set(current)
@@ -926,6 +976,10 @@ function TreeNodes({
   depth,
   expanded,
   selectedPath,
+  dragPath,
+  onDragStartPath,
+  onDragEndPath,
+  onMove,
   onToggleFolder,
   onSelect,
   onRename,
@@ -936,6 +990,10 @@ function TreeNodes({
   depth: number
   expanded: Set<string>
   selectedPath: string | null
+  dragPath: string | null
+  onDragStartPath: (path: string) => void
+  onDragEndPath: () => void
+  onMove: (sourcePath: string, targetDirectory: string) => void
   onToggleFolder: (path: string) => void
   onSelect: (path: string) => void
   onRename: (node: VaultNode) => void
@@ -943,6 +1001,7 @@ function TreeNodes({
   onUnsupported: () => void
 }) {
   const [hovered, setHovered] = useState<string | null>(null)
+  const [dropTarget, setDropTarget] = useState<string | null>(null)
   return (
     <>
       {nodes.map((node) => {
@@ -951,8 +1010,37 @@ function TreeNodes({
           return (
             <div key={node.path} className="tree-group">
               <div
-                className="tree-row folder-row"
+                className={`tree-row folder-row ${dropTarget === node.path ? 'is-drop-target' : ''} ${dragPath === node.path ? 'is-dragging' : ''}`}
                 style={{ paddingLeft: 8 + depth * 13 }}
+                draggable
+                onDragStart={(event) => {
+                  event.dataTransfer.setData('text/plain', node.path)
+                  event.dataTransfer.effectAllowed = 'move'
+                  onDragStartPath(node.path)
+                }}
+                onDragEnd={onDragEndPath}
+                onDragOver={(event) => {
+                  if (dragPath === node.path) return
+                  event.preventDefault()
+                  event.stopPropagation()
+                  event.dataTransfer.dropEffect = 'move'
+                  setDropTarget(node.path)
+                }}
+                onDragLeave={(event) => {
+                  const next = event.relatedTarget as Node | null
+                  if (!next || !event.currentTarget.contains(next)) {
+                    setDropTarget((value) => (value === node.path ? null : value))
+                  }
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setDropTarget(null)
+                  const source = event.dataTransfer.getData('text/plain') || dragPath
+                  if (!source || source === node.path) return
+                  if (source === dragPath) onDragEndPath()
+                  onMove(source, node.path)
+                }}
                 onPointerEnter={() => setHovered(node.path)}
                 onPointerLeave={() => setHovered((value) => (value === node.path ? null : value))}
               >
@@ -983,6 +1071,10 @@ function TreeNodes({
                       depth={depth + 1}
                       expanded={expanded}
                       selectedPath={selectedPath}
+                      dragPath={dragPath}
+                      onDragStartPath={onDragStartPath}
+                      onDragEndPath={onDragEndPath}
+                      onMove={onMove}
                       onToggleFolder={onToggleFolder}
                       onSelect={onSelect}
                       onRename={onRename}
@@ -1000,8 +1092,15 @@ function TreeNodes({
         return (
           <div
             key={node.path}
-            className={`tree-row file-row ${selectedPath === node.path ? 'is-selected' : ''} ${!editable ? 'is-muted' : ''}`}
+            className={`tree-row file-row ${selectedPath === node.path ? 'is-selected' : ''} ${!editable ? 'is-muted' : ''} ${dragPath === node.path ? 'is-dragging' : ''}`}
             style={{ paddingLeft: 20 + depth * 13 }}
+            draggable
+            onDragStart={(event) => {
+              event.dataTransfer.setData('text/plain', node.path)
+              event.dataTransfer.effectAllowed = 'move'
+              onDragStartPath(node.path)
+            }}
+            onDragEnd={onDragEndPath}
             onPointerEnter={() => setHovered(node.path)}
             onPointerLeave={() => setHovered((value) => (value === node.path ? null : value))}
           >

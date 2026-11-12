@@ -737,6 +737,13 @@ function registerIpc(): void {
     return obsidian.renameEntry(requireVault(vaultPath), relativePath, nextName)
   })
 
+  ipcMain.handle(
+    'obsidian:move',
+    async (_event, vaultPath: string, relativePath: string, targetDirectory: string) => {
+      return obsidian.moveEntry(requireVault(vaultPath), relativePath, targetDirectory)
+    }
+  )
+
   ipcMain.handle('obsidian:trash', async (_event, vaultPath: string, relativePath: string) => {
     await obsidian.trashEntry(requireVault(vaultPath), relativePath)
   })

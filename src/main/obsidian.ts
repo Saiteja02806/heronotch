@@ -138,6 +138,35 @@ export async function renameEntry(vaultPath: string, relativePath: string, rawNa
   return toPosix(path.relative(vaultPath, target))
 }
 
+// Drag and drop moves an entry between folders, like Obsidian. The name is kept,
+// and a collision is refused rather than silently overwriting the other file.
+export async function moveEntry(
+  vaultPath: string,
+  relativePath: string,
+  targetDirectory: string
+): Promise<string> {
+  if (!relativePath || relativePath === '.') throw new Error('The vault root cannot be moved.')
+  const source = resolveSafe(vaultPath, relativePath)
+  const directory = resolveSafe(vaultPath, targetDirectory)
+  const stats = await fs.stat(source)
+
+  if (stats.isDirectory()) {
+    const relative = path.relative(source, directory)
+    if (!relative || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+      throw new Error('A folder cannot be moved inside itself.')
+    }
+  }
+
+  const destination = path.join(directory, path.basename(source))
+  if (destination === source) return toPosix(path.relative(vaultPath, source))
+  const exists = await fs.stat(destination).then(() => true).catch(() => false)
+  if (exists) throw new Error('Something with that name already exists there.')
+
+  await fs.mkdir(directory, { recursive: true })
+  await fs.rename(source, destination)
+  return toPosix(path.relative(vaultPath, destination))
+}
+
 export async function trashEntry(vaultPath: string, relativePath: string): Promise<void> {
   if (!relativePath || relativePath === '.') throw new Error('The vault root cannot be moved to trash.')
   const full = resolveSafe(vaultPath, relativePath)
