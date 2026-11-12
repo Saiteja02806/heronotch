@@ -1,0 +1,110 @@
+name: Release (unsigned)
+
+# Phase 1 distribution: no code signing.
+#
+# Builds the two website downloads and publishes them to GitHub Releases:
+#   Notch-Setup-<version>.exe     (NSIS installer)
+#   Notch-Portable-<version>.exe  (portable)
+#   SHA256SUMS.txt
+#
+# These binaries are unsigned on purpose. Readers of the release page are told
+# exactly what Windows will say and what Smart App Control means:
+#   docs/INSTALL.md
+#
+# Run this on GitHub Actions, not on a PC with Smart App Control enabled:
+# electron-builder builds a temporary unsigned installer while generating the
+# NSIS uninstaller, which Smart App Control blocks.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (for example v1.0.0). Leave empty to use the triggering ref.'
+        type: string
+        required: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-unsigned-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  release:
+    name: Build and publish unsigned release
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build portable and installer
+        shell: pwsh
+        run: |
+          npm run dist:win
+          if ($LASTEXITCODE -ne 0) { throw "Unsigned build failed (exit $LASTEXITCODE)" }
+
+      - name: Write SHA-256 checksums
+        shell: pwsh
+        run: |
+          $release = Join-Path $env:GITHUB_WORKSPACE 'release'
+          $files = Get-ChildItem $release -File -Filter '*.exe' | Sort-Object Name
+          if (-not $files) { throw 'No artifacts were produced.' }
+          $lines = $files | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $lines | Set-Content (Join-Path $release 'SHA256SUMS.txt') -Encoding ascii
+          Get-Content (Join-Path $release 'SHA256SUMS.txt')
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: Notch ${{ inputs.tag || github.ref_name }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          body: |
+            **Notch is not code-signed yet.** Windows will warn the first time you run it.
+
+            - If SmartScreen appears: **More info → Run anyway**.
+            - If Windows says *"An Application Control policy has blocked this file"*, this PC has **Smart App Control** enabled. It cannot be bypassed per app, and Notch will not run there until it is code-signed. See the install notes in `docs/INSTALL.md`.
+            - Verify your download against `SHA256SUMS.txt` (SHA-256, lower-case hex, two spaces, then the file name).
+
+            Reminders, Spotify, notes, posture and session shortcuts all run locally. The app makes no request to us.
+          files: |
+            release/Notch-Setup-*.exe
+            release/Notch-Portable-*.exe
+            release/SHA256SUMS.txt
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: notch-unsigned-${{ github.run_number }}
+          path: |
+            release/Notch-Setup-*.exe
+            release/Notch-Portable-*.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30

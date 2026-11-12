@@ -1,0 +1,266 @@
+name: Build and sign Notch
+
+# Produces the two website downloads:
+#   Notch-Setup-<version>.exe     (NSIS installer)
+#   Notch-Portable-<version>.exe  (portable)
+#
+# Every .exe, .dll and .node inside them is signed with an SSL.com IV/OV
+# certificate through eSigner CKA. Smart App Control evaluates each loaded
+# binary, so partial signing is not enough.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   ESIGNER_USERNAME      SSL.com account e-mail
+#   ESIGNER_PASSWORD      SSL.com account password
+#   ESIGNER_TOTP_SECRET   OAuth TOTP secret from eSigner enrolment
+#   ESIGNER_MODE          "product" for a real certificate ("sandbox" for tests)
+# Optional:
+#   ESIGNER_CERT_MATCH    Substring of the certificate subject, if the account
+#                         holds more than one code-signing certificate.
+#
+# Run this on GitHub Actions, not on a PC with Smart App Control enabled:
+# electron-builder builds a temporary unsigned installer while generating the
+# NSIS uninstaller, which Smart App Control blocks.
+
+on:
+  workflow_dispatch:
+    inputs:
+      unsigned:
+        description: 'Build without signing (artifacts are local-only, never publish)'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  # Pinned eSigner CKA release. Update both lines together.
+  ESIGNER_VERSION: '1.1.2'
+  ESIGNER_SHA256: '071ca52986795e7a00dfbd87cc5818d03af74daac32dfe32afd4171b676c4d13'
+  ESIGNER_HOME: 'C:\Users\runneradmin\eSignerCKA'
+  # Cloud signing is slower than a local key; keep the per-file ceiling generous.
+  SIGNTOOL_TIMEOUT: '1200000'
+
+jobs:
+  build:
+    name: Build, sign and verify
+    runs-on: windows-latest
+    timeout-minutes: 60
+    environment: release-signing
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # ---------------------------------------------------------------------
+      # Signing setup
+      # ---------------------------------------------------------------------
+      - name: Install eSigner CKA
+        if: ${{ !inputs.unsigned }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $zip = Join-Path $env:RUNNER_TEMP "esigner-$env:ESIGNER_VERSION.zip"
+          $url = "https://github.com/SSLcom/eSignerCKA/releases/download/v$env:ESIGNER_VERSION/SSL.COM-eSigner-CKA_$env:ESIGNER_VERSION.zip"
+          Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
+
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:ESIGNER_SHA256) {
+            throw "eSigner CKA checksum mismatch: $hash"
+          }
+
+          $extract = Join-Path $env:RUNNER_TEMP 'esigner-cka'
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          $installer = Get-ChildItem $extract -Recurse -Filter '*.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'eSigner CKA installer not found in archive.' }
+
+          New-Item -ItemType Directory -Force -Path $env:ESIGNER_HOME | Out-Null
+          $proc = Start-Process -FilePath $installer.FullName `
+            -ArgumentList "/CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /DIR=`"$env:ESIGNER_HOME`"" `
+            -Wait -PassThru
+          # 3010 means "installed, reboot required" — acceptable on a throwaway runner.
+          if ($proc.ExitCode -notin @(0, 3010)) {
+            throw "eSigner CKA installer failed with exit code $($proc.ExitCode)"
+          }
+
+          $tool = Join-Path $env:ESIGNER_HOME 'eSignerCKATool.exe'
+          if (-not (Test-Path $tool)) {
+            throw "eSignerCKATool.exe missing after install. Installed files: $(Get-ChildItem $env:ESIGNER_HOME -Recurse -File | Select-Object -ExpandProperty Name)"
+          }
+
+          # Register the key storage provider that routes CNG calls to eSigner.
+          foreach ($name in @('RegisterKSP.exe', 'eSignerCSP.Config.exe')) {
+            $exe = Get-ChildItem $env:ESIGNER_HOME -Recurse -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($exe) {
+              Write-Host "Running $($exe.FullName)"
+              & $exe.FullName | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "$name failed with exit code $LASTEXITCODE" }
+            }
+          }
+
+      - name: Configure eSigner account
+        if: ${{ !inputs.unsigned }}
+        shell: pwsh
+        env:
+          ESIGNER_USERNAME: ${{ secrets.ESIGNER_USERNAME }}
+          ESIGNER_PASSWORD: ${{ secrets.ESIGNER_PASSWORD }}
+          ESIGNER_TOTP_SECRET: ${{ secrets.ESIGNER_TOTP_SECRET }}
+          ESIGNER_MODE: ${{ secrets.ESIGNER_MODE }}
+          ESIGNER_CERT_MATCH: ${{ secrets.ESIGNER_CERT_MATCH }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tool = Join-Path $env:ESIGNER_HOME 'eSignerCKATool.exe'
+          $masterKey = Join-Path $env:ESIGNER_HOME 'master.key'
+
+          # "product" signs with the real certificate; "sandbox" is for testing.
+          $mode = if ($env:ESIGNER_MODE) { $env:ESIGNER_MODE } else { 'product' }
+
+          & $tool config -mode $mode `
+            -user $env:ESIGNER_USERNAME `
+            -pass $env:ESIGNER_PASSWORD `
+            -totp $env:ESIGNER_TOTP_SECRET `
+            -key $masterKey -r
+          if ($LASTEXITCODE -ne 0) { throw "eSigner config failed (exit $LASTEXITCODE)" }
+
+          & $tool unload
+          & $tool load
+          if ($LASTEXITCODE -ne 0) { throw "Loading the certificate failed (exit $LASTEXITCODE)" }
+
+          $all = @(Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert)
+          $certs = $all
+          if ($env:ESIGNER_CERT_MATCH) {
+            $certs = @($all | Where-Object { $_.Subject -match [regex]::Escape($env:ESIGNER_CERT_MATCH) })
+          }
+          if ($all.Count -eq 0) {
+            throw 'eSigner loaded no certificate into the Windows store.'
+          }
+          if ($certs.Count -eq 0) {
+            throw "No certificate matched ESIGNER_CERT_MATCH. Available subjects: $(($all | ForEach-Object Subject) -join '; ')"
+          }
+
+          $cert = $certs[0]
+          Write-Host "Using certificate: $($cert.Subject)"
+          Write-Host "Valid until:       $($cert.NotAfter)"
+
+          "THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          # electron-builder's bundled signtool does not work with eSigner CKA.
+          # Point it at the Windows SDK copy instead.
+          $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $signtool = Get-ChildItem $kits -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x86\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) {
+            $signtool = Get-ChildItem $kits -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+          }
+          if (-not $signtool) { throw 'signtool.exe not found in the Windows SDK.' }
+          Write-Host "Using signtool: $($signtool.FullName)"
+          "SIGNTOOL_PATH=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build signed installer and portable
+        if: ${{ !inputs.unsigned }}
+        shell: pwsh
+        run: |
+          npm run dist:signed -- `
+            "-c.win.signtoolOptions.certificateSha1=$env:THUMBPRINT" `
+            "-c.win.signtoolOptions.rfc3161TimeStampServer=http://ts.ssl.com"
+          if ($LASTEXITCODE -ne 0) { throw "Signed build failed (exit $LASTEXITCODE)" }
+
+      - name: Build unsigned artifacts
+        if: ${{ inputs.unsigned }}
+        shell: pwsh
+        run: |
+          npm run dist:win
+          if ($LASTEXITCODE -ne 0) { throw "Unsigned build failed (exit $LASTEXITCODE)" }
+
+      # ---------------------------------------------------------------------
+      # Release gate
+      # ---------------------------------------------------------------------
+      - name: Verify every binary is signed
+        if: ${{ !inputs.unsigned }}
+        shell: pwsh
+        run: |
+          npm run verify:signatures
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Signature verification failed. Do not publish these artifacts.'
+          }
+
+      - name: Write SHA-256 checksums
+        shell: pwsh
+        run: |
+          $release = Join-Path $env:GITHUB_WORKSPACE 'release'
+          $lines = Get-ChildItem $release -File -Filter '*.exe' |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+          if (-not $lines) { throw 'No artifacts were produced.' }
+          $lines | Set-Content (Join-Path $release 'SHA256SUMS.txt') -Encoding ascii
+          Get-Content (Join-Path $release 'SHA256SUMS.txt')
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: notch-${{ github.run_number }}
+          path: |
+            release/Notch-Setup-*.exe
+            release/Notch-Portable-*.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Show signature report
+        if: ${{ !inputs.unsigned }}
+        shell: pwsh
+        run: |
+          Get-ChildItem release -File -Filter '*.exe' | ForEach-Object {
+            $sig = Get-AuthenticodeSignature $_.FullName
+            "{0}  {1}  {2}" -f $_.Name, $sig.Status, $sig.SignerCertificate.Subject
+          }
+
+      - name: Upload eSigner logs
+        if: ${{ always() && !inputs.unsigned }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: esigner-logs-${{ github.run_number }}
+          path: C:\Users\runneradmin\AppData\Roaming\eSignerCKA\KSP
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Unload certificate
+        if: ${{ always() && !inputs.unsigned }}
+        shell: pwsh
+        run: |
+          # Cleanup must never fail the job.
+          try {
+            $tool = Join-Path $env:ESIGNER_HOME 'eSignerCKATool.exe'
+            if (Test-Path $tool) { & $tool unload }
+          } catch {
+            Write-Host "Unload skipped: $_"
+          }
+          exit 0

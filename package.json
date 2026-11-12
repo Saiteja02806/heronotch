@@ -1,0 +1,87 @@
+{
+  "name": "notch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A personal, Obsidian-first notch dashboard for Windows",
+  "main": "./out/main/index.js",
+  "author": "Notch",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder --win portable",
+    "dist:win": "npm run build && electron-builder --win portable nsis",
+    "dist:signed": "npm run build && electron-builder --win portable nsis -c.forceCodeSigning=true",
+    "verify:signatures": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-signatures.ps1",
+    "dist:installer": "npm run build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource/instrument-serif": "^5.3.0",
+    "@mediapipe/tasks-vision": "^1.2.2",
+    "dompurify": "^3.4.17",
+    "framer-motion": "^14.12.0",
+    "lucide-react": "^1.72.0",
+    "marked": "^18.2.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.3.0",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  },
+  "build": {
+    "appId": "com.notch.dashboard",
+    "productName": "Notch",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "resources/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signExts": [
+        ".dll",
+        ".node"
+      ],
+      "signtoolOptions": {
+        "signingHashAlgorithms": [
+          "sha256"
+        ],
+        "rfc3161TimeStampServer": "http://timestamp.digicert.com"
+      }
+    },
+    "portable": {
+      "artifactName": "Notch-Portable-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Notch",
+      "artifactName": "Notch-Setup-${version}.${ext}"
+    }
+  },
+  "type": "commonjs"
+}
