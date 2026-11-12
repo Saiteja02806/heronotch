@@ -94,6 +94,36 @@ function Shell() {
     if (!expanded) reopenBlockedUntil.current = Date.now() + 400
   }, [expanded])
 
+  useEffect(() => {
+    if (expanded) return
+    // Shape the window to the tab. Windows refuses to make the window shorter
+    // than ~38px, and the leftover transparent margin used to block the hover
+    // of whatever is behind it (a browser tab), so no hand cursor appeared
+    // there. Outside this rectangle the mouse now falls through.
+    const report = (): void => {
+      const bar = document.querySelector('.collapsed-bar')
+      if (!(bar instanceof HTMLElement)) return
+      const rect = bar.getBoundingClientRect()
+      const x = Math.max(0, Math.round(rect.x - 4))
+      const y = Math.max(0, Math.round(rect.y - 4))
+      window.notch.setShape({
+        x,
+        y,
+        width: Math.max(1, Math.min(window.innerWidth, Math.round(rect.x + rect.width + 4)) - x),
+        height: Math.max(1, Math.round(rect.y + rect.height + 4) - y)
+      })
+    }
+    report()
+    const observer = new ResizeObserver(report)
+    const bar = document.querySelector('.collapsed-bar')
+    if (bar) observer.observe(bar)
+    window.addEventListener('resize', report)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', report)
+    }
+  }, [expanded, state.settings.notchStyle])
+
   const armExpand = (): void => {
     if (expanded || expandTimer.current) return
     if (Date.now() < reopenBlockedUntil.current) return
@@ -120,7 +150,10 @@ function Shell() {
   const onPointerLeave = (): void => {
     const wasInside = pointerInside.current
     pointerInside.current = false
-    if (expandTimer.current) clearTimeout(expandTimer.current)
+    if (expandTimer.current) {
+      clearTimeout(expandTimer.current)
+      expandTimer.current = null
+    }
     if (!expanded) return
     if (!wasInside) return
     if (pinned) return

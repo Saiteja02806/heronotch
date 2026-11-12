@@ -24,6 +24,7 @@ const api: NotchApi = {
   setState: (patch) => ipcRenderer.invoke('app:set-state', patch) as Promise<AppState>,
   getVersion: () => ipcRenderer.invoke('app:version') as Promise<string>,
   setExpanded: (value) => ipcRenderer.invoke('notch:set-expanded', value) as Promise<boolean>,
+  setShape: (rect) => ipcRenderer.send('notch:shape', rect),
   getExpanded: () => ipcRenderer.invoke('notch:get-expanded') as Promise<boolean>,
   getBackdrop: () => ipcRenderer.invoke('notch:get-backdrop') as Promise<string | null>,
   quit: () => ipcRenderer.send('app:quit'),

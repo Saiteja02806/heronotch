@@ -254,6 +254,7 @@ export interface NotchApi {
   getVersion: () => Promise<string>
   setState: (patch: AppStatePatch) => Promise<AppState>
   setExpanded: (expanded: boolean) => Promise<boolean>
+  setShape: (rect: { x: number; y: number; width: number; height: number } | null) => void
   getExpanded: () => Promise<boolean>
   getBackdrop: () => Promise<string | null>
   quit: () => void

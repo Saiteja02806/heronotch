@@ -30,13 +30,13 @@ if (process.env.NOTCH_CAPTURE) {
 }
 
 const COLLAPSED_SIZES: Record<NotchStyle, { width: number; height: number }> = {
-  full: { width: 420, height: 52 },
-  compact: { width: 340, height: 46 },
-  minimal: { width: 220, height: 40 },
-  pill: { width: 340, height: 46 },
-  'pill-tiny': { width: 140, height: 36 },
-  'notch-wide': { width: 260, height: 42 },
-  'notch-micro': { width: 130, height: 32 }
+  full: { width: 412, height: 44 },
+  compact: { width: 332, height: 38 },
+  minimal: { width: 212, height: 34 },
+  pill: { width: 332, height: 42 },
+  'pill-tiny': { width: 132, height: 32 },
+  'notch-wide': { width: 252, height: 36 },
+  'notch-micro': { width: 122, height: 26 }
 }
 const EXPANDED_WIDTH = 1160
 const EXPANDED_HEIGHT = 632
@@ -46,6 +46,7 @@ let tray: Tray | null = null
 let expanded = false
 let expandToken = 0
 let expanding: Promise<boolean> | null = null
+let collapsedShape: Electron.Rectangle | null = null
 let lastWatchedVault: string | null = null
 let reminderTimers = new Map<string, NodeJS.Timeout>()
 let reminderReschedule: NodeJS.Timeout | null = null
@@ -133,6 +134,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     expanded = true
     backdrop.suspendBackdropCapture()
     applyBounds()
+    applyWindowShape()
     mainWindow.setAlwaysOnTop(true, 'screen-saver')
     if (notify) {
       if (cached) mainWindow.webContents.send('notch:backdrop', { image: cached })
@@ -161,6 +163,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
   syncEscapeShortcut()
   backdrop.resumeBackdropCapture()
   applyBounds()
+  applyWindowShape()
   if (notify && mainWindow) {
     mainWindow.webContents.send('notch:expanded', { expanded: false })
   }
@@ -194,6 +197,28 @@ function nudgePointerHover(): void {
     x: Math.round(cursor.x - bounds.x),
     y: Math.round(cursor.y - bounds.y)
   })
+}
+
+// `setShape` limits both drawing and mouse input to the given window region.
+// The collapsed window is wider/taller than the visible tab (Windows will not
+// make it shorter than ~38px), and those invisible margins used to swallow the
+// hover of whatever sat underneath — usually a browser tab, which therefore lost
+// its hand cursor. Shaping the window to the tab lets the rest of the desktop
+// receive the mouse normally while the tab keeps working.
+function applyWindowShape(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  try {
+    const bounds = mainWindow.getBounds()
+    const full = { x: 0, y: 0, width: bounds.width + 2, height: bounds.height + 2 }
+    if (expanded || !collapsedShape) {
+      mainWindow.setShape([full])
+      return
+    }
+    mainWindow.setShape([collapsedShape])
+  } catch {
+    // setShape is experimental; if it is unavailable the window still works,
+    // it just keeps its rectangular input area.
+  }
 }
 
 function revealWindow(reason: string): void {
@@ -387,6 +412,11 @@ function createWindow(): void {
 
   mainWindow.setAlwaysOnTop(true, 'screen-saver')
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  // Windows/Electron otherwise clamps the collapsed window to ~40px high,
+  // leaving a strip below the tab that swallowed hover from the window
+  // underneath. The tab only needs 26.
+  mainWindow.setMinimumSize(1, 1)
+  applyBounds()
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) void shell.openExternal(url)
@@ -659,6 +689,10 @@ function registerIpc(): void {
   ipcMain.handle('notch:set-expanded', (_event, value: boolean) => setExpanded(Boolean(value)))
   ipcMain.handle('notch:get-expanded', () => expanded)
   ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())
+  ipcMain.on('notch:shape', (_event, rect: Electron.Rectangle | null) => {
+    if (rect && rect.width > 0 && rect.height > 0) collapsedShape = rect
+    if (!expanded) applyWindowShape()
+  })
   ipcMain.handle('notch:reposition', () => {
     applyBounds()
     return true
