@@ -127,29 +127,32 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     if (expanded) return true
     if (expanding) return expanding
     const token = ++expandToken
-    expanding = (async () => {
-      const image = backdrop.getCachedBackdrop() || (await backdrop.captureDesktopBackdrop())
-      if (token !== expandToken || !mainWindow) {
-        expanding = null
-        return expanded
-      }
-      expanded = true
-      backdrop.suspendBackdropCapture()
-      applyBounds()
-      mainWindow.setAlwaysOnTop(true, 'screen-saver')
-      if (notify) {
-        mainWindow.webContents.send('notch:backdrop', { image })
-        mainWindow.webContents.send('notch:expanded', { expanded: true })
-      }
-      mainWindow.showInactive()
-      expanding = null
-      syncEscapeShortcut()
-      return true
-    })().catch(() => {
-      expanding = null
-      return expanded
-    })
-    return expanding
+    const cached = backdrop.getCachedBackdrop()
+    // Open now. The blurred snapshot is only decoration, and waiting for it
+    // meant a failed or slow capture left the notch stuck shut.
+    expanded = true
+    backdrop.suspendBackdropCapture()
+    applyBounds()
+    mainWindow.setAlwaysOnTop(true, 'screen-saver')
+    if (notify) {
+      if (cached) mainWindow.webContents.send('notch:backdrop', { image: cached })
+      mainWindow.webContents.send('notch:expanded', { expanded: true })
+    }
+    mainWindow.showInactive()
+    syncEscapeShortcut()
+    expanding = null
+
+    if (notify && !cached) {
+      const target = mainWindow
+      void backdrop
+        .captureDesktopBackdrop(true)
+        .then((image) => {
+          if (!image || token !== expandToken || !expanded) return
+          if (!target.isDestroyed()) target.webContents.send('notch:backdrop', { image })
+        })
+        .catch(() => undefined)
+    }
+    return true
   }
 
   expandToken += 1
@@ -164,7 +167,33 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
   setTimeout(() => {
     if (!expanded) backdrop.refreshBackdrop()
   }, 550)
+  setTimeout(() => nudgePointerHover(), 160)
   return false
+}
+
+// After the window shrinks back to the tab, Chromium keeps the last pointer
+// position clamped to the old (full screen) viewport. If the pointer is parked
+// on the tab it never sends a fresh move, so the tab shows no hover state and
+// the OS keeps the arrow cursor even though the pointer is right there. Feed
+// one mouse move in from the real cursor position so hover and the hand cursor
+// are correct without the user having to wiggle the mouse.
+function nudgePointerHover(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || expanded || !mainWindow.isVisible()) return
+  const cursor = screen.getCursorScreenPoint()
+  const bounds = mainWindow.getBounds()
+  if (
+    cursor.x < bounds.x ||
+    cursor.y < bounds.y ||
+    cursor.x >= bounds.x + bounds.width ||
+    cursor.y >= bounds.y + bounds.height
+  ) {
+    return
+  }
+  mainWindow.webContents.sendInputEvent({
+    type: 'mouseMove',
+    x: Math.round(cursor.x - bounds.x),
+    y: Math.round(cursor.y - bounds.y)
+  })
 }
 
 function revealWindow(reason: string): void {

@@ -32,6 +32,7 @@ function Shell() {
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pointerInside = useRef(false)
+  const reopenBlockedUntil = useRef(0)
   const accent = ACCENTS[state.settings.accent]
 
   useEffect(() => {
@@ -84,20 +85,36 @@ function Shell() {
     collapseTimer.current = null
   }
 
+  useEffect(() => {
+    // After a collapse the pointer is often still sitting on the notch (for
+    // example: hover to open, press Esc). No pointerenter fires again, so hover
+    // would look dead until the cursor leaves and returns. Re-arming on the
+    // next pointermove fixes that, and the short block stops Esc from reopening
+    // the notch immediately.
+    if (!expanded) reopenBlockedUntil.current = Date.now() + 400
+  }, [expanded])
+
+  const armExpand = (): void => {
+    if (expanded || expandTimer.current) return
+    if (Date.now() < reopenBlockedUntil.current) return
+    expandTimer.current = setTimeout(() => {
+      expandTimer.current = null
+      setExpanded(true)
+    }, state.settings.hoverDelay)
+  }
+
   const onPointerEnter = (): void => {
     pointerInside.current = true
     if (expanded) {
       if (collapseTimer.current) clearTimeout(collapseTimer.current)
       return
     }
-    if (expandTimer.current) clearTimeout(expandTimer.current)
-    expandTimer.current = setTimeout(() => {
-      setExpanded(true)
-    }, state.settings.hoverDelay)
+    armExpand()
   }
 
   const onPointerMove = (): void => {
     pointerInside.current = true
+    armExpand()
   }
 
   const onPointerLeave = (): void => {
