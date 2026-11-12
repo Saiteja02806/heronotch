@@ -143,16 +143,6 @@ Notes are read and written on the local filesystem by the Electron main process.
 
 If the folder moves or is deleted, choose it again in **Settings → Notes**.
 
-## AI enhance and chat
-
-Notch can enhance a note or answer questions about it using NVIDIA's hosted models.
-
-1. Create a free API key at [build.nvidia.com](https://build.nvidia.com/).
-2. Paste it in **Settings → AI**. Set the **Model** to the model id shown on that model's page; the default is `nvidia/llama-3.1-nemotron-70b-instruct`.
-3. Open a note and press **Enhance** in the editor toolbar.
-
-The drawer offers **Improve**, **Summarize**, **Shorten**, **Fix grammar** and **Continue**, plus a chat box. Assistant replies can be inserted at the cursor or replace the whole note. Only the note you are editing is sent, and only when you press a quick action or send a message; the key is stored in the local app state.
-
 ## Spotify
 
 There are two levels of connection:

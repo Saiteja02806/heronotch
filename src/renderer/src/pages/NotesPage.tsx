@@ -23,12 +23,9 @@ import {
   RefreshCw,
   Save,
   Search,
-  Send,
-  Sparkles,
   SquarePen,
   Trash2,
-  Wand2,
-  X
+  Wand2
 } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
@@ -72,41 +69,6 @@ function countNotes(nodes: VaultNode[]): number {
   return total
 }
 
-interface AiPanelMessage {
-  role: 'user' | 'assistant'
-  content: string
-  replace?: boolean
-}
-
-const AI_ACTIONS = [
-  {
-    label: 'Improve',
-    prompt:
-      'Rewrite the note to be clearer and more natural. Keep the meaning, tone and Markdown structure. Return only the rewritten note.',
-    replace: true
-  },
-  {
-    label: 'Summarize',
-    prompt: 'Summarize the note in 4–6 concise bullet points.'
-  },
-  {
-    label: 'Shorten',
-    prompt:
-      'Rewrite the note more concisely without losing important details. Return only the rewritten note.',
-    replace: true
-  },
-  {
-    label: 'Fix grammar',
-    prompt:
-      'Fix grammar, spelling and punctuation. Keep the wording as close to the original as possible. Return only the corrected note.',
-    replace: true
-  },
-  {
-    label: 'Continue',
-    prompt: 'Continue the note naturally from where it ends. Return only the new text, not the existing text.'
-  }
-]
-
 export function NotesPage() {
   const {
     state,
@@ -115,8 +77,7 @@ export function NotesPage() {
     showToast,
     pendingNote,
     setPendingNote,
-    vaultRevision,
-    openSettings
+    vaultRevision
   } = useApp()
   const { chooseVault } = useVaultPicker()
   const vaultPath = state.settings.vaultPath
@@ -138,11 +99,6 @@ export function NotesPage() {
   const [titleDraft, setTitleDraft] = useState<string | null>(null)
   const [dragPath, setDragPath] = useState<string | null>(null)
   const [rootDrop, setRootDrop] = useState(false)
-  const [aiOpen, setAiOpen] = useState(false)
-  const [aiMessages, setAiMessages] = useState<AiPanelMessage[]>([])
-  const [aiInput, setAiInput] = useState('')
-  const [aiBusy, setAiBusy] = useState(false)
-  const aiEndRef = useRef<HTMLDivElement>(null)
   const titleInputRef = useRef<HTMLInputElement>(null)
   const titleSkipCommit = useRef(false)
   const currentFolder = selectedPath?.split('/').slice(0, -1).join('/') || ''
@@ -243,17 +199,6 @@ export function NotesPage() {
     // selectFile is stable through refs; pendingNote is an intentional one-shot command.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingNote])
-
-  useEffect(() => {
-    if (!aiOpen) return
-    aiEndRef.current?.scrollIntoView({ block: 'end' })
-  }, [aiMessages, aiBusy, aiOpen])
-
-  useEffect(() => {
-    // A conversation belongs to the note it was started on.
-    setAiMessages([])
-    setAiInput('')
-  }, [selectedPath])
 
   const saveNow = useCallback(async (): Promise<void> => {
     const path = pathRef.current
@@ -547,67 +492,6 @@ export function NotesPage() {
     }
   }
 
-  const askAi = async (prompt: string, visible: string, replace: boolean): Promise<void> => {
-    const instruction = prompt.trim()
-    if (!instruction || aiBusy) return
-    if (!state.settings.aiApiKey.trim()) {
-      showToast('Add your NVIDIA API key', 'Settings → AI → API key.', 'error')
-      return
-    }
-    if (replace && !content.trim()) {
-      showToast('Nothing to enhance yet', 'Write something in the note first.', 'default')
-      return
-    }
-    const userMessage: AiPanelMessage = { role: 'user', content: visible || instruction }
-    setAiMessages((current) => [...current, userMessage])
-    setAiInput('')
-    setAiBusy(true)
-    try {
-      const system = [
-        'You are an assistant inside a Markdown note editor called Notch.',
-        'Use the note below as context. Be concise and practical.',
-        'When asked to rewrite, improve, shorten or fix the note, return only the rewritten Markdown with no preamble and no code fences.',
-        '',
-        '<note>',
-        content.slice(0, 14000),
-        '</note>'
-      ].join('\n')
-      const history = aiMessages.slice(-6).map((message) => ({
-        role: message.role,
-        content: message.content
-      }))
-      const response = await window.notch.ai.chat([
-        { role: 'system', content: system },
-        ...history,
-        { role: 'user', content: instruction }
-      ])
-      setAiMessages((current) => [...current, { role: 'assistant', content: response, replace }])
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'The request failed.'
-      setAiMessages((current) => [...current, { role: 'assistant', content: `⚠ ${message}` }])
-      showToast('AI request failed', message, 'error')
-    } finally {
-      setAiBusy(false)
-    }
-  }
-
-  const insertAiText = (text: string): void => {
-    const textarea = textareaRef.current
-    const start = textarea?.selectionStart ?? content.length
-    const end = textarea?.selectionEnd ?? content.length
-    onChangeContent(`${content.slice(0, start)}${text}${content.slice(end)}`)
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus()
-      const position = start + text.length
-      textareaRef.current?.setSelectionRange(position, position)
-    })
-  }
-
-  const replaceNoteWithAi = (text: string): void => {
-    onChangeContent(text)
-    showToast('Note replaced', 'Review the result and edit anything that feels off.', 'success')
-  }
-
   const submitEntry = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
     if (!vaultPath || !entryDialog) return
@@ -705,7 +589,7 @@ export function NotesPage() {
   }
 
   return (
-    <div className={`notes-page ${aiOpen ? 'is-ai-open' : ''}`}>
+    <div className="notes-page">
       <aside className="notes-sidebar">
         <div className="sidebar-head">
           <div className="sidebar-vault">
@@ -983,13 +867,6 @@ export function NotesPage() {
                 <button onClick={() => applyFormat('**')} title="Bold (Ctrl+B)"><Bold size={14} /></button>
                 <button onClick={() => applyFormat('_')} title="Italic (Ctrl+I)"><Italic size={14} /></button>
                 <button onClick={() => applyFormat('## ', '', 'Heading')} title="Heading"><Heading2 size={14} /></button>
-                <button
-                  className={`ai-toolbar-button ${aiOpen ? 'is-on' : ''}`}
-                  onClick={() => setAiOpen((value) => !value)}
-                  title="Enhance with AI"
-                >
-                  <Sparkles size={14} /> <span>Enhance</span>
-                </button>
                 <button onClick={() => applyFormat('- ', '', 'List item')} title="Bullet list"><List size={14} /></button>
                 <button onClick={() => applyFormat('- [ ] ', '', 'Task')} title="Checklist"><CheckSquare size={14} /></button>
                 <button onClick={() => applyFormat('`', '`', 'code')} title="Inline code"><Code2 size={14} /></button>
@@ -1030,90 +907,6 @@ export function NotesPage() {
           </div>
         )}
       </main>
-
-      {aiOpen && (
-        <aside className="ai-drawer">
-          <div className="ai-drawer-head">
-            <span className="eyebrow"><Sparkles size={12} /> Enhance</span>
-            <button className="icon-button subtle" onClick={() => setAiOpen(false)} title="Close">
-              <X size={13} />
-            </button>
-          </div>
-          {!state.settings.aiApiKey.trim() ? (
-            <div className="ai-locked">
-              <Sparkles size={22} />
-              <p>Add your free NVIDIA API key to enhance and chat with this note.</p>
-              <button className="primary-button" onClick={() => openSettings('ai')}>
-                Open AI settings
-              </button>
-            </div>
-          ) : (
-            <>
-              <div className="ai-quick">
-                {AI_ACTIONS.map((action) => (
-                  <button
-                    key={action.label}
-                    onClick={() => void askAi(action.prompt, action.label, Boolean(action.replace))}
-                    disabled={aiBusy}
-                  >
-                    {action.label}
-                  </button>
-                ))}
-              </div>
-              <div className="ai-messages">
-                {aiMessages.length === 0 && !aiBusy && (
-                  <div className="ai-hint">
-                    Ask about this note, or start with a quick action. The note is sent to NVIDIA with
-                    each request.
-                  </div>
-                )}
-                {aiMessages.map((message, index) => (
-                  <div key={index} className={`ai-msg ${message.role}`}>
-                    <div className="ai-msg-text">{message.content}</div>
-                    {message.role === 'assistant' && !message.content.startsWith('⚠') && (
-                      <div className="ai-msg-actions">
-                        <button onClick={() => insertAiText(message.content)}>Insert</button>
-                        {message.replace && (
-                          <button onClick={() => replaceNoteWithAi(message.content)}>Replace note</button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {aiBusy && (
-                  <div className="ai-msg assistant is-thinking">
-                    <Loader2 size={12} className="spin" /> Thinking…
-                  </div>
-                )}
-                <div ref={aiEndRef} />
-              </div>
-              <form
-                className="ai-compose"
-                onSubmit={(event) => {
-                  event.preventDefault()
-                  void askAi(aiInput, aiInput, false)
-                }}
-              >
-                <textarea
-                  value={aiInput}
-                  onChange={(event) => setAiInput(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' && !event.shiftKey) {
-                      event.preventDefault()
-                      event.currentTarget.form?.requestSubmit()
-                    }
-                  }}
-                  placeholder="Ask about this note…"
-                  rows={2}
-                />
-                <button type="submit" className="ai-send" disabled={aiBusy || !aiInput.trim()} title="Send">
-                  <Send size={13} />
-                </button>
-              </form>
-            </>
-          )}
-        </aside>
-      )}
 
       <Modal
         open={Boolean(entryDialog)}

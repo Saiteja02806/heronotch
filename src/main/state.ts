@@ -18,9 +18,7 @@ const DEFAULT_SETTINGS: Settings = {
   spotifyClientId: '',
   spotifyRedirectPort: 43821,
   userName: '',
-  pinOnOpen: false,
-  aiApiKey: '',
-  aiModel: 'nvidia/llama-3.1-nemotron-70b-instruct'
+  pinOnOpen: false
 }
 
 function localDayKey(date = new Date()): string {

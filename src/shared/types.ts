@@ -29,15 +29,6 @@ export interface Settings {
   spotifyRedirectPort: number
   userName: string
   pinOnOpen: boolean
-  aiApiKey: string
-  aiModel: string
-}
-
-export type AiRole = 'system' | 'user' | 'assistant'
-
-export interface AiChatMessage {
-  role: AiRole
-  content: string
 }
 
 export interface TimerState {
@@ -293,9 +284,6 @@ export interface NotchApi {
     reveal: (vaultPath: string, relativePath: string | null) => Promise<void>
     openFile: (vaultPath: string, relativePath: string) => Promise<void>
     search: (vaultPath: string, query: string) => Promise<NoteSearchResult[]>
-  }
-  ai: {
-    chat: (messages: AiChatMessage[], model?: string) => Promise<string>
   }
   spotify: {
     status: () => Promise<SpotifyStatus>

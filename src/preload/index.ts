@@ -66,9 +66,6 @@ const api: NotchApi = {
     search: (vaultPath, query) =>
       ipcRenderer.invoke('obsidian:search', vaultPath, query) as Promise<NoteSearchResult[]>
   },
-  ai: {
-    chat: (messages, model) => ipcRenderer.invoke('ai:chat', { messages, model }) as Promise<string>
-  },
   spotify: {
     status: () => ipcRenderer.invoke('spotify:status') as Promise<SpotifyStatus>,
     connect: () => ipcRenderer.invoke('spotify:connect') as Promise<SpotifyStatus>,

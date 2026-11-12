@@ -18,9 +18,8 @@ import {
 import { execFile, execFileSync } from 'node:child_process'
 import { appendFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { AiChatMessage, AppState, AppStatePatch, NotchStyle } from '../shared/types'
+import type { AppState, AppStatePatch, NotchStyle } from '../shared/types'
 import * as backdrop from './backdrop'
-import * as ai from './ai'
 import * as localMedia from './localMedia'
 import * as obsidian from './obsidian'
 import * as sessions from './sessions'
@@ -656,9 +655,6 @@ function requireVault(requested?: string): string {
 function registerIpc(): void {
   ipcMain.handle('app:get-state', () => getState())
   ipcMain.handle('app:version', () => app.getVersion())
-  ipcMain.handle('ai:chat', async (_event, payload: { messages?: AiChatMessage[]; model?: string }) => {
-    return ai.chat(Array.isArray(payload?.messages) ? payload.messages : [], payload?.model)
-  })
 
   ipcMain.handle('app:set-state', (_event, patch: AppStatePatch) => {
     const before = getState()
