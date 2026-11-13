@@ -31,12 +31,14 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent
+  type MouseEvent as ReactMouseEvent,
+  type UIEvent as ReactUIEvent
 } from 'react'
 import type { NoteSearchResult, VaultNode } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
@@ -68,6 +70,98 @@ function countNotes(nodes: VaultNode[]): number {
     else if (node.ext === '.md' || node.ext === '.markdown') total += 1
   }
   return total
+}
+
+// ---------------------------------------------------------------------------
+// Live editor rendering
+//
+// The textarea stays the input engine (caret, selection, undo) but its glyphs
+// are transparent. A mirror layer underneath re-renders the same characters
+// with Markdown formatting: real checkbox boxes, bold, headings, code. Every
+// source character keeps its place — markers are kept but dimmed, the checkbox
+// characters are covered by a drawn box — so the mirror and the caret line up
+// exactly, line for line.
+// ---------------------------------------------------------------------------
+
+const escapeLive = (text: string): string =>
+  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+const LIVE_INLINE_SOURCE =
+  '(`+[^`]*?`+)|(\\*\\*[^*]+\\*\\*)|(__[^_]+__)|(\\*[^*\\s][^*]*?\\*)|(_[^_\\s][^_]*?_)|(~~[^~]+~~)|(!?\\[[^\\]]*\\]\\([^)]*\\))|(\\[\\[[^\\]]+\\]\\])'
+
+function renderLiveInline(text: string, depth = 0): string {
+  if (depth > 2) return escapeLive(text)
+  // A fresh regex per call: the function recurses (formatting inside
+  // formatting) and a shared /g regex would have its lastIndex clobbered by
+  // the inner call, looping forever.
+  const inline = new RegExp(LIVE_INLINE_SOURCE, 'g')
+  let out = ''
+  let last = 0
+  let match: RegExpExecArray | null
+  while ((match = inline.exec(text))) {
+    out += escapeLive(text.slice(last, match.index))
+    const token = match[0]
+    let handled = true
+    if (match[1]) {
+      // `code`
+      const parts = /^(`+)([^`]*)(`+)$/.exec(token)
+      out += `<span class="lm-marker">${escapeLive(parts?.[1] ?? '')}</span><span class="lm-code">${escapeLive(parts?.[2] ?? '')}</span><span class="lm-marker">${escapeLive(parts?.[3] ?? '')}</span>`
+    } else if (match[2] || match[3]) {
+      // **bold** / __bold__
+      const marker = match[2] ? '**' : '__'
+      const inner = token.slice(marker.length, -marker.length)
+      out += `<span class="lm-marker">${marker}</span><span class="lm-b">${renderLiveInline(inner, depth + 1)}</span><span class="lm-marker">${marker}</span>`
+    } else if (match[4] || match[5]) {
+      // *italic* / _italic_
+      const marker = match[4] ? '*' : '_'
+      const inner = token.slice(marker.length, -marker.length)
+      out += `<span class="lm-marker">${marker}</span><span class="lm-i">${renderLiveInline(inner, depth + 1)}</span><span class="lm-marker">${marker}</span>`
+    } else if (match[6]) {
+      // ~~strike~~
+      out += `<span class="lm-marker">~~</span><span class="lm-s">${renderLiveInline(token.slice(2, -2), depth + 1)}</span><span class="lm-marker">~~</span>`
+    } else if (match[7]) {
+      // [text](url)
+      const parts = /^(!?)\[([^\]]*)\]\(([^)]*)\)$/.exec(token)
+      out += `<span class="lm-marker">${escapeLive(parts?.[1] ?? '')}[</span><span class="lm-link">${renderLiveInline(parts?.[2] ?? '', depth + 1)}</span><span class="lm-marker">](${escapeLive(parts?.[3] ?? '')})</span>`
+    } else if (match[8]) {
+      // [[wiki link]]
+      out += `<span class="lm-marker">[[</span><span class="lm-wiki">${renderLiveInline(token.slice(2, -2), depth + 1)}</span><span class="lm-marker">]]</span>`
+    } else {
+      handled = false
+    }
+    if (!handled) out += escapeLive(token)
+    last = match.index + token.length
+  }
+  out += escapeLive(text.slice(last))
+  return out
+}
+
+function renderLiveLine(line: string, checkboxIndex: number | null): string {
+  let match = /^(#{1,6})(\s+)([\s\S]*)$/.exec(line)
+  if (match) {
+    return `<span class="lm-marker">${escapeLive(match[1] + match[2])}</span><span class="lm-h">${renderLiveInline(match[3])}</span>`
+  }
+  match = /^(\s*)(>+)(\s?)([\s\S]*)$/.exec(line)
+  if (match) {
+    return `<span class="lm-marker">${escapeLive(match[1] + match[2] + match[3])}</span><span class="lm-quote">${renderLiveInline(match[4])}</span>`
+  }
+  if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(line)) {
+    return `<span class="lm-marker">${escapeLive(line)}</span>`
+  }
+  match = /^(\s*)([-*+]|\d+\.)(\s+)([\s\S]*)$/.exec(line)
+  if (match) {
+    const marker = `<span class="lm-marker">${escapeLive(match[1] + match[2] + match[3])}</span>`
+    const rest = match[4]
+    if (checkboxIndex !== null) {
+      const box = /^(\[[ xX]\])(\s?)([\s\S]*)$/.exec(rest)
+      if (box) {
+        const checked = box[1][1] !== ' '
+        return `${marker}<span class="lm-box${checked ? ' is-checked' : ''}" data-ci="${checkboxIndex}">${escapeLive(box[1] + box[2])}</span>${renderLiveInline(box[3])}`
+      }
+    }
+    return marker + renderLiveInline(rest)
+  }
+  return renderLiveInline(line)
 }
 
 export function NotesPage() {
@@ -359,6 +453,29 @@ export function NotesPage() {
     return DOMPurify.sanitize(raw, { ADD_ATTR: ['target'] })
   }, [content])
 
+  // Line-based render of the note for the live editor overlay. Each source
+  // line becomes one .lm-line element, so blank lines and wrapped lines keep
+  // the exact geometry of the textarea above them.
+  const mirrorHtml = useMemo(() => {
+    let inFence = false
+    let checkboxIndex = 0
+    return content
+      .split('\n')
+      .map((line) => {
+        if (/^\s*(`{3,}|~{3,})/.test(line)) {
+          inFence = !inFence
+          return `<div class="lm-line"><span class="lm-marker">${escapeLive(line)}</span></div>`
+        }
+        if (inFence) {
+          return `<div class="lm-line"><span class="lm-code">${escapeLive(line)}</span></div>`
+        }
+        const isChecklist = /^\s*[-*+]\s+\[[ xX]\]/.test(line)
+        const index = isChecklist ? checkboxIndex++ : null
+        return `<div class="lm-line">${renderLiveLine(line, index)}</div>`
+      })
+      .join('')
+  }, [content])
+
   const applyFormat = (before: string, after = before, placeholder = 'text'): void => {
     const textarea = textareaRef.current
     if (!textarea) return
@@ -557,6 +674,27 @@ export function NotesPage() {
     }
   }
 
+  // Toggle the nth checklist item by editing the source lines directly. Used
+  // by both the live editor (clicking a drawn box) and the Preview pane.
+  const toggleChecklistAt = useCallback(
+    (index: number): void => {
+      const lines = content.split('\n')
+      let seen = 0
+      for (let i = 0; i < lines.length; i += 1) {
+        const match = lines[i].match(/^(\s*[-*+]\s+)\[([ xX])\](.*)$/)
+        if (!match) continue
+        if (seen === index) {
+          const checked = match[2].toLowerCase() === 'x'
+          lines[i] = `${match[1]}[${checked ? ' ' : 'x'}]${match[3]}`
+          onChangeContent(lines.join('\n'))
+          return
+        }
+        seen += 1
+      }
+    },
+    [content, onChangeContent]
+  )
+
   const togglePreviewTask = (event: ReactMouseEvent<HTMLDivElement>): void => {
     const target = event.target as HTMLElement
     const item = target.closest('li')
@@ -576,19 +714,85 @@ export function NotesPage() {
     )
     const index = items.indexOf(item)
     if (index < 0) return
-    const lines = content.split('\n')
-    let seen = 0
-    for (let i = 0; i < lines.length; i += 1) {
-      const match = lines[i].match(/^(\s*)- \[([ xX])\](.*)$/)
-      if (!match) continue
-      if (seen === index) {
-        const checked = match[2].toLowerCase() === 'x'
-        lines[i] = `${match[1]}- [${checked ? ' ' : 'x'}]${match[3]}`
-        onChangeContent(lines.join('\n'))
-        return
-      }
-      seen += 1
+    toggleChecklistAt(index)
+  }
+
+  // ---- Live editor overlay: geometry, click-to-tick, hover cursor, scroll ----
+
+  const mirrorRef = useRef<HTMLDivElement>(null)
+  const boxRectsRef = useRef<{ x: number; y: number; w: number; h: number; index: number }[]>([])
+
+  // Checkbox hit boxes in the mirror's content coordinates. Content-space
+  // coordinates survive scrolling, so they only need re-measuring when the
+  // content or layout changes.
+  const measureBoxes = useCallback(() => {
+    const mirror = mirrorRef.current
+    if (!mirror) {
+      boxRectsRef.current = []
+      return
     }
+    const mr = mirror.getBoundingClientRect()
+    const boxes: { x: number; y: number; w: number; h: number; index: number }[] = []
+    mirror.querySelectorAll<HTMLElement>('.lm-box').forEach((el) => {
+      const r = el.getBoundingClientRect()
+      boxes.push({
+        x: r.left - mr.left + mirror.scrollLeft,
+        y: r.top - mr.top + mirror.scrollTop,
+        w: r.width,
+        h: r.height,
+        index: Number(el.dataset.ci)
+      })
+    })
+    boxRectsRef.current = boxes
+  }, [])
+
+  useLayoutEffect(() => {
+    measureBoxes()
+  }, [mirrorHtml, preview, loadingNote, measureBoxes])
+
+  // Late re-measure once web fonts settle, plus on resizes.
+  useEffect(() => {
+    const timer = window.setTimeout(measureBoxes, 250)
+    return () => window.clearTimeout(timer)
+  }, [mirrorHtml, measureBoxes])
+
+  useEffect(() => {
+    const onResize = (): void => measureBoxes()
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [measureBoxes])
+
+  const hitCheckbox = useCallback((clientX: number, clientY: number): number => {
+    const mirror = mirrorRef.current
+    if (!mirror) return -1
+    const mr = mirror.getBoundingClientRect()
+    const x = clientX - mr.left + mirror.scrollLeft
+    const y = clientY - mr.top + mirror.scrollTop
+    for (const box of boxRectsRef.current) {
+      if (x >= box.x - 4 && x <= box.x + box.w + 4 && y >= box.y - 5 && y <= box.y + box.h + 5) {
+        return box.index
+      }
+    }
+    return -1
+  }, [])
+
+  const onEditorClick = (event: ReactMouseEvent<HTMLTextAreaElement>): void => {
+    // A drag-selection ends with a click; never tick a box while selecting.
+    const textarea = event.currentTarget
+    if (textarea.selectionStart !== textarea.selectionEnd) return
+    const index = hitCheckbox(event.clientX, event.clientY)
+    if (index >= 0) toggleChecklistAt(index)
+  }
+
+  const onEditorMouseMove = (event: ReactMouseEvent<HTMLTextAreaElement>): void => {
+    const cursor = hitCheckbox(event.clientX, event.clientY) >= 0 ? 'pointer' : ''
+    const textarea = event.currentTarget
+    if (textarea.style.cursor !== cursor) textarea.style.cursor = cursor
+  }
+
+  const syncMirrorScroll = (event: ReactUIEvent<HTMLTextAreaElement>): void => {
+    const mirror = mirrorRef.current
+    if (mirror) mirror.scrollTop = event.currentTarget.scrollTop
   }
 
   const submitEntry = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
@@ -985,15 +1189,26 @@ export function NotesPage() {
                 dangerouslySetInnerHTML={{ __html: markdownHtml }}
               />
             ) : (
-              <textarea
-                ref={textareaRef}
-                className="note-textarea"
-                value={content}
-                onChange={(event) => onChangeContent(event.target.value)}
-                onKeyDown={onEditorKeyDown}
-                spellCheck
-                placeholder="Start writing…"
-              />
+              <div className="live-editor">
+                <div
+                  ref={mirrorRef}
+                  className="live-mirror"
+                  aria-hidden="true"
+                  dangerouslySetInnerHTML={{ __html: mirrorHtml }}
+                />
+                <textarea
+                  ref={textareaRef}
+                  className="note-textarea"
+                  value={content}
+                  onChange={(event) => onChangeContent(event.target.value)}
+                  onKeyDown={onEditorKeyDown}
+                  onScroll={syncMirrorScroll}
+                  onClick={onEditorClick}
+                  onMouseMove={onEditorMouseMove}
+                  spellCheck
+                  placeholder="Start writing…"
+                />
+              </div>
             )}
 
             <div className="editor-footer">

@@ -138,7 +138,7 @@ The collapsed bar is not locked to the top centre. Open **Settings → Notch →
 5. The folder is watched for changes, so edits made in another editor appear in the file tree automatically. If a note is open and you have no unsaved changes, external edits are pulled into the editor too.
 6. Use **Expand all** in the tree toolbar to open every folder at once; folder rows show their note count. Notes, folders and files can be created, renamed and moved to trash from the tree.
 7. Drag a note or folder onto another folder to move it there. While dragging, the tree header becomes **Move to root folder**: drop on it to pull the item back out of its folder. A file name that already exists in the target folder is refused instead of overwritten.
-8. Lists and checklists continue when you press Enter (`- [ ] `, `- `, `1. `). In **Preview**, task checkboxes render as boxes and can be clicked to tick the item in the note.
+8. The editor renders Markdown live, Obsidian-style: `- [ ]` shows a real box you can click to tick, `**bold**`, `_italic_`, `` `code` ``, `#`/`##` headings, `>` quotes and `[links](url)` all render as you type (their markers stay faintly visible while the cursor is elsewhere in the line). Press Enter to continue a checklist or list. **Preview** still gives a clean rendered reading view.
 
 Notes are read and written on the local filesystem by the Electron main process. Paths are validated to stay inside the selected folder, and deletions use the system trash (not a permanent delete). Auto-save runs after 750ms, `Ctrl+S` saves immediately, and the note is flushed synchronously when you leave the page or quit the app. There is no sync or account layer.
 

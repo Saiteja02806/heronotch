@@ -7486,3 +7486,145 @@ input[type='range']:focus::-webkit-slider-thumb {
   border-width: 0 1.5px 1.5px 0;
   transform: translateY(1px) rotate(45deg);
 }
+
+/* ---- Live editor: real Markdown rendering under a transparent textarea ----
+   The textarea keeps caret, selection and undo; its glyphs are transparent.
+   The mirror underneath renders the same characters with formatting. Font
+   metrics and padding are identical to .note-textarea so the two layers line
+   up line for line. Every visual tweak below is layout-neutral (box-shadow,
+   opacity, text-decoration) except weight on short runs. */
+.live-editor {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.live-editor .note-textarea {
+  position: absolute;
+  inset: 0;
+  color: transparent;
+  caret-color: #e6e3dc;
+  scrollbar-width: none;
+}
+
+.live-editor .note-textarea::-webkit-scrollbar {
+  display: none;
+  width: 0;
+}
+
+.live-editor .note-textarea::selection {
+  background: rgba(233, 180, 148, 0.26);
+  color: transparent;
+}
+
+.live-mirror {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  padding: 18px 26px 24px;
+  font-family: var(--sans);
+  font-size: 13.5px;
+  font-weight: 410;
+  line-height: 1.72;
+  letter-spacing: -0.002em;
+  color: #e6e3dc;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* A blank source line must still occupy one line box. */
+.live-mirror .lm-line:empty::after {
+  content: '\200B';
+}
+
+.live-mirror .lm-marker {
+  opacity: 0.26;
+}
+
+.live-mirror .lm-h {
+  font-weight: 640;
+  color: var(--ink);
+}
+
+.live-mirror .lm-b {
+  font-weight: 700;
+  color: #f3f0e9;
+}
+
+.live-mirror .lm-i {
+  font-style: italic;
+}
+
+.live-mirror .lm-s {
+  text-decoration: line-through;
+  text-decoration-color: rgba(230, 227, 220, 0.65);
+}
+
+.live-mirror .lm-code {
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.07);
+  color: #f1c7a8;
+}
+
+.live-mirror .lm-link {
+  color: var(--accent-soft);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.live-mirror .lm-wiki {
+  color: #b7aaff;
+  text-decoration: underline dotted rgba(183, 170, 255, 0.5);
+  text-underline-offset: 2px;
+}
+
+.live-mirror .lm-quote {
+  color: var(--muted);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Task boxes: drawn over the literal '[ ]' characters, which stay in place
+   (transparent) so the rest of the line keeps its exact position. */
+.live-mirror .lm-box {
+  position: relative;
+  color: transparent;
+}
+
+.live-mirror .lm-box::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translateY(-54%);
+  border-radius: 3.5px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.live-mirror .lm-box.is-checked::before {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.live-mirror .lm-box.is-checked::after {
+  content: '';
+  position: absolute;
+  left: 4.5px;
+  top: 50%;
+  width: 3px;
+  height: 6px;
+  transform: translateY(-62%) rotate(45deg);
+  border: solid #1a0d0b;
+  border-width: 0 1.5px 1.5px 0;
+}
+
+.live-mirror .lm-line:has(.lm-box.is-checked) {
+  color: var(--muted);
+}
