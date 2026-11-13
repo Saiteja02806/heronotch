@@ -10,6 +10,7 @@ import {
 import { FilesetResolver, PoseLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
 import type { PostureBaseline } from '../../../shared/types'
 import { useApp } from './AppContext'
+import { playPostureRing } from '../lib/alertSound'
 import { todayKey } from '../lib/time'
 
 const WASM_PATH = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.2/wasm'
@@ -46,11 +47,6 @@ export interface PostureCoverage {
   hips: boolean
 }
 
-export interface PostureHistoryPoint {
-  t: number
-  score: number | null
-}
-
 interface PostureContextValue {
   enabled: boolean
   status: PostureStatus
@@ -68,7 +64,6 @@ interface PostureContextValue {
   setupMessage: string | null
   goodSeconds: number
   badSeconds: number
-  history: PostureHistoryPoint[]
   enable: () => void
   disable: () => void
   calibrate: () => void
@@ -294,9 +289,6 @@ export function PostureProvider({ children }: { children: ReactNode }) {
   const [setupMessage, setSetupMessage] = useState<string | null>(null)
   const [goodDisplay, setGoodDisplay] = useState(posture.goodSeconds)
   const [badDisplay, setBadDisplay] = useState(posture.badSeconds)
-  const [history, setHistory] = useState<PostureHistoryPoint[]>([])
-  const historyRef = useRef<PostureHistoryPoint[]>([])
-  const lastHistoryRef = useRef(0)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const landmarkerRef = useRef<PoseLandmarker | null>(null)
@@ -434,20 +426,10 @@ export function PostureProvider({ children }: { children: ReactNode }) {
           })
         }
 
-        const pushHistory = (score: number | null): void => {
-          const t = Date.now()
-          if (t - lastHistoryRef.current < 400) return
-          lastHistoryRef.current = t
-          historyRef.current = [...historyRef.current, { t, score }].slice(-240)
-          setHistory(historyRef.current)
-        }
-
         landmarkerRef.current = landmarker
         setStatus('no-pose')
         lastTickRef.current = performance.now()
         traceStatus('model-ready')
-        historyRef.current = []
-        setHistory([])
 
         const finishSetupIfReady = (now: number): void => {
           const setup = setupRef.current
@@ -538,9 +520,10 @@ export function PostureProvider({ children }: { children: ReactNode }) {
                 smoothedRef.current = null
                 sampleHistoryRef.current = []
                 invalidFramesRef.current = 0
+                // Nobody in frame: never start or continue a slouch alert.
+                badSinceRef.current = null
                 setCoverage({ shoulders: false, ears: false, hips: false })
                 traceStatus('no-pose')
-                pushHistory(null)
                 finishSetupIfReady(now)
               } else {
                 setLandmarks(pose)
@@ -579,8 +562,8 @@ export function PostureProvider({ children }: { children: ReactNode }) {
                   smoothedRef.current = null
                   sampleHistoryRef.current = []
                   invalidFramesRef.current = 0
+                  badSinceRef.current = null
                   traceStatus('no-metrics')
-                  pushHistory(null)
                   finishSetupIfReady(now)
                 } else if (!isPlausible(computed)) {
                   invalidFramesRef.current += 1
@@ -588,6 +571,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
                     sampleHistoryRef.current = []
                     smoothedRef.current = null
                     metricsRef.current = null
+                    badSinceRef.current = null
                     setMetrics(null)
                     setScore(null)
                     setStatus('no-pose')
@@ -611,7 +595,6 @@ export function PostureProvider({ children }: { children: ReactNode }) {
                   setMetrics(displayMetrics)
                   setStatus('running')
                   setScore(Math.round(smoothed))
-                  pushHistory(Math.round(smoothed))
 
                   if (now - lastTraceRef.current >= 500) {
                     lastTraceRef.current = now
@@ -651,17 +634,21 @@ export function PostureProvider({ children }: { children: ReactNode }) {
                     } else {
                       badRef.current += delta
                       if (badSinceRef.current === null) badSinceRef.current = now
+                      // Ring only while a real pose is being tracked: the
+                      // presence checks above clear the alert when the seat is
+                      // empty, so an empty chair can never ring.
                       if (
                         current.notifications &&
-                        badSinceRef.current !== null &&
-                        now - badSinceRef.current > 6500 &&
-                        Date.now() - lastAlertRef.current > 45_000
+                        now - badSinceRef.current > 4000 &&
+                        Date.now() - lastAlertRef.current > 30_000
                       ) {
                         lastAlertRef.current = Date.now()
                         badSinceRef.current = now
+                        playPostureRing()
                         window.notch.notify(
                           'Posture check',
-                          displayMetrics.advice || 'Sit tall and relax your shoulders.'
+                          displayMetrics.advice || 'Sit tall and relax your shoulders.',
+                          true
                         )
                       }
                     }
@@ -686,13 +673,12 @@ export function PostureProvider({ children }: { children: ReactNode }) {
               metricsRef.current = null
               smoothedRef.current = null
               sampleHistoryRef.current = []
+              badSinceRef.current = null
               traceStatus('detect-error')
-              pushHistory(null)
             }
           } else {
             staleFramesRef.current += 1
             traceStatus('no-frames')
-            pushHistory(null)
             if (staleFramesRef.current >= 6) {
               setStatus('no-pose')
               setScore(null)
@@ -700,6 +686,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
               metricsRef.current = null
               smoothedRef.current = null
               sampleHistoryRef.current = []
+              badSinceRef.current = null
             }
           }
           timer = setTimeout(step, 420)
@@ -810,6 +797,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
     }
     sampleHistoryRef.current = []
     smoothedRef.current = null
+    badSinceRef.current = null
     setSetupRunning(true)
     setSetupProgress(0)
     setSetupMessage(null)
@@ -832,7 +820,6 @@ export function PostureProvider({ children }: { children: ReactNode }) {
     setupMessage,
     goodSeconds: Math.round(goodDisplay),
     badSeconds: Math.round(badDisplay),
-    history,
     enable,
     disable,
     calibrate,

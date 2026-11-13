@@ -259,7 +259,7 @@ export interface NotchApi {
   getExpanded: () => Promise<boolean>
   getBackdrop: () => Promise<string | null>
   quit: () => void
-  notify: (title: string, body: string) => void
+  notify: (title: string, body: string, silent?: boolean) => void
   openExternal: (url: string) => void
   copyText: (text: string) => void
   postureTrace: (sample: unknown) => void

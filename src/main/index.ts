@@ -601,10 +601,10 @@ function createTray(): void {
   }
 }
 
-function showNotification(title: string, body: string): void {
+function showNotification(title: string, body: string, silent = false): void {
   if (!getState().settings.notifications) return
   if (!Notification.isSupported()) return
-  const notification = new Notification({ title, body, silent: false })
+  const notification = new Notification({ title, body, silent })
   notification.on('click', () => {
     void setExpanded(true).then(() => mainWindow?.focus())
   })
@@ -737,8 +737,8 @@ function registerIpc(): void {
     app.quit()
   })
 
-  ipcMain.on('app:notify', (_event, title: string, body: string) => {
-    showNotification(title, body)
+  ipcMain.on('app:notify', (_event, title: string, body: string, silent?: boolean) => {
+    showNotification(title, body, silent === true)
   })
 
   ipcMain.on('app:open-external', (_event, url: string) => {

@@ -211,8 +211,9 @@ The **Posture** tab turns the webcam into a private posture coach. It is **off b
 - Forward-head depth is weighted more heavily than the side-to-side signals, because leaning into the screen is the most common real-world slouch.
 - Depth and proximity tracking are what catch a forward slouch toward the screen, where head and shoulder x/y position barely changes. Re-run **Test posture setup** once after updating so those signals are matched to your camera and chair.
 - The setup screen shows live coverage for head, shoulders and waist so you know exactly what the camera can see.
-- The slouch threshold, notification toggle and camera mode live in the same panel.
-- Alerts fire after a few seconds of slouching, with a 45-second cool-down.
+- The slouch threshold, notification toggle and camera mode live in the same panel. A small live ring beside the threshold shows your current score against it.
+- Adjusting the threshold changes when Notch rings. Below the threshold, Notch plays a soft two-note chime and shows a toast; it never rings when nobody is detected in the frame, so an empty chair stays silent.
+- Alerts fire after four seconds below the threshold, with a 30-second cool-down.
 - Good vs. slouching time is tracked for the day and resets at midnight.
 - **Always watching while on:** the posture coach runs continuously whenever it is enabled, including while the notch is collapsed and while you use other apps. The camera and the Windows camera indicator stay on for that entire time. Turning the coach off releases the camera and its LED. Windows does not allow software to switch off the LED while the camera is streaming.
 

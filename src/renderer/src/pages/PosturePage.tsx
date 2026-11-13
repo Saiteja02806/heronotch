@@ -11,36 +11,9 @@ import {
   Sparkles
 } from 'lucide-react'
 import { useEffect, useRef, type CSSProperties } from 'react'
-import type { PostureHistoryPoint } from '../state/PostureContext'
 import { ProgressRing } from '../components/ProgressRing'
 import { usePosture } from '../state/PostureContext'
 import { formatMinutes } from '../lib/time'
-
-const CHART_WINDOW_MS = 60_000
-
-function chartSegments(
-  history: PostureHistoryPoint[],
-  windowMs = CHART_WINDOW_MS
-): string[] {
-  const now = history.at(-1)?.t ?? 0
-  const segments: string[] = []
-  let current: string[] = []
-  for (const point of history) {
-    if (now - point.t > windowMs) continue
-    const x = ((point.t - (now - windowMs)) / windowMs) * 100
-    if (point.score === null) {
-      if (current.length) {
-        segments.push(current.join(' '))
-        current = []
-      }
-      continue
-    }
-    const y = 40 - (point.score / 100) * 36 - 2
-    current.push(`${x.toFixed(2)},${y.toFixed(2)}`)
-  }
-  if (current.length) segments.push(current.join(' '))
-  return segments
-}
 
 function scoreColor(score: number, threshold: number): string {
   if (score >= threshold) return '#a8e36b'
@@ -308,29 +281,33 @@ export function PosturePage() {
               </div>
             </div>
 
-            {posture.history.length > 1 && (
-              <div className="posture-chart">
-                <svg viewBox="0 0 100 40" preserveAspectRatio="none">
-                  <line
-                    className="chart-threshold"
-                    x1="0"
-                    x2="100"
-                    y1={40 - (posture.threshold / 100) * 36 - 2}
-                    y2={40 - (posture.threshold / 100) * 36 - 2}
-                  />
-                  {chartSegments(posture.history).map((points, index) => (
-                    <polyline key={points + index} className="chart-line" points={points} />
-                  ))}
-                </svg>
-                <span className="chart-caption">Last 60 seconds</span>
-              </div>
-            )}
-
             <div className="posture-controls">
               <label className="posture-slider">
                 <span>
                   <span>Slouch alert threshold</span>
-                  <strong>{posture.threshold}</strong>
+                  <span className="posture-threshold-readout">
+                    {hasScore && (
+                      <span
+                        className={`posture-threshold-ring ${
+                          score < posture.threshold ? 'is-below' : 'is-ok'
+                        }`}
+                        title={
+                          score < posture.threshold
+                            ? 'Below your threshold'
+                            : 'Above your threshold'
+                        }
+                      >
+                        <ProgressRing
+                          progress={score / 100}
+                          size={16}
+                          stroke={2.5}
+                          color={score < posture.threshold ? '#ff6f61' : '#a8e36b'}
+                          track="rgba(255,255,255,.14)"
+                        />
+                      </span>
+                    )}
+                    <strong>{posture.threshold}</strong>
+                  </span>
                 </span>
                 <input
                   type="range"
@@ -344,7 +321,7 @@ export function PosturePage() {
               <div className="posture-toggle-row">
                 <span>
                   <strong>Notification alerts</strong>
-                  <small>Nudge me after a few seconds of slouching.</small>
+                  <small>Ring softly after a few seconds below your threshold.</small>
                 </span>
                 <button
                   className={`switch ${posture.notifications ? 'is-on' : ''}`}
