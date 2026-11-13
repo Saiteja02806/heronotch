@@ -395,8 +395,12 @@ select {
   top: 0;
   left: 20px;
   z-index: 10;
-  width: min(1120px, calc(100vw - 40px));
-  height: 600px;
+  /* Proportional caps: on this 15.6" screen (1536×864 logical) the panel stays
+     1120×600, while a 14" (e.g. 1280×800) gets 973×576 instead of swallowing
+     the screen. The lower bounds are the sizes where the top bar and status
+     row still fit without clipping. */
+  width: min(1120px, max(900px, 76vw), calc(100vw - 40px));
+  height: min(600px, max(560px, 72vh));
   isolation: isolate;
   border-radius: 0 0 30px 30px;
   border: 1px solid rgba(255, 255, 255, 0.075);
@@ -474,7 +478,7 @@ select {
 }
 
 .app.is-focus-mode .panel {
-  left: calc((100vw - min(1120px, calc(100vw - 40px))) / 2);
+  left: calc((100vw - min(1120px, max(900px, 76vw), calc(100vw - 40px))) / 2);
   top: 0;
 }
 
