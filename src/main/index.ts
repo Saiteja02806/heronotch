@@ -55,6 +55,7 @@ let spotifyActionQueue: Promise<unknown> = Promise.resolve()
 let quitting = false
 let windowShown = false
 let revealTimer: NodeJS.Timeout | null = null
+let topmostTimer: NodeJS.Timeout | null = null
 let rendererRecoveries = 0
 let failureDialogOpen = false
 
@@ -480,6 +481,20 @@ function createWindow(): void {
   // anyway so the app cannot end up running with no visible window.
   revealTimer = setTimeout(() => revealWindow('timeout'), 1800)
 
+  // Windows can drop the notch out of the top of the z-order (a fullscreen app
+  // closing, the shell restarting, display changes). A buried tab cannot be
+  // clicked, so it would never raise itself again and the notch would simply
+  // look gone. Re-assert topmost on a slow timer; this only raises the window,
+  // it never steals focus or moves it.
+  if (topmostTimer) {
+    clearInterval(topmostTimer)
+    topmostTimer = null
+  }
+  topmostTimer = setInterval(() => {
+    if (quitting || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return
+    mainWindow.setAlwaysOnTop(true, 'screen-saver')
+  }, 4000)
+
   mainWindow.on('close', (event) => {
     if (quitting) return
     event.preventDefault()
@@ -492,6 +507,10 @@ function createWindow(): void {
     if (revealTimer) {
       clearTimeout(revealTimer)
       revealTimer = null
+    }
+    if (topmostTimer) {
+      clearInterval(topmostTimer)
+      topmostTimer = null
     }
     mainWindow = null
   })
