@@ -35,7 +35,8 @@ import {
   useRef,
   useState,
   type FormEvent,
-  type KeyboardEvent as ReactKeyboardEvent
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent
 } from 'react'
 import type { NoteSearchResult, VaultNode } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
@@ -373,6 +374,70 @@ export function NotesPage() {
   }
 
   const onEditorKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      const textarea = event.currentTarget
+      const start = textarea.selectionStart
+      const end = textarea.selectionEnd
+      if (start === end) {
+        const lineStart = content.lastIndexOf('\n', start - 1) + 1
+        const line = content.slice(lineStart, start)
+        const atLineEnd = start === content.length || content[start] === '\n'
+
+        const checklist = line.match(/^(\s*)- \[([ xX])\] ?/)
+        if (checklist) {
+          event.preventDefault()
+          const body = line.slice(checklist[0].length)
+          if (atLineEnd && !body.trim()) {
+            const next = `${content.slice(0, lineStart)}${content.slice(start)}`
+            onChangeContent(next)
+            requestAnimationFrame(() => textarea.setSelectionRange(lineStart, lineStart))
+            return
+          }
+          const insert = `\n${checklist[1]}- [ ] `
+          onChangeContent(`${content.slice(0, start)}${insert}${content.slice(end)}`)
+          requestAnimationFrame(() =>
+            textarea.setSelectionRange(start + insert.length, start + insert.length)
+          )
+          return
+        }
+
+        const bullet = line.match(/^(\s*)([-*+]) ?/)
+        if (bullet) {
+          event.preventDefault()
+          const body = line.slice(bullet[0].length)
+          if (atLineEnd && !body.trim()) {
+            const next = `${content.slice(0, lineStart)}${content.slice(start)}`
+            onChangeContent(next)
+            requestAnimationFrame(() => textarea.setSelectionRange(lineStart, lineStart))
+            return
+          }
+          const insert = `\n${bullet[1]}${bullet[2]} `
+          onChangeContent(`${content.slice(0, start)}${insert}${content.slice(end)}`)
+          requestAnimationFrame(() =>
+            textarea.setSelectionRange(start + insert.length, start + insert.length)
+          )
+          return
+        }
+
+        const numbered = line.match(/^(\s*)(\d+)\. ?/)
+        if (numbered) {
+          event.preventDefault()
+          const body = line.slice(numbered[0].length)
+          if (atLineEnd && !body.trim()) {
+            const next = `${content.slice(0, lineStart)}${content.slice(start)}`
+            onChangeContent(next)
+            requestAnimationFrame(() => textarea.setSelectionRange(lineStart, lineStart))
+            return
+          }
+          const insert = `\n${numbered[1]}${Number(numbered[2]) + 1}. `
+          onChangeContent(`${content.slice(0, start)}${insert}${content.slice(end)}`)
+          requestAnimationFrame(() =>
+            textarea.setSelectionRange(start + insert.length, start + insert.length)
+          )
+          return
+        }
+      }
+    }
     if (event.key === 'Tab') {
       event.preventDefault()
       const textarea = event.currentTarget
@@ -489,6 +554,40 @@ export function NotesPage() {
       showToast('Moved', nextPath, 'success')
     } catch (error) {
       showToast('Could not move', error instanceof Error ? error.message : 'Try again.', 'error')
+    }
+  }
+
+  const togglePreviewTask = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    const target = event.target as HTMLElement
+    const item = target.closest('li')
+    if (!item) return
+    const box = item.querySelector('input[type="checkbox"]') as HTMLInputElement | null
+    if (!box) return
+    const rect = box.getBoundingClientRect()
+    const nearBox =
+      event.clientX >= rect.left - 4 &&
+      event.clientX <= rect.right + 4 &&
+      event.clientY >= rect.top - 4 &&
+      event.clientY <= rect.bottom + 4
+    if (!nearBox) return
+    const preview = event.currentTarget
+    const items = Array.from(preview.querySelectorAll('li')).filter((li) =>
+      li.querySelector('input[type="checkbox"]')
+    )
+    const index = items.indexOf(item)
+    if (index < 0) return
+    const lines = content.split('\n')
+    let seen = 0
+    for (let i = 0; i < lines.length; i += 1) {
+      const match = lines[i].match(/^(\s*)- \[([ xX])\](.*)$/)
+      if (!match) continue
+      if (seen === index) {
+        const checked = match[2].toLowerCase() === 'x'
+        lines[i] = `${match[1]}- [${checked ? ' ' : 'x'}]${match[3]}`
+        onChangeContent(lines.join('\n'))
+        return
+      }
+      seen += 1
     }
   }
 
@@ -882,6 +981,7 @@ export function NotesPage() {
             ) : preview ? (
               <div
                 className="markdown-preview"
+                onClick={togglePreviewTask}
                 dangerouslySetInnerHTML={{ __html: markdownHtml }}
               />
             ) : (
