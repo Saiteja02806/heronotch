@@ -142,6 +142,9 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
       mainWindow.webContents.send('notch:expanded', { expanded: true })
     }
     mainWindow.showInactive()
+    // The expanded panel is a screen-edge widget, not an app window: it must
+    // never own a taskbar button (Windows would show it as "Electron").
+    mainWindow.setSkipTaskbar(true)
     syncEscapeShortcut()
     expanding = null
 
@@ -230,6 +233,10 @@ function revealWindow(reason: string): void {
     revealTimer = null
   }
   mainWindow.showInactive()
+  // Windows gives every visible top-level window a taskbar button. The option
+  // flag alone does not survive the first show on some Electron versions, so
+  // re-assert it after the window becomes visible.
+  mainWindow.setSkipTaskbar(true)
   logLine(
     `window shown (${reason}) bounds=${JSON.stringify(mainWindow.getBounds())} visible=${mainWindow.isVisible()}`
   )
@@ -396,6 +403,12 @@ function createWindow(): void {
     maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
+    // 'toolbar' maps to WS_EX_TOOLWINDOW on Windows, so the shell never gives
+    // this window a taskbar button, Alt-Tab entry or Task View tile. The
+    // skipTaskbar flag alone calls ITaskbarList::DeleteTab, which the taskbar
+    // silently undoes the next time the window is activated (e.g. clicking
+    // into the notch to type).
+    ...(process.platform === 'win32' ? { type: 'toolbar' } : {}),
     hasShadow: false,
     alwaysOnTop: true,
     acceptFirstMouse: true,
@@ -472,6 +485,7 @@ function createWindow(): void {
     event.preventDefault()
     void setExpanded(false)
     mainWindow?.showInactive()
+    mainWindow?.setSkipTaskbar(true)
   })
 
   mainWindow.on('closed', () => {
