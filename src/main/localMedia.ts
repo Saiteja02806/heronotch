@@ -1,4 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { friendlyMediaName, pickMediaSession, type MediaSessionInfo } from '../shared/mediaFollow'
+import { getState } from './state'
 import type { SpotifyAction, SpotifyPlayback } from '../shared/types'
 
 interface LocalSnapshot {
@@ -34,39 +36,53 @@ function Await($operation, $resultType) {
 [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionTimelineProperties,Windows.Media.Control,ContentType=WindowsRuntime] | Out-Null
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $manager = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
-function Get-SpotifySession {
-  $manager.GetSessions() | Where-Object { $_.SourceAppUserModelId -match 'Spotify' } | Select-Object -First 1
+function Get-TargetSession([string]$wanted) {
+  $sessions = @($manager.GetSessions())
+  if ($wanted) {
+    $match = $sessions | Where-Object { [string]$_.SourceAppUserModelId -eq $wanted } | Select-Object -First 1
+    if ($match) { return $match }
+  }
+  $current = $null
+  try { $current = $manager.GetCurrentSession() } catch {}
+  if ($current) { return $current }
+  return $sessions | Select-Object -First 1
 }
 `
 
 const MONITOR_SCRIPT = `${WINRT_PREAMBLE}
 while ($true) {
   try {
-    $session = Get-SpotifySession
-    if ($session) {
-      $props = Await ($session.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
-      $info = $session.GetPlaybackInfo()
-      $timeline = $session.GetTimelineProperties()
-      $result = [ordered]@{
-        available = $true
-        source = $session.SourceAppUserModelId
-        title = $props.Title
-        artist = $props.Artist
-        album = $props.AlbumTitle
-        status = [string]$info.PlaybackStatus
-        position = [double]$timeline.Position.TotalMilliseconds
-        end = [double]$timeline.EndTime.TotalMilliseconds
-        canNext = $info.Controls.IsNextEnabled
-        canPrevious = $info.Controls.IsPreviousEnabled
-        canSeek = $info.Controls.IsPlaybackPositionEnabled
-      }
-    } else {
-      $result = [ordered]@{ available = $false; sessions = @($manager.GetSessions() | ForEach-Object { $_.SourceAppUserModelId }) }
+    $currentId = ''
+    try {
+      $current = $manager.GetCurrentSession()
+      if ($current) { $currentId = [string]$current.SourceAppUserModelId }
+    } catch {}
+    $list = @()
+    foreach ($session in @($manager.GetSessions())) {
+      try {
+        $props = Await ($session.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+        $info = $session.GetPlaybackInfo()
+        $timeline = $session.GetTimelineProperties()
+        $id = [string]$session.SourceAppUserModelId
+        $list += [ordered]@{
+          id = $id
+          current = ($id -eq $currentId)
+          title = $props.Title
+          artist = $props.Artist
+          album = $props.AlbumTitle
+          status = [string]$info.PlaybackStatus
+          position = [double]$timeline.Position.TotalMilliseconds
+          end = [double]$timeline.EndTime.TotalMilliseconds
+          canNext = $info.Controls.IsNextEnabled
+          canPrevious = $info.Controls.IsPreviousEnabled
+          canSeek = $info.Controls.IsPlaybackPositionEnabled
+        }
+      } catch {}
     }
-    [Console]::Out.WriteLine((ConvertTo-Json $result -Compress))
+    [Console]::Out.WriteLine((ConvertTo-Json ([ordered]@{ sessions = $list }) -Compress -Depth 4))
     [Console]::Out.Flush()
   } catch {
-    [Console]::Out.WriteLine((ConvertTo-Json ([ordered]@{ available = $false; error = $_.Exception.Message }) -Compress))
+    [Console]::Out.WriteLine((ConvertTo-Json ([ordered]@{ sessions = @(); error = $_.Exception.Message }) -Compress))
     [Console]::Out.Flush()
   }
   Start-Sleep -Milliseconds 1100
@@ -75,8 +91,25 @@ while ($true) {
 
 let monitor: ChildProcess | null = null
 let latest: LocalSnapshot | null = null
+let sessions: MediaSessionInfo[] = []
+let sessionsAt = 0
+let positionClock = 0
 let buffer = ''
+
+function preference(): string {
+  try {
+    return getState().settings.mediaSource || 'auto'
+  } catch {
+    return 'auto'
+  }
+}
+
+function freshSessions(): MediaSessionInfo[] {
+  if (Date.now() - sessionsAt > 15_000) return []
+  return sessions
+}
 let stopping = false
+let paused = false
 let restartTimer: NodeJS.Timeout | null = null
 let actionQueue: Promise<unknown> = Promise.resolve()
 
@@ -89,7 +122,7 @@ function scheduleRestart(): void {
 }
 
 export function startLocalMediaMonitor(): void {
-  if (process.platform !== 'win32' || monitor || stopping) return
+  if (process.platform !== 'win32' || monitor || stopping || paused) return
   let child: ChildProcess
   try {
     child = spawn(
@@ -123,28 +156,45 @@ export function startLocalMediaMonitor(): void {
       buffer = buffer.slice(newline + 1)
       if (line) {
         try {
-          const snapshot = JSON.parse(line) as Omit<LocalSnapshot, 'sampledAt'>
-          const previous = latest
+          const parsed = JSON.parse(line) as { sessions?: MediaSessionInfo[] }
+          if (!Array.isArray(parsed.sessions)) continue
+          const nextSessions = parsed.sessions.filter((session) => session && typeof session.id === 'string')
+          const previous = pickMediaSession(sessions, preference())
+          const snapshot = pickMediaSession(nextSessions, preference())
+          sessions = nextSessions
+          sessionsAt = Date.now()
           const sampledAt = Date.now()
           const sameTrack =
-            Boolean(previous?.available) &&
-            previous?.title === snapshot.title &&
-            previous?.artist === snapshot.artist
-          const sameStatus = previous?.status === snapshot.status
+            Boolean(previous) &&
+            previous?.title === snapshot?.title &&
+            previous?.artist === snapshot?.artist &&
+            previous?.id === snapshot?.id
+          const sameStatus = previous?.status === snapshot?.status
           const positionMoved =
             !previous ||
+            !snapshot ||
             Math.abs((Number(snapshot.position) || 0) - (Number(previous.position) || 0)) >= 100
-          latest = {
-            ...snapshot,
-            sampledAt,
-            // Windows often repeats the same timeline position for several
-            // seconds. Keep the original timestamp so the renderer's clock
-            // keeps advancing instead of resetting to a stale position.
-            positionSampledAt:
-              !sameTrack || !sameStatus || positionMoved
-                ? sampledAt
-                : previous?.positionSampledAt || previous?.sampledAt || sampledAt
-          }
+          positionClock =
+            !sameTrack || !sameStatus || positionMoved
+              ? sampledAt
+              : positionClock || sampledAt
+          latest = snapshot
+            ? {
+                available: true,
+                title: snapshot.title,
+                artist: snapshot.artist,
+                album: snapshot.album,
+                status: snapshot.status,
+                position: snapshot.position,
+                end: snapshot.end,
+                canNext: snapshot.canNext,
+                canPrevious: snapshot.canPrevious,
+                canSeek: snapshot.canSeek,
+                source: snapshot.id,
+                sampledAt,
+                positionSampledAt: positionClock
+              }
+            : { available: false, sampledAt }
         } catch {
           // Ignore partial or malformed status lines.
         }
@@ -160,8 +210,24 @@ export function startLocalMediaMonitor(): void {
   child.on('exit', () => {
     if (monitor === child) monitor = null
     latest = null
-    scheduleRestart()
+    sessions = []
+    if (!paused) scheduleRestart()
   })
+}
+
+export function pauseLocalMediaMonitor(): void {
+  paused = true
+  if (restartTimer) {
+    clearTimeout(restartTimer)
+    restartTimer = null
+  }
+  monitor?.kill()
+  monitor = null
+}
+
+export function resumeLocalMediaMonitor(): void {
+  paused = false
+  startLocalMediaMonitor()
 }
 
 export function stopLocalMediaMonitor(): void {
@@ -175,46 +241,67 @@ export function stopLocalMediaMonitor(): void {
   latest = null
 }
 
-export function isLocalAvailable(): boolean {
-  return Boolean(latest?.available && Date.now() - latest.sampledAt < 15_000)
+export function listMediaSources(): { id: string; label: string }[] {
+  const seen = new Set<string>()
+  const list: { id: string; label: string }[] = []
+  for (const session of freshSessions()) {
+    if (seen.has(session.id)) continue
+    seen.add(session.id)
+    list.push({ id: session.id, label: friendlyMediaName(session.id) })
+  }
+  return list
 }
 
-export function getLocalStatus(): { available: boolean; title: string | null; artist: string | null } {
-  if (!isLocalAvailable()) return { available: false, title: null, artist: null }
+export function currentMediaId(source?: string): string | null {
+  return pickMediaSession(freshSessions(), source || preference())?.id ?? null
+}
+
+export function isLocalAvailable(source?: string): boolean {
+  return Boolean(pickMediaSession(freshSessions(), source || preference()))
+}
+
+export function getLocalStatus(source?: string): { available: boolean; title: string | null; artist: string | null } {
+  const picked = pickMediaSession(freshSessions(), source || preference())
+  if (!picked) return { available: false, title: null, artist: null }
   return {
     available: true,
-    title: latest?.title || null,
-    artist: latest?.artist || null
+    title: picked.title || null,
+    artist: picked.artist || null
   }
 }
 
-export function getLocalPlayback(): SpotifyPlayback {
-  if (!latest?.available) {
-    return {
-      connected: false,
-      playing: false,
-      track: null,
-      device: null,
-      shuffle: false,
-      repeat: 'off',
-      volume: 0,
-      fetchedAt: Date.now(),
-      source: 'none',
-      queueAvailable: false
-    }
+function emptyPlayback(): SpotifyPlayback {
+  return {
+    connected: false,
+    playing: false,
+    track: null,
+    device: null,
+    shuffle: false,
+    repeat: 'off',
+    volume: 0,
+    fetchedAt: Date.now(),
+    source: 'none',
+    queueAvailable: false
   }
+}
 
-  const position = Math.max(0, Number(latest.position) || 0)
-  const duration = Math.max(position, Number(latest.end) || 0)
+export function getLocalPlayback(source?: string): SpotifyPlayback {
+  const picked = pickMediaSession(freshSessions(), source || preference())
+  if (!picked) return emptyPlayback()
+
+  const position = Math.max(0, Number(picked.position) || 0)
+  const duration = Math.max(position, Number(picked.end) || 0)
+  const label = friendlyMediaName(picked.id)
+  const fetchedAt = picked.id === latest?.source ? latest.positionSampledAt || latest.sampledAt : sessionsAt
   return {
     connected: true,
-    playing: latest.status === 'Playing',
-    track: latest.title
+    playing: picked.status === 'Playing',
+    track: picked.title
       ? {
-          id: `local-${latest.title}-${latest.artist || ''}`,
-          name: latest.title,
-          artists: latest.artist || 'Spotify',
-          album: latest.album || '',
+          id: `local-${picked.id}-${picked.title}`,
+          name: picked.title,
+          artists: picked.artist || label,
+          album: picked.album || '',
           image: null,
           duration,
           progress: Math.min(position, duration || position),
@@ -222,8 +309,8 @@ export function getLocalPlayback(): SpotifyPlayback {
         }
       : null,
     device: {
-      id: 'spotify-desktop',
-      name: 'Spotify Desktop',
+      id: picked.id,
+      name: label,
       type: 'Desktop',
       active: true,
       volume: 0
@@ -231,7 +318,7 @@ export function getLocalPlayback(): SpotifyPlayback {
     shuffle: false,
     repeat: 'off',
     volume: 0,
-    fetchedAt: latest.positionSampledAt || latest.sampledAt,
+    fetchedAt,
     source: 'local',
     queueAvailable: false
   }
@@ -252,8 +339,9 @@ function controlScript(action: Extract<SpotifyAction, { type: 'play' | 'pause' |
 
   // Do not pipe the assignment into Out-Null: that would assign $null to $op
   // and make Await fail even though Spotify accepted the command.
+  const wanted = (currentMediaId() || '').replace(/'/g, "''")
   return `${WINRT_PREAMBLE}
-$session = Get-SpotifySession
+$session = Get-TargetSession '${wanted}'
 if (-not $session) {
   [Console]::Out.WriteLine('{"ok":false,"error":"no-session"}')
   exit
@@ -360,7 +448,7 @@ function runControl(
 
 async function performLocalActionNow(action: SpotifyAction): Promise<SpotifyPlayback> {
   if (!isLocalAvailable()) {
-    throw new Error('Spotify Desktop is not available. Open Spotify and start a track.')
+    throw new Error('No media session is available. Start playback in an app on this PC.')
   }
 
   if (action.type === 'play-track') {
@@ -380,9 +468,27 @@ async function performLocalActionNow(action: SpotifyAction): Promise<SpotifyPlay
   const beforeTitle = latest?.title || null
   const result = await runControl(action)
   if (!result.ok) {
-    throw new Error('Spotify did not accept that control. Make sure Spotify is open and a track is active.')
+    throw new Error('That player did not accept the control. Make sure it is open and a track is active.')
   }
-  if (result.snapshot) latest = result.snapshot
+  if (result.snapshot) {
+    latest = result.snapshot
+    if (result.snapshot.source) {
+      sessions = sessions.map((session) =>
+        session.id === result.snapshot?.source
+          ? {
+              ...session,
+              title: result.snapshot.title,
+              artist: result.snapshot.artist,
+              album: result.snapshot.album,
+              status: result.snapshot.status,
+              position: result.snapshot.position,
+              end: result.snapshot.end
+            }
+          : session
+      )
+      sessionsAt = Date.now()
+    }
+  }
 
   // The control script already polls SMTC for the new metadata. If Spotify is
   // unusually slow, give the background monitor a short grace period too.

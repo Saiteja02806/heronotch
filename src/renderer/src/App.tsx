@@ -1,7 +1,10 @@
-import { AnimatePresence, motion } from 'framer-motion'
-import { useEffect, useRef, type CSSProperties } from 'react'
+import { AnimatePresence, MotionConfig, motion } from 'framer-motion'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import type { NotchMetrics } from '../../shared/types'
+import { dockedPanelLeft, dockedPanelSize } from '../../shared/notchLayout'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { CollapsedBar } from './components/CollapsedBar'
+import { EdgeGlow } from './components/EdgeGlow'
 import { CollapsedNotice } from './components/CollapsedNotice'
 import { CompactSlotProvider } from './components/CompactSlot'
 import { Footer } from './components/Footer'
@@ -16,40 +19,161 @@ import { PosturePage } from './pages/PosturePage'
 import { SessionsPage } from './pages/SessionsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { WaterPage } from './pages/WaterPage'
-import { OPTIONAL_SECTIONS, sectionEnabled } from './lib/sections'
-import { AppProvider, useApp, type Page } from './state/AppContext'
+import { sectionPrefs, visibleSections, type SectionId } from './lib/sections'
+import { AppProvider, useApp } from './state/AppContext'
+import { setClockPaused } from './state/clock'
 import { MediaProvider } from './state/MediaContext'
 import { PostureProvider } from './state/PostureContext'
 
-const PAGE_KEYS: Record<string, Page> = {
-  '1': 'home',
-  '2': 'notes',
-  '3': 'music',
-  '4': 'planner',
-  '5': 'sessions',
-  '6': 'posture',
-  '7': 'settings'
+const OPEN_MS = 280
+
+function pageForKey(key: string, visible: SectionId[]): SectionId | null {
+  const index = Number(key) - 1
+  if (!Number.isInteger(index) || index < 0 || index >= visible.length) return null
+  return visible[index] ?? null
 }
 
-function pageForKey(key: string, enabled: (page: Page) => boolean): Page | null {
-  if (key in PAGE_KEYS) return PAGE_KEYS[key]
-  const extra = OPTIONAL_SECTIONS.find((section) => section.shortcut === key)
-  if (!extra || !enabled(extra.page)) return null
-  return extra.page
+function prefersReducedMotion(): boolean {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+function applyTabMetrics(next: NotchMetrics): void {
+  const root = document.documentElement
+  root.style.setProperty('--tab-left', `${next.tab.x}px`)
+  root.style.setProperty('--tab-top', `${next.tab.y}px`)
+  root.style.setProperty('--tab-w', `${next.tab.width}px`)
+  root.style.setProperty('--tab-h', `${next.tab.height}px`)
+  root.style.setProperty('--tab-tx', '0px')
+  root.classList.add('tab-ready')
+}
+
+function usePreparedBackdrop(source: string | null): string | null {
+  const [prepared, setPrepared] = useState<string | null>(null)
+  useEffect(() => {
+    if (!source) {
+      setPrepared(null)
+      return
+    }
+    let cancelled = false
+    const image = new Image()
+    image.onload = () => {
+      const width = 480
+      const height = Math.max(1, Math.round((width * image.height) / Math.max(1, image.width)))
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const context = canvas.getContext('2d')
+      if (!context) return
+      context.filter = 'blur(16px)'
+      context.drawImage(image, -24, -24, width + 48, height + 48)
+      if (!cancelled) setPrepared(canvas.toDataURL('image/jpeg', 0.72))
+    }
+    image.src = source
+    return () => {
+      cancelled = true
+    }
+  }, [source])
+  return prepared
 }
 
 function Shell() {
-  const { state, expanded, backdrop, setExpanded, pinned, page, setPage, toasts } = useApp()
+  const { state, expanded, backdrop, viewport, setExpanded, pinned, page, setPage, toasts, openSettings, glowTick } =
+    useApp()
+  const preparedBackdrop = usePreparedBackdrop(backdrop)
   const compact = state.settings.panelSize === 'compact'
+  const focusMode = state.settings.focusMode !== false
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pointerInside = useRef(false)
   const reopenBlockedUntil = useRef(0)
+  const ignoreLeaveUntil = useRef(0)
+  const expandedRef = useRef(expanded)
+  const closingRef = useRef(false)
+  const closeSent = useRef(false)
+  const closeGen = useRef(0)
+  const closeStartedAt = useRef(0)
+  const metricsRef = useRef<NotchMetrics | null>(null)
+  const [metrics, setMetrics] = useState<NotchMetrics | null>(null)
+  const [closing, setClosing] = useState(false)
+  const [settled, setSettled] = useState(false)
   const accent = ACCENTS[state.settings.accent]
+  expandedRef.current = expanded
+  const sawExpanded = useRef(expanded)
+  if (expanded && !sawExpanded.current) ignoreLeaveUntil.current = Date.now() + OPEN_MS + 40
+  sawExpanded.current = expanded
+
+  const publishMetrics = useCallback((next: NotchMetrics | null) => {
+    if (!next) return
+    metricsRef.current = next
+    setMetrics(next)
+    applyTabMetrics(next)
+  }, [])
+
+  useLayoutEffect(() => {
+    let alive = true
+    void window.notch.getMetrics().then((next) => {
+      if (alive) publishMetrics(next)
+    })
+    const off = window.notch.onMetrics((next) => publishMetrics(next))
+    const giveUp = window.setTimeout(() => document.documentElement.classList.add('tab-ready'), 600)
+    return () => {
+      alive = false
+      off()
+      window.clearTimeout(giveUp)
+    }
+  }, [publishMetrics])
+
+  const finishClose = useCallback((generation: number) => {
+    if (closeGen.current !== generation || closeSent.current) return
+    closeSent.current = true
+    void window.notch.setExpanded(false)
+  }, [])
+
+  const beginClose = useCallback(() => {
+    if (!expandedRef.current || closingRef.current) return
+    if (prefersReducedMotion()) {
+      void window.notch.setExpanded(false)
+      return
+    }
+    const generation = ++closeGen.current
+    closingRef.current = true
+    closeSent.current = false
+    closeStartedAt.current = Date.now()
+    setClosing(true)
+    window.setTimeout(() => finishClose(generation), OPEN_MS + 40)
+  }, [finishClose])
 
   useEffect(() => {
-    if (compact && page === 'home') setPage('notes')
-  }, [compact, page, setPage])
+    const onClose = (): void => beginClose()
+    const off = window.notch.onRequestClose(onClose)
+    window.addEventListener('notch-request-close', onClose)
+    const offPrepare = window.notch.onPrepareOpen(() => {
+      document.documentElement.classList.add('notch-opening')
+      window.setTimeout(() => {
+        if (!expandedRef.current) document.documentElement.classList.remove('notch-opening')
+      }, 320)
+    })
+    return () => {
+      off()
+      offPrepare()
+      window.removeEventListener('notch-request-close', onClose)
+    }
+  }, [beginClose])
+
+  useEffect(() => {
+    if (!expanded) {
+      reopenBlockedUntil.current = Date.now() + 400
+      closingRef.current = false
+      setClosing(false)
+      setSettled(false)
+      return
+    }
+    closeGen.current += 1
+    closingRef.current = false
+    closeSent.current = false
+    setClosing(false)
+    document.documentElement.classList.remove('notch-opening')
+  }, [expanded])
 
   useEffect(() => {
     document.documentElement.style.setProperty('--accent', accent.color)
@@ -78,22 +202,21 @@ function Shell() {
       }
       if (typing) return
       if (event.ctrlKey || event.metaKey || event.altKey) return
-      const next = pageForKey(event.key, (target) => {
-        const section = OPTIONAL_SECTIONS.find((item) => item.page === target)
-        return section ? sectionEnabled(state, section.id) : true
-      })
+      const next = pageForKey(event.key, visibleSections(sectionPrefs(state), { compact }))
       if (!next) return
       event.preventDefault()
-      setPage(compact && next === 'home' ? 'notes' : next)
+      setPage(next)
       if (!expanded) setExpanded(true)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [compact, expanded, setExpanded, setPage, state.water.enabled])
+  }, [compact, expanded, setExpanded, setPage, state.settings.sections, state.water.enabled])
 
   useEffect(() => {
-    if (page === 'water' && !state.water.enabled) setPage(compact ? 'notes' : 'home')
-  }, [compact, page, setPage, state.water.enabled])
+    if (page === 'settings') return
+    const visible = visibleSections(sectionPrefs(state), { compact })
+    if (!visible.includes(page as SectionId)) setPage(visible[0])
+  }, [compact, page, setPage, state.settings.sections, state.water.enabled])
 
   useEffect(() => {
     return () => {
@@ -108,15 +231,6 @@ function Shell() {
     expandTimer.current = null
     collapseTimer.current = null
   }
-
-  useEffect(() => {
-    // After a collapse the pointer is often still sitting on the notch (for
-    // example: hover to open, press Esc). No pointerenter fires again, so hover
-    // would look dead until the cursor leaves and returns. Re-arming on the
-    // next pointermove fixes that, and the short block stops Esc from reopening
-    // the notch immediately.
-    if (!expanded) reopenBlockedUntil.current = Date.now() + 400
-  }, [expanded])
 
   useEffect(() => {
     if (expanded) return
@@ -160,7 +274,18 @@ function Shell() {
       observer.disconnect()
       window.removeEventListener('resize', report)
     }
-  }, [expanded, state.settings.notchStyle, toasts])
+  }, [expanded, metrics, state.settings.notchStyle, toasts])
+
+  useLayoutEffect(() => {
+    if (!expanded) return
+    const marks = performance.getEntriesByName('notch-open-request')
+    const started = marks.length > 0 ? marks[marks.length - 1].startTime : performance.now()
+    const frame = window.requestAnimationFrame(() => {
+      window.notch.reportTiming('open-first-frame', performance.now() - started)
+      performance.clearMarks('notch-open-request')
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [expanded])
 
   const armExpand = (): void => {
     if (state.settings.openTrigger === 'click') return
@@ -193,7 +318,8 @@ function Shell() {
       clearTimeout(expandTimer.current)
       expandTimer.current = null
     }
-    if (!expanded) return
+    if (!expanded || closingRef.current) return
+    if (Date.now() < ignoreLeaveUntil.current) return
     if (!wasInside) return
     if (pinned) return
     const active = document.activeElement as HTMLElement | null
@@ -213,76 +339,195 @@ function Shell() {
     setExpanded(true)
   }
 
+  const reduce = state.settings.reduceMotion === true || prefersReducedMotion()
+  const tabWidth = metrics?.tabScreen.width ?? 200
+  const tabHeight = metrics?.tabScreen.height ?? 28
+  const tabLeft = metrics ? metrics.tab.x : Math.round((viewport.width - tabWidth) / 2)
+  const tabTop = metrics ? metrics.tab.y : 0
+  const dockedSize = dockedPanelSize(viewport.width, viewport.height, compact)
+  const dockedLeft = dockedPanelLeft(tabLeft + tabWidth / 2, dockedSize.width, viewport.width)
+  const atTab = (!expanded || closing) && !reduce
+  const scaleX = dockedSize.width > 0 ? tabWidth / dockedSize.width : 1
+  const scaleY = dockedSize.height > 0 ? tabHeight / dockedSize.height : 1
   const appStyle = {
     '--accent': accent.color,
     '--accent-soft': accent.soft,
-    '--accent-deep': accent.deep
+    '--accent-deep': accent.deep,
+    '--panel-h': `${dockedSize.height}px`,
+    '--panel-w': `${dockedSize.width}px`,
+    '--panel-left': `${dockedLeft}px`,
+    '--flight-x': `${tabLeft - dockedLeft}px`,
+    '--flight-y': `${tabTop}px`,
+    '--flight-sx': String(scaleX),
+    '--flight-sy': String(scaleY)
   } as CSSProperties
 
+  useEffect(() => {
+    if (!expanded) return
+    if (focusMode) {
+      window.notch.setShape({ focusOff: true, rects: null })
+      return
+    }
+    // One shape for the whole flight: the tab and the settled panel. Measuring
+    // the transformed box every frame would call setShape on each tick, which
+    // is a Win32 region update and drops frames.
+    const flight = !settled || closing
+    const rects = [
+      flight
+        ? {
+            x: Math.max(0, Math.floor(Math.min(tabLeft, dockedLeft)) - 4),
+            y: 0,
+            width:
+              Math.ceil(Math.max(tabLeft + tabWidth, dockedLeft + dockedSize.width) - Math.min(tabLeft, dockedLeft)) +
+              8,
+            height: Math.ceil(Math.max(tabTop + tabHeight, dockedSize.height)) + 8
+          }
+        : {
+            x: Math.max(0, Math.floor(dockedLeft) - 2),
+            y: 0,
+            width: Math.ceil(dockedSize.width) + 6,
+            height: Math.ceil(dockedSize.height) + 6
+          }
+    ]
+    for (const node of document.querySelectorAll('.toast')) {
+      if (!(node instanceof HTMLElement)) continue
+      const rect = node.getBoundingClientRect()
+      if (rect.width < 2 || rect.height < 2) continue
+      rects.push({
+        x: Math.max(0, Math.floor(rect.left) - 2),
+        y: Math.max(0, Math.floor(rect.top) - 2),
+        width: Math.ceil(rect.width) + 6,
+        height: Math.ceil(rect.height) + 6
+      })
+    }
+    window.notch.setShape({ focusOff: true, rects })
+  }, [
+    expanded,
+    focusMode,
+    compact,
+    page,
+    toasts,
+    settled,
+    closing,
+    tabLeft,
+    tabTop,
+    tabWidth,
+    tabHeight,
+    dockedLeft,
+    dockedSize.width,
+    dockedSize.height
+  ])
+
+  useLayoutEffect(() => {
+    const system = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    document.documentElement.classList.toggle('reduce-motion', state.settings.reduceMotion === true || system)
+  }, [state.settings.reduceMotion])
+
+  useEffect(() => {
+    const flying = ((expanded && !settled) || closing) && !reduce
+    setClockPaused(flying)
+    return () => setClockPaused(false)
+  }, [expanded, settled, closing, reduce])
+
+  useEffect(() => {
+    if (!expanded || closing) return
+    if (reduce) {
+      setSettled(true)
+      return
+    }
+    const timer = window.setTimeout(() => setSettled(true), OPEN_MS + 50)
+    return () => window.clearTimeout(timer)
+  }, [expanded, closing, reduce])
+
   return (
+    <MotionConfig reducedMotion={reduce ? 'always' : 'user'}>
     <div
-      className={`app ${expanded ? 'is-expanded is-focus-mode' : 'is-collapsed'}${
-        state.settings.panelSize === 'compact' ? ' is-panel-compact' : ''
-      }`}
+      className={`app ${expanded ? 'is-expanded' : 'is-collapsed'}${
+        expanded && focusMode ? ' is-focus-mode' : ''
+      }${compact ? ' is-panel-compact' : ''}${metrics?.noticeAbove ? ' is-notice-above' : ''}`}
       style={appStyle}
       onPointerEnter={onPointerEnter}
       onPointerMove={onPointerMove}
       onPointerLeave={onPointerLeave}
     >
-      {expanded && (
+      {expanded && focusMode && (
         <div
-          className="focus-backdrop"
+          className={`focus-backdrop${closing ? ' is-closing' : ''}`}
           onClick={() => setExpanded(false)}
-          aria-hidden="true"
         >
-          {backdrop && (
+          {preparedBackdrop && (
             <div
-              className="focus-backdrop-image"
-              style={{ backgroundImage: `url("${backdrop}")` }}
+              className="focus-backdrop-image is-prepared"
+              style={{ backgroundImage: `url("${preparedBackdrop}")` }}
             />
           )}
           <div className="focus-backdrop-tint" />
-          <span className="focus-hint">Focused · click outside to close</span>
+          {settled && !closing && (
+            <span className="focus-hint">
+              Focused · click outside to close · turn off focus mode in{' '}
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  openSettings('notch')
+                }}
+              >
+                Settings
+              </button>
+            </span>
+          )}
         </div>
       )}
-      {expanded ? (
-        <motion.div
-          className="panel"
-          initial={{ opacity: 0, y: -8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        >
+      <div
+        className={`panel is-spatial ${atTab ? 'is-from-tab' : 'is-open'}${!expanded ? ' is-parked' : ''}${
+          closing ? ' is-closing' : ''
+        }${reduce ? ' is-instant' : ''}`}
+        style={{ left: dockedLeft, top: 0, width: dockedSize.width, height: dockedSize.height }}
+        onTransitionEnd={(event) => {
+          if (event.propertyName !== 'transform' || event.target !== event.currentTarget) return
+          if (closingRef.current) {
+            finishClose(closeGen.current)
+            return
+          }
+          if (expandedRef.current) setSettled(true)
+        }}
+      >
+        <div className="panel-body">
           <CompactSlotProvider>
-          <Header />
-          <main className="page-host">
-            <AnimatePresence mode="wait" initial={false}>
-              <motion.div
-                key={page}
-                className="page-frame"
-                initial={{ opacity: 0, y: 9 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -5 }}
-                transition={{ duration: 0.17, ease: [0.22, 1, 0.36, 1] }}
-              >
-                {page === 'home' && <Dashboard />}
-                {page === 'notes' && <NotesPage />}
-                {page === 'music' && <MusicPage />}
-                {page === 'planner' && <PlannerPage />}
-                {page === 'sessions' && <SessionsPage />}
-                {page === 'posture' && <PosturePage />}
-                {page === 'water' && <WaterPage />}
-                {page === 'settings' && <SettingsPage />}
-              </motion.div>
-            </AnimatePresence>
-          </main>
-          <Footer />
+            <Header />
+            <main className="page-host">
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.div
+                  key={page}
+                  className="page-frame"
+                  initial={{ opacity: 0, y: 9 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -5 }}
+                  transition={{ duration: 0.17, ease: [0.22, 1, 0.36, 1] }}
+                >
+                  {page === 'home' && <Dashboard />}
+                  {page === 'notes' && <NotesPage />}
+                  {page === 'music' && <MusicPage />}
+                  {page === 'planner' && <PlannerPage />}
+                  {page === 'sessions' && <SessionsPage />}
+                  {page === 'posture' && <PosturePage />}
+                  {page === 'water' && <WaterPage />}
+                  {page === 'settings' && <SettingsPage />}
+                </motion.div>
+              </AnimatePresence>
+            </main>
+            <Footer />
           </CompactSlotProvider>
-        </motion.div>
-      ) : (
+        </div>
+        <EdgeGlow tick={glowTick} ready={settled && !closing && expanded} />
+      </div>
+      <div className={`collapsed-layer${expanded ? ' is-hidden' : ''}`}>
         <CollapsedBar onOpen={openImmediately} />
-      )}
-      {expanded ? <Toasts /> : <CollapsedNotice onOpen={openImmediately} />}
+        {!expanded && <CollapsedNotice onOpen={openImmediately} />}
+      </div>
+      {expanded && <Toasts />}
     </div>
+    </MotionConfig>
   )
 }
 

@@ -2,11 +2,14 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppState,
   NotchApi,
+  NotchMetrics,
   NoteSearchResult,
   ReminderEvent,
+  SessionReplyEvent,
   SessionSendResult,
   SessionsSnapshot,
   SpotifyAction,
+  SpotifyLibrary,
   SpotifyPlayback,
   SpotifyQueueItem,
   SpotifyStatus,
@@ -38,7 +41,12 @@ const api: NotchApi = {
   onReminder: (callback) => subscribe('reminder:fired', callback),
   onVaultChanged: (callback) => subscribe('vault:changed', callback),
   onNavigate: (callback) => subscribe('navigate', callback),
-  onBlur: (callback) => subscribe('notch:blur', () => callback()),
+  getMetrics: () => ipcRenderer.invoke('notch:get-metrics') as Promise<NotchMetrics | null>,
+  onMetrics: (callback) => subscribe<NotchMetrics>('notch:metrics', callback),
+  onRequestClose: (callback) => subscribe<void>('notch:request-close', () => callback()),
+  onPrepareOpen: (callback) => subscribe<void>('notch:prepare-open', () => callback()),
+  onPresence: (callback) => subscribe<{ hidden: boolean }>('notch:presence', callback),
+  reportTiming: (mark, ms) => ipcRenderer.send('notch:timing', mark, ms),
   obsidian: {
     chooseVault: () => ipcRenderer.invoke('obsidian:choose-vault') as Promise<string | null>,
     tree: (vaultPath) => ipcRenderer.invoke('obsidian:tree', vaultPath) as Promise<VaultNode[]>,
@@ -72,6 +80,7 @@ const api: NotchApi = {
     disconnect: () => ipcRenderer.invoke('spotify:disconnect') as Promise<SpotifyStatus>,
     player: () => ipcRenderer.invoke('spotify:player') as Promise<SpotifyPlayback>,
     queue: () => ipcRenderer.invoke('spotify:queue') as Promise<SpotifyQueueItem[]>,
+    library: () => ipcRenderer.invoke('spotify:library') as Promise<SpotifyLibrary>,
     action: (action: SpotifyAction) =>
       ipcRenderer.invoke('spotify:action', action) as Promise<SpotifyPlayback>,
     launch: (target?: string) => ipcRenderer.invoke('spotify:launch', target) as Promise<boolean>
@@ -87,7 +96,8 @@ const api: NotchApi = {
         code?: string
       }>,
     focusCodex: () => ipcRenderer.invoke('sessions:focus-codex') as Promise<boolean>,
-    onSendResult: (callback) => subscribe<SessionSendResult>('session:send-result', callback)
+    onSendResult: (callback) => subscribe<SessionSendResult>('session:send-result', callback),
+    onReply: (callback) => subscribe<SessionReplyEvent>('session:reply', callback)
   }
 }
 

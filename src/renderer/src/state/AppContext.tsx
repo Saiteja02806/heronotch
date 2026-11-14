@@ -1,9 +1,9 @@
+import { subscribeClock, useNow } from './clock'
 import {
   createContext,
   useCallback,
   useContext,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ReactNode
@@ -40,6 +40,7 @@ interface AppContextValue {
   dismissToast: (id: string) => void
   expanded: boolean
   backdrop: string | null
+  viewport: { width: number; height: number }
   setExpanded: (value: boolean) => void
   pinned: boolean
   setPinned: (value: boolean) => void
@@ -54,9 +55,6 @@ interface AppContextValue {
   settingsSection: SettingsSection
   setSettingsSection: (section: SettingsSection) => void
   openSettings: (section?: SettingsSection) => void
-  now: number
-  timerRemaining: number
-  timerProgress: number
   startTimer: () => void
   pauseTimer: () => void
   resetTimer: () => void
@@ -75,11 +73,12 @@ interface AppContextValue {
   addGlass: () => void
   undoGlass: () => void
   setWaterGoal: (glasses: number) => void
-  setWaterEnabled: (enabled: boolean) => void
   vaultRevision: number
   sessions: SessionsSnapshot | null
   sessionsLoading: boolean
   refreshSessions: () => Promise<void>
+  glowTick: number
+  repliedSessionId: string | null
 }
 
 const AppContext = createContext<AppContextValue | null>(null)
@@ -100,13 +99,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState | null>(null)
   const [expanded, setExpandedState] = useState(false)
   const [backdrop, setBackdrop] = useState<string | null>(null)
+  const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight })
+  const viewportHold = useRef(0)
   const [pinned, setPinnedState] = useState(false)
   const [page, setPage] = useState<Page>('home')
   const [pendingNote, setPendingNote] = useState<string | null>(null)
   const [plannerDate, setPlannerDate] = useState<string>(todayKey())
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance')
   const [toasts, setToasts] = useState<ToastItem[]>([])
-  const [now, setNow] = useState(Date.now())
+  const [glowTick, setGlowTick] = useState(0)
+  const [repliedSessionId, setRepliedSessionId] = useState<string | null>(null)
+  const notificationsOn = useRef(true)
+  notificationsOn.current = !state || state.settings.notifications !== false
   const [vaultRevision, setVaultRevision] = useState(0)
   const [sessions, setSessions] = useState<SessionsSnapshot | null>(null)
   const [sessionsLoading, setSessionsLoading] = useState(false)
@@ -123,6 +127,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     let receivedExpandedEvent = false
     const offExpanded = window.notch.onExpanded((event) => {
       receivedExpandedEvent = true
+      if (event.viewport) {
+        viewportHold.current = Date.now()
+        setViewport(event.viewport)
+      }
       setExpandedState(event.expanded)
       if (!event.expanded) {
         setBackdrop(null)
@@ -141,9 +149,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const offBackdrop = window.notch.onBackdrop((event) => setBackdrop(event.image))
     const offState = window.notch.onStateUpdated((next) => setState(next))
     const offReminder = window.notch.onReminder((event) => {
+      if (!notificationsOn.current) return
       const day = event.date === todayKey() ? 'Today' : formatDateShort(event.date)
       const at = timeToTimestamp(event.date, event.time)
       const id = uid()
+      setGlowTick((value) => value + 1)
       setToasts((current) => [
         ...current,
         {
@@ -160,6 +170,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }, 12000)
     })
     const offVault = window.notch.onVaultChanged(() => setVaultRevision((value) => value + 1))
+    const onResize = (): void => {
+      // Ignore the collapsed window, and the resize that races the open event.
+      if (Date.now() - viewportHold.current < 700) return
+      if (window.innerWidth < 640 || window.innerHeight < 400) return
+      setViewport({ width: window.innerWidth, height: window.innerHeight })
+    }
+    window.addEventListener('resize', onResize)
+
     const offNavigate = window.notch.onNavigate((target) => {
       setPage(target as Page)
       setExpandedState(true)
@@ -173,33 +191,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
       offReminder()
       offVault()
       offNavigate()
+      window.removeEventListener('resize', onResize)
     }
   }, [])
 
   useEffect(() => {
-    const interval = setInterval(() => setNow(Date.now()), 500)
-    const onFocus = (): void => setNow(Date.now())
-    window.addEventListener('focus', onFocus)
-    return () => {
-      clearInterval(interval)
-      window.removeEventListener('focus', onFocus)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!state) return
-    const day = todayKey()
-    const stale =
-      state.timer.dayKey !== day ||
-      state.posture.dayKey !== day ||
-      state.water.dayKey !== day
-    if (!stale) return
-    const seq = writeSeq.current
-    void window.notch.getState().then((remote) => {
-      if (writeSeq.current !== seq) return
-      setState(remote)
+    return subscribeClock(() => {
+      if (!state) return
+      const day = todayKey()
+      const stale =
+        state.timer.dayKey !== day ||
+        state.posture.dayKey !== day ||
+        state.water.dayKey !== day
+      if (!stale) return
+      const seq = writeSeq.current
+      void window.notch.getState().then((remote) => {
+        if (writeSeq.current !== seq) return
+        setState(remote)
+      })
     })
-  }, [now, state])
+  }, [state])
 
   const refreshSessions = useCallback(async () => {
     setSessionsLoading(true)
@@ -217,11 +228,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const presenceHidden = useRef(false)
+
   useEffect(() => {
+    return window.notch.onPresence((event) => {
+      presenceHidden.current = event.hidden
+    })
+  }, [])
+
+  useEffect(() => {
+    let timer = 0
+    let alive = true
+    const schedule = (): void => {
+      const wait = presenceHidden.current ? 120_000 : expanded ? 15_000 : 60_000
+      timer = window.setTimeout(() => {
+        if (!alive) return
+        if (!presenceHidden.current) void refreshSessions()
+        schedule()
+      }, wait)
+    }
     void refreshSessions()
-    const interval = setInterval(() => void refreshSessions(), 15_000)
-    return () => clearInterval(interval)
-  }, [refreshSessions])
+    schedule()
+    return () => {
+      alive = false
+      window.clearTimeout(timer)
+    }
+  }, [expanded, refreshSessions])
 
   const update = useCallback((patch: AppStatePatch) => {
     setState((prev) => (prev ? mergeLocal(prev, patch) : prev))
@@ -246,6 +278,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const showToast = useCallback(
     (title: string, message?: string, tone: ToastItem['tone'] = 'default') => {
       const id = uid()
+      setGlowTick((value) => value + 1)
       setToasts((current) => [...current.slice(-2), { id, title, message, tone }])
       setTimeout(() => {
         setToasts((current) => current.filter((toast) => toast.id !== id))
@@ -259,29 +292,47 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
+    return window.notch.sessions.onReply((event) => {
+      showToast(`${event.label} replied: ${event.title}`)
+      setRepliedSessionId(event.sessionId)
+      window.setTimeout(() => {
+        setRepliedSessionId((current) => (current === event.sessionId ? null : current))
+      }, 22000)
+    })
+  }, [showToast])
+
+  useEffect(() => {
     return window.notch.sessions.onSendResult((result) => {
-      if (result.ok) {
-        showToast(
-          `${result.label} finished the message`,
-          'The agent completed this turn. Open its app to see the full response.',
-          'success'
-        )
-      } else {
-        showToast(
-          'Agent message failed',
-          `${result.label}: ${result.error || 'The agent command exited with an error.'}`,
-          'error'
-        )
+      if (result.status === 'delivered') {
+        showToast(`Delivered to ${result.label}`, 'The message is in that session.', 'success')
+        return
       }
+      if (result.status === 'unconfirmed') {
+        showToast(
+          `${result.label} did not confirm delivery`,
+          result.error || 'The command finished, but the message was not found in that session.',
+          'default'
+        )
+        return
+      }
+      showToast(
+        `${result.label} did not deliver`,
+        result.error || 'The agent command failed.',
+        'error'
+      )
     })
   }, [showToast])
 
   const setExpanded = useCallback((value: boolean) => {
     if (!value) {
-      setExpandedState(false)
-      setBackdrop(null)
+      // The shell plays the shrink, then tells the main process to drop the
+      // click shape back to the tab. Clearing expanded here would hide the
+      // panel before it can move.
+      window.dispatchEvent(new Event('notch-request-close'))
+      return
     }
-    void window.notch.setExpanded(value)
+    performance.mark('notch-open-request')
+    void window.notch.setExpanded(true)
   }, [])
 
   const setPinned = useCallback(
@@ -313,28 +364,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     void window.notch.setExpanded(true)
   }, [])
 
-  const timer = state?.timer
-  const timerRemaining = useMemo(() => {
-    if (!timer) return 0
-    if (timer.running && timer.endsAt) return Math.max(0, Math.ceil((timer.endsAt - now) / 1000))
-    return timer.remaining
-  }, [timer, now])
-
-  const timerProgress = useMemo(() => {
-    if (!timer) return 0
-    const total = timer.durations[timer.mode] * 60
-    if (total <= 0) return 0
-    return Math.max(0, Math.min(1, 1 - timerRemaining / total))
-  }, [timer, timerRemaining])
-
   const startTimer = useCallback(() => {
     if (!state) return
     const current = state.timer
-    const remaining = current.running
-      ? timerRemaining
-      : current.remaining > 0
-        ? current.remaining
-        : current.durations[current.mode] * 60
+    const remaining =
+      current.running && current.endsAt
+        ? Math.max(0, Math.ceil((current.endsAt - Date.now()) / 1000))
+        : current.remaining > 0
+          ? current.remaining
+          : current.durations[current.mode] * 60
     timerGuard.current = null
     update({
       timer: {
@@ -344,7 +382,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         endsAt: Date.now() + remaining * 1000
       }
     })
-  }, [state, timerRemaining, update])
+  }, [state, update])
 
   const pauseTimer = useCallback(() => {
     if (!state) return
@@ -395,35 +433,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => {
-    if (!state) return
-    const current = state.timer
-    if (!current.running || !current.endsAt) return
-    if (Date.now() < current.endsAt) return
-    if (timerGuard.current === current.endsAt) return
-    timerGuard.current = current.endsAt
+    if (!state?.timer.running || !state.timer.endsAt) return
+    return subscribeClock(() => {
+      const current = state.timer
+      if (!current.running || !current.endsAt) return
+      if (Date.now() < current.endsAt) return
+      if (timerGuard.current === current.endsAt) return
+      timerGuard.current = current.endsAt
 
-    const minutes = current.durations[current.mode]
-    const completed = current.mode === 'focus'
-    const label = current.mode === 'focus' ? 'Focus session complete' : 'Break is over'
-    if (state.settings?.timerNotifications !== false) {
-      window.notch.notify(label, completed ? `${minutes} minutes of focus logged.` : 'Ready for another round?')
-      showToast(label, completed ? `${minutes} focused minutes logged.` : 'Time to stretch.', 'success')
-      playChime()
-    }
-    update({
-      timer: {
-        ...current,
-        running: false,
-        endsAt: null,
-        remaining: minutes * 60,
-        sessionsToday: current.sessionsToday + 1,
-        completedToday: current.completedToday + 1
-      },
-      focusLog: completed
-        ? [...state.focusLog, { at: Date.now(), minutes }].slice(-250)
-        : state.focusLog
+      const minutes = current.durations[current.mode]
+      const completed = current.mode === 'focus'
+      const label = current.mode === 'focus' ? 'Focus session complete' : 'Break is over'
+      if (state.settings?.timerNotifications !== false) {
+        window.notch.notify(
+          label,
+          completed ? `${minutes} minutes of focus logged.` : 'Ready for another round?',
+          true
+        )
+        showToast(label, completed ? `${minutes} focused minutes logged.` : 'Time to stretch.', 'success')
+        playChime()
+      }
+      update({
+        timer: {
+          ...current,
+          running: false,
+          endsAt: null,
+          remaining: minutes * 60,
+          sessionsToday: current.sessionsToday + 1,
+          completedToday: current.completedToday + 1
+        },
+        focusLog: completed
+          ? [...state.focusLog, { at: Date.now(), minutes }].slice(-250)
+          : state.focusLog
+      })
     })
-  }, [now, state, update, showToast])
+  }, [state, update, showToast])
 
   const addTask = useCallback<AppContextValue['addTask']>(
     (input) => {
@@ -510,13 +554,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [commitWater]
   )
 
-  const setWaterEnabled = useCallback(
-    (enabled: boolean) => {
-      commitWater((current) => ({ ...current, enabled }))
-    },
-    [commitWater]
-  )
-
   if (!state) {
     return <div className="boot" aria-hidden="true" />
   }
@@ -530,6 +567,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dismissToast,
     expanded,
     backdrop,
+    viewport,
     setExpanded,
     pinned,
     setPinned,
@@ -544,9 +582,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     settingsSection,
     setSettingsSection,
     openSettings,
-    now,
-    timerRemaining,
-    timerProgress,
     startTimer,
     pauseTimer,
     resetTimer,
@@ -558,11 +593,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     addGlass,
     undoGlass,
     setWaterGoal,
-    setWaterEnabled,
     vaultRevision,
     sessions,
     sessionsLoading,
-    refreshSessions
+    refreshSessions,
+    glowTick,
+    repliedSessionId
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>
@@ -572,4 +608,18 @@ export function useApp(): AppContextValue {
   const value = useContext(AppContext)
   if (!value) throw new Error('useApp must be used inside AppProvider')
   return value
+}
+
+/** Remaining seconds for the focus timer. Only this hook re-renders each second. */
+export function useTimerClock(): { remaining: number; progress: number } {
+  const { state } = useApp()
+  const now = useNow()
+  const timer = state.timer
+  const remaining =
+    timer.running && timer.endsAt
+      ? Math.max(0, Math.ceil((timer.endsAt - now) / 1000))
+      : timer.remaining
+  const total = timer.durations[timer.mode] * 60
+  const progress = total <= 0 ? 0 : Math.max(0, Math.min(1, 1 - remaining / total))
+  return { remaining, progress }
 }

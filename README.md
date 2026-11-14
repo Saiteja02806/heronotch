@@ -2,19 +2,19 @@
 
 A personal dashboard that lives at the top of your screen — built for Windows with Electron, React and TypeScript.
 
-Hover the top-center notch and it unfolds into a full workspace: your Obsidian vault, Spotify controls, a focus timer, live coding sessions, a private posture coach, tasks, calendar reminders, and the settings that make it yours. The notch always starts tucked away. Use the **Collapse** arrow at the top right (or `Esc`) to fold it back into a slim now-playing / countdown / session bar.
+Hover the collapsed tab and the workspace grows out of it: your notes folder, Spotify controls, a focus timer, live coding sessions, a private posture coach, tasks, calendar reminders, and the settings that make it yours. The notch always starts tucked away. Use the **Collapse** button at the top right or press `Esc` and it shrinks back into that tab. With focus mode on, clicking the blurred backdrop closes it too.
 
 ## What it does
 
-- **Focus mode** — when the notch opens, the primary display is covered by a blurred, dimmed snapshot of your current desktop. The notch stays sharp on top. Click anywhere on the blurred area (or press `Esc`) to close it and return to the desktop.
-- **Notch-first interaction** — a plain black notch tab sits flush with the top edge, empty like a hardware notch; a tiny play indicator appears only while music runs. Hover it, click it, or press `Ctrl Shift Space`. It starts collapsed, uses a full-screen focus layer while open, and can be pinned when you want it to stay. The notch can be placed anywhere on the screen from **Settings → Notch → Placement**.
+- **Focus mode** — on by default. When the notch opens, the primary display is covered by a blurred, dimmed snapshot of your current desktop. The notch stays sharp on top. Click anywhere on the blurred area (or press `Esc`) to close it and return to the desktop. Turn it off in **Settings → Notch** and the blur stays off: the panel stands alone, and clicks outside it go to the window underneath instead of closing the notch.
+- **Notch-first interaction** — a plain black notch tab sits on the screen edge, empty like a hardware notch; a tiny play indicator appears only while music runs. Hover it, click it, or press `Ctrl Shift Space` and the workspace grows out of the tab. It starts collapsed. **Pin** keeps it open when the pointer leaves. Collapse and `Esc` always close it. Clicking outside closes it only while focus mode is on. Place the tab anywhere on the screen from **Settings → Notch → Placement**. The open workspace stays along the top edge, lined up with the tab.
 - **Obsidian, directly** — choose any local vault. Browse every folder and file, search by name or content, read, create, rename, rewrite, and move notes to the trash. Edits auto-save after 750ms, with a Markdown preview and one-click "open in Obsidian". No plugin, no sync account.
 - **Spotify, with no setup for the basics** — if Spotify Desktop is open, Notch controls it through the Windows media session: current track, play/pause, previous/next and seek work immediately. A full optional Spotify Web API connection adds **next track**, the queue, volume, shuffle and repeat. Uses PKCE, so no client secret is stored.
 - **Focus timer** — Focus / Short / Long presets with customizable lengths, a breathing coral timer disc, paused/running state that survives restarts, completed-session logging, and a system notification when a session ends.
 - **Coding sessions, with a reply box** — reads the local session state of **Codex**, **OpenCode** and **Anti Gravity**, plus their running processes. See live turns, recent conversations, models/tokens, and open a session's project from the notch. Click **Message** on a session to send a follow-up without switching apps. Provider logos make each session instantly identifiable. The board has search, hides subagent noise by default, and the dashboard gets a live session card.
 - **Posture coach** — an always-on local webcam posture score from 0 to 100, adaptive seat setup, slouch alerts, daily good/bad posture totals, and a clear on/off switch. While enabled it keeps watching even when the notch is collapsed. Frames are processed on-device and never stored or uploaded.
 - **Tasks & calendar** — a day planner with month calendar, priorities, times, notes, and reminders (`at time`, `5/10/30/60 min before`). Reminders fire a Windows notification and unfold a notice card under the collapsed notch, so they are visible while you work in another app. Setting a reminder confirms itself with an in-app toast.
-- **Personalization** - five accent themes, a live notch preview, your name in the header, hover/click opening, hover delay, a drag-anywhere placement map for the collapsed notch, pin behavior, launch at login, notification control, and keyboard shortcuts.
+- **Personalization** - five accent themes, a live notch preview, your name in the header, hover/click opening, hover delay, a drag-anywhere placement map for the collapsed tab, pin behavior, launch at login, notification control, and keyboard shortcuts.
 - **Fast** — everything is local: `json` state, local Markdown, local session databases, local posture inference, no backend.
 
 ## Quick start
@@ -117,17 +117,17 @@ break it.
 | Action | Shortcut |
 | --- | --- |
 | Toggle the notch | `Ctrl` + `Shift` + `Space` |
-| Collapse / close | `Esc` or the **Collapse** arrow |
+| Collapse / close | `Esc` or the **Collapse** button. Click outside closes it only while focus mode is on |
 | Switch sections | `1` – `7` |
 | Open notes search | `Ctrl` + `K` inside Notes |
 | Save note now | `Ctrl` + `S` |
 | Bold / italic in the note editor | `Ctrl` + `B` / `Ctrl` + `I` |
 
-The notch always launches collapsed. By default it opens on hover after the delay set in **Settings → Notch** (140ms by default); switch **Open with** to **Click** if you would rather it only opens when you click the tab. While open, it covers the primary display with a blurred snapshot of the desktop so your attention lands on the notch. Click the blurred area, use the **Collapse** arrow in the header, or press `Esc` to close it. `Esc` works even when the notch never took focus, which is the normal case for a hover-open. The notch background is refreshed while collapsed, so the blur reflects the desktop you were just using.
+The notch always launches collapsed. By default it opens on hover after the delay set in **Settings → Notch** (140ms by default); switch **Open with** to **Click** if you would rather it only opens when you click the tab. Opening grows the workspace out of the tab; closing shrinks it back. Focus mode is on by default: while open, the notch covers the primary display with a blurred snapshot of the desktop. Click the blurred area, use the **Collapse** button in the header, or press `Esc` to close it. Turn focus mode off and there is no blur; clicks outside the panel reach the desktop, and you close with **Collapse**, `Esc`, or by moving the pointer away. Pin only stops the pointer-leave close. `Esc` works even when the notch never took focus, which is the normal case for a hover-open. The snapshot is refreshed while collapsed, so the blur reflects the desktop you were just using when focus mode is on.
 
 Right-click the system tray icon for **Open**, **Collapse**, and **Quit**. Quit from Settings or the tray when you want to stop the app.
 
-The collapsed bar is not locked to the top centre. Open **Settings → Notch → Placement**, then drag the small notch on the screen map to any spot — corners, edges or the middle. The position is saved in normalised coordinates, so it survives restarts and adapts to different display sizes. **Preview** collapses the notch immediately so you can see the result. **Reset** returns it to the top centre.
+The collapsed tab is not locked to the top centre. Open **Settings → Notch → Placement**, then drag the small tab on the screen map to any spot — corners, edges or the middle. The anchor places the visible tab, and the map uses the same math as the screen. The open workspace stays on the top edge and lines up horizontally with the tab, so a tab in a bottom corner still opens along the top. The position is saved in normalised coordinates, so it survives restarts and adapts to different display sizes. **Preview** collapses the notch so you can see the result. **Reset** returns the tab to the top centre.
 
 ## Notes folder
 
@@ -186,17 +186,17 @@ The board refreshes every 15 seconds and has a manual refresh button. Folder but
 
 ### Sending a message from the notch
 
-Each top-level session row has a **Message** button. The composer writes to the existing local session through that provider's own local interface:
+Each top-level session row has a **Message** button. It opens a one-line composer under that row (Enter sends, Esc cancels). The message goes to that existing local session through the provider's own local interface:
 
 - **OpenCode** — `opencode run --session <id>` against the running OpenCode service.
 - **Codex** — `codex exec resume <thread-id> "<message>"`, using the newest Codex CLI installed by the desktop app so current `config.toml` keys are understood.
 - **Anti Gravity** — the official local `agentapi send-message <conversation-id> "<message>"` language-server command.
 
-The message is sent as a normal follow-up. The agent's permissions and approvals still apply inside its own app; Notch does not silently auto-approve tool access. The composer confirms when the command starts, then a global notification reports whether the CLI finished or failed — even if you switch tabs.
+The agent's permissions and approvals still apply inside its own app; Notch does not silently auto-approve tool access. While the command is running the row says **Sending**. Notch only says **Delivered** after the command exits successfully *and* the same text is found afterwards as a user turn in that session's own store (OpenCode `part` joined to a user `message`, or the Codex rollout file whose name contains that thread id). If the command finishes but the text cannot be found, or the store cannot be read, the row says the delivery is **unconfirmed** and gives the reason. A failed command, a missing CLI, or a locked Codex thread is **failed**, with the reason. Notch never reports a message as sent just because a process started.
 
 > **Open Codex threads are locked.** While a Codex thread is open in ChatGPT, Codex holds a writer lock and does not expose its app-server to other processes. Notch detects that before spawning anything and offers **Copy & open ChatGPT** rather than claiming the message was sent. Close the thread (or use the ChatGPT composer) to deliver there.
 
-> The provider must be installed and running. Anti Gravity's local agent service is only available while its language server is running. Subagent conversations are read-only in this view.
+> The provider must be installed and running. Anti Gravity's local agent service is only available while its language server is running. Subagent conversations are read-only in this view. Anti Gravity does not keep the full user message in `conversation_summaries.db`, so a finished command there stays unconfirmed unless a message table for that conversation contains the text.
 
 > These tools change their local storage formats over time. Notch fails quietly if a database is missing or locked and still shows the other providers.
 
@@ -270,7 +270,7 @@ src/
 ## Known limits
 
 - The notch is a frameless always-on-top window, not a macOS hardware cutout. It docks to the primary display; multi-monitor blur overlays are not exposed yet.
-- The focus backdrop is a local screen snapshot taken while the notch is collapsed (via the built-in Windows screenshot API). If screen capture is unavailable or blocked by policy, the notch falls back to a dark translucent focus layer. The snapshot never leaves the machine.
+- Focus mode is on by default and can be turned off. While it is on, the backdrop is a local screen snapshot taken while the notch is collapsed (via the built-in Windows screenshot API). If screen capture is unavailable or blocked by policy, the notch falls back to a dark translucent layer. The snapshot never leaves the machine. While focus mode is off there is no blur, and clicks outside the panel reach the desktop.
 - Obsidian is accessed as plain Markdown files. Canvas files can be listed/renamed but not edited in the notch editor.
 - Text editing targets Markdown and `.txt`; attachments open externally.
 - Hover expansion depends on the window having a small visible surface at the top. Full-screen exclusive games may hide or fight with always-on-top windows.
@@ -279,7 +279,7 @@ src/
 - Sending a message starts the provider's own local CLI process. It does not bypass that provider's approval policy or sandbox. Anti Gravity messaging needs its language server running; Codex/OpenCode messaging needs their CLI/auth available.
 - Basic Spotify control needs Spotify Desktop open and uses the Windows media session. Queue / next track / volume / shuffle / repeat require the optional Web API connection; the local session does not expose the queue.
 - The posture model downloads on first enable, so that one action needs an internet connection. Detection afterwards is local. Camera quality, lighting and framing affect the score. The camera LED is hardware-controlled and cannot be turned off while streaming; the coach runs continuously while enabled, so turn it off to release the camera.
-- The focus backdrop is a snapshot of the primary display taken while the notch is collapsed. If desktop capture is unavailable, it falls back to a dark gradient; other monitors are not blurred.
+- Other monitors are not blurred. The snapshot, when focus mode is on, is only the primary display.
 
 ## License
 

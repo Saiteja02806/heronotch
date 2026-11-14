@@ -1,3 +1,5 @@
+import type { SectionPrefs } from './sections'
+
 export type Accent = 'coral' | 'mint' | 'violet' | 'ice' | 'gold'
 
 export type TimerMode = 'focus' | 'short' | 'long'
@@ -31,6 +33,24 @@ export interface Settings {
   userName: string
   pinOnOpen: boolean
   panelSize: 'full' | 'compact'
+  /** Blur and dim the desktop behind the open notch. On unless turned off. */
+  focusMode: boolean
+  /**
+   * Which Windows media session the notch follows.
+   * `auto` uses the session that is playing. Anything else is that app's id.
+   */
+  mediaSource?: string
+  /** Hide the tab while another app covers the primary display. On unless turned off. */
+  autoHideFullscreen?: boolean
+  /** Process names the tab must never sit on top of, with or without .exe. */
+  neverOver?: string[]
+  /** Turn off motion in the notch, in addition to the system setting. */
+  reduceMotion?: boolean
+  /**
+   * Which header sections are on the notch, and in what order.
+   * Absent on older saves; filled in from the water switch on load.
+   */
+  sections?: SectionPrefs
 }
 
 export interface TimerState {
@@ -113,6 +133,7 @@ export interface AppState {
   posture: PostureState
   water: WaterState
   focusLog: FocusSession[]
+  spotifyMemory: SpotifyMemory | null
 }
 
 export interface AppStatePatch {
@@ -123,6 +144,7 @@ export interface AppStatePatch {
   posture?: Partial<PostureState>
   water?: Partial<WaterState>
   focusLog?: FocusSession[]
+  spotifyMemory?: SpotifyMemory | null
 }
 
 export type SessionProvider = 'codex' | 'opencode' | 'antigravity' | 'claude' | 'cursor' | 'windsurf' | 'zed'
@@ -162,9 +184,20 @@ export interface SessionSendResult {
   sessionId: string
   provider: SessionProvider
   label: string
+  /** True only when the message was found afterwards in that session. */
   ok: boolean
+  status: 'delivered' | 'unconfirmed' | 'failed'
   error?: string
   code?: string
+}
+
+export interface SessionReplyEvent {
+  sessionId: string
+  provider: SessionProvider
+  label: string
+  title: string
+  /** assistant: a new assistant turn was read. summary: Anti Gravity only reported the turn finished. */
+  evidence: 'assistant' | 'summary'
 }
 
 export interface VaultNode {
@@ -196,6 +229,12 @@ export interface SpotifyStatus {
   localAvailable: boolean
   localTitle?: string | null
   localArtist?: string | null
+  /** Apps currently publishing a Windows media session. */
+  mediaSources?: { id: string; label: string }[]
+  /** The saved grant is missing a scope this version asks for, usually recently played. */
+  needsConsent: boolean
+  /** Screenshot-only hint. Absent in normal use. */
+  demoPhase?: 'opening' | 'nodevice' | 'premium' | null
 }
 
 export interface SpotifyTrack {
@@ -240,8 +279,50 @@ export interface SpotifyQueueItem {
   duration: number
 }
 
+export interface SpotifyRecentItem {
+  id: string
+  uri: string
+  name: string
+  artists: string
+  image: string | null
+  duration: number
+  contextUri: string | null
+  contextType: 'album' | 'playlist' | 'show' | 'artist' | null
+  contextName: string | null
+  playedAt: number
+}
+
+export interface SpotifyPlaylistItem {
+  id: string
+  uri: string
+  name: string
+  image: string | null
+  owner: string
+}
+
+export interface SpotifyLibrary {
+  recent: SpotifyRecentItem[]
+  playlists: SpotifyPlaylistItem[]
+}
+
+/** Last track Notch saw, so the music card has something to show before Spotify answers. */
+export interface SpotifyMemory {
+  track: SpotifyTrack
+  contextUri: string | null
+  updatedAt: number
+}
+
 export interface NotchToggleEvent {
   expanded: boolean
+  /** Display size the window was just resized to. Present when opening. */
+  viewport?: { width: number; height: number }
+}
+
+/** Where the collapsed tab sits, in window pixels and on screen. */
+export interface NotchMetrics {
+  tab: { x: number; y: number; width: number; height: number; radius: number }
+  tabScreen: { x: number; y: number; width: number; height: number }
+  noticeAbove: boolean
 }
 
 export interface BackdropEvent {
@@ -261,6 +342,7 @@ export type SpotifyAction =
   | { type: 'next' }
   | { type: 'previous' }
   | { type: 'play-track'; uri: string; queue?: string[]; deviceId?: string; contextUri?: string }
+  | { type: 'play-context'; contextUri: string; deviceId?: string }
   | { type: 'seek'; position: number }
   | { type: 'volume'; volume: number }
   | { type: 'shuffle'; state: boolean }
@@ -272,7 +354,13 @@ export interface NotchApi {
   getVersion: () => Promise<string>
   setState: (patch: AppStatePatch) => Promise<AppState>
   setExpanded: (expanded: boolean) => Promise<boolean>
-  setShape: (rect: { x: number; y: number; width: number; height: number } | null) => void
+  setShape: (
+    rect:
+      | { x: number; y: number; width: number; height: number }
+      | { x: number; y: number; width: number; height: number }[]
+      | { focusOff: true; rects: { x: number; y: number; width: number; height: number }[] | null }
+      | null
+  ) => void
   getExpanded: () => Promise<boolean>
   getBackdrop: () => Promise<string | null>
   quit: () => void
@@ -286,7 +374,12 @@ export interface NotchApi {
   onReminder: (callback: (event: ReminderEvent) => void) => () => void
   onVaultChanged: (callback: (path: string | null) => void) => () => void
   onNavigate: (callback: (page: string) => void) => () => void
-  onBlur: (callback: () => void) => () => void
+  getMetrics: () => Promise<NotchMetrics | null>
+  onMetrics: (callback: (metrics: NotchMetrics) => void) => () => void
+  onRequestClose: (callback: () => void) => () => void
+  onPrepareOpen: (callback: () => void) => () => void
+  onPresence: (callback: (event: { hidden: boolean }) => void) => () => void
+  reportTiming: (mark: string, ms: number) => void
   obsidian: {
     chooseVault: () => Promise<string | null>
     tree: (vaultPath: string) => Promise<VaultNode[]>
@@ -308,14 +401,19 @@ export interface NotchApi {
     disconnect: () => Promise<SpotifyStatus>
     player: () => Promise<SpotifyPlayback>
     queue: () => Promise<SpotifyQueueItem[]>
+    library: () => Promise<SpotifyLibrary>
     action: (action: SpotifyAction) => Promise<SpotifyPlayback>
     launch: (target?: string) => Promise<boolean>
   }
   sessions: {
     scan: () => Promise<SessionsSnapshot>
     openProject: (directory: string) => Promise<void>
-    send: (sessionId: string, message: string) => Promise<{ ok: boolean; error?: string; code?: string }>
+    send: (
+      sessionId: string,
+      message: string
+    ) => Promise<{ ok: boolean; pending?: boolean; error?: string; code?: string }>
     focusCodex: () => Promise<boolean>
     onSendResult: (callback: (result: SessionSendResult) => void) => () => void
+    onReply: (callback: (event: SessionReplyEvent) => void) => () => void
   }
 }

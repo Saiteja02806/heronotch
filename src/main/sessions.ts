@@ -14,6 +14,8 @@ import type {
   SessionSendResult,
   SessionsSnapshot
 } from '../shared/types'
+import { confirmDeliveredMessage } from './sessionDelivery'
+import { armReplyWatch, discardReplyWatch, noteReplyCliExited, prepareReplyWatch } from './sessionWatch'
 
 const PROVIDER_LABELS: Record<SessionProvider, string> = {
   codex: 'Codex',
@@ -31,6 +33,7 @@ let lastDirectories = new Set<string>()
 let lastSessions = new Map<string, CodingSession>()
 const runningSends = new Map<string, ChildProcess>()
 export const sessionSendEvents = new EventEmitter()
+export { sessionReplyEvents } from './sessionWatch'
 
 interface ProcessInfo {
   Id: number
@@ -391,7 +394,53 @@ export function scanSessions(): Promise<SessionsSnapshot> {
   return inFlightScan
 }
 
+function demoSnapshot(): SessionsSnapshot {
+  const now = Date.now()
+  const session = (
+    provider: CodingSession['provider'],
+    title: string,
+    project: string,
+    active = false
+  ): CodingSession => ({
+    id: `${provider}-demo`,
+    rawId: 'demo',
+    provider,
+    title,
+    project,
+    directory: null,
+    model: provider === 'codex' ? 'gpt-5.1' : provider === 'opencode' ? 'claude' : null,
+    detail: active ? 'working' : '12k tokens',
+    updatedAt: now - (active ? 60_000 : 3_600_000),
+    active,
+    subagent: false,
+    origin: null
+  })
+  const sessions = [
+    session('opencode', 'A Walk Through the Void', 'notch', true),
+    session('codex', 'Identify safe-to-delete files', 'notch'),
+    session('antigravity', 'Posture notes', 'notch'),
+    session('claude', 'Review the notch window', 'notch'),
+    session('cursor', 'Spatial open animation', 'notch'),
+    session('windsurf', 'Placement map', 'notch'),
+    session('zed', 'Compact notes layout', 'notch')
+  ]
+  const apps: AppPresence[] = (['codex', 'opencode', 'antigravity', 'claude', 'cursor', 'windsurf', 'zed'] as const).map(
+    (provider) => ({
+      provider,
+      label: PROVIDER_LABELS[provider],
+      running: provider === 'opencode' || provider === 'codex',
+      processCount: provider === 'opencode' ? 2 : provider === 'codex' ? 1 : 0,
+      windowTitle: sessions.find((item) => item.provider === provider)?.title || null,
+      sessions: 1
+    })
+  )
+  lastSessions = new Map(sessions.map((item) => [item.id, item]))
+  lastDirectories = new Set()
+  return { sessions, apps, scannedAt: now }
+}
+
 async function performScan(): Promise<SessionsSnapshot> {
+  if (process.env.NOTCH_DEMO_SESSIONS === '1') return demoSnapshot()
   try {
     const [processes, names, statuses] = await Promise.all([
       scanProcesses(),
@@ -570,9 +619,12 @@ function cleanProcessError(output: string): string {
 export async function sendSessionMessage(
   sessionId: string,
   rawMessage: string
-): Promise<{ ok: boolean; error?: string; code?: string }> {
+): Promise<{ ok: boolean; pending?: boolean; error?: string; code?: string }> {
   const session = lastSessions.get(sessionId)
   if (!session) return { ok: false, error: 'That session is no longer in the latest scan.' }
+  if (session.rawId === 'demo') {
+    return { ok: false, error: 'This is a preview session, so nothing was sent.' }
+  }
 
   const message = rawMessage.trim()
   if (!message) return { ok: false, error: 'Write a message first.' }
@@ -632,6 +684,7 @@ export async function sendSessionMessage(
   }
 
   let child: ChildProcess
+  prepareReplyWatch(session)
   try {
     child = spawn(command, args, {
       cwd: session.directory || os.homedir(),
@@ -640,24 +693,32 @@ export async function sendSessionMessage(
       stdio: ['ignore', 'pipe', 'pipe']
     })
   } catch (error) {
+    discardReplyWatch(session.id)
     return {
       ok: false,
       error: error instanceof Error ? error.message : 'Could not start the agent command.'
     }
   }
+  armReplyWatch(session)
 
   runningSends.set(sessionId, child)
   let output = ''
 
-  const finish = (ok: boolean, error?: string): void => {
+  const finish = (
+    status: SessionSendResult['status'],
+    error?: string,
+    code?: string
+  ): void => {
     if (runningSends.get(sessionId) !== child) return
     runningSends.delete(sessionId)
     const result: SessionSendResult = {
       sessionId,
       provider: session.provider,
       label: PROVIDER_LABELS[session.provider],
-      ok,
-      error
+      ok: status === 'delivered',
+      status,
+      error,
+      code
     }
     sessionSendEvents.emit('result', result)
   }
@@ -668,10 +729,20 @@ export async function sendSessionMessage(
   child.stderr?.on('data', (chunk: Buffer) => {
     output = `${output}${chunk.toString('utf8')}`.slice(-3000)
   })
-  child.on('error', (error) => finish(false, error.message))
+  child.on('error', (error) => {
+    noteReplyCliExited(sessionId, 1)
+    finish('failed', error.message)
+  })
   child.on('exit', (code) => {
+    noteReplyCliExited(sessionId, code)
     if (code === 0) {
-      finish(true)
+      void confirmDeliveredMessage(session.provider, session.rawId, message).then((report) => {
+        if (report.check === 'confirmed') {
+          finish('delivered')
+          return
+        }
+        finish('unconfirmed', report.reason || 'Notch could not confirm this message landed in the session.')
+      })
       return
     }
     const detail = cleanProcessError(output) || `Agent command exited with code ${code}.`
@@ -679,8 +750,8 @@ export async function sendSessionMessage(
       session.provider === 'codex' && /config\.toml/i.test(output)
         ? ' Fix the flagged setting in %USERPROFILE%\\.codex\\config.toml and try again.'
         : ''
-    finish(false, `${detail}${configHint}`)
+    finish('failed', `${detail}${configHint}`)
   })
 
-  return { ok: true }
+  return { ok: true, pending: true }
 }

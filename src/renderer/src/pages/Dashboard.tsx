@@ -38,12 +38,14 @@ import {
   timeToTimestamp,
   todayKey
 } from '../lib/time'
-import { useApp } from '../state/AppContext'
+import { useApp, useTimerClock } from '../state/AppContext'
+import { useNow } from '../state/clock'
 import { useMedia } from '../state/MediaContext'
 import { playPostureRing as playChime } from '../lib/alertSound'
 import { SessionBadge, relativeSessionTime } from '../components/SessionBits'
 import { useVaultPicker } from '../hooks/useVaultPicker'
 import { waterCount } from '../lib/water'
+import { sectionVisible } from '../lib/sections'
 import { WaterGlance } from './WaterPage'
 
 function Artwork({
@@ -84,14 +86,13 @@ function Artwork({
 function TimerCard() {
   const {
     state,
-    timerRemaining,
-    timerProgress,
     startTimer,
     pauseTimer,
     resetTimer,
     setTimerMode,
     update
   } = useApp()
+  const { remaining: timerRemaining, progress: timerProgress } = useTimerClock()
   const timer = state.timer
   const total = timer.durations[timer.mode] * 60
   const label = timer.mode === 'focus' ? 'Focus' : timer.mode === 'short' ? 'Break' : 'Long'
@@ -474,7 +475,8 @@ function ObsidianCard() {
 }
 
 function SessionsCard() {
-  const { sessions, sessionsLoading, refreshSessions, setPage, now } = useApp()
+  const { sessions, sessionsLoading, refreshSessions, setPage } = useApp()
+  const now = useNow()
   const active = sessions?.sessions.filter((session) => session.active && !session.subagent) || []
   const recent = sessions?.sessions.filter((session) => !session.active && !session.subagent) || []
   const subagents = sessions?.sessions.filter((session) => session.subagent) || []
@@ -648,21 +650,26 @@ function CalendarCard() {
 export function Dashboard() {
   const { state } = useApp()
   const vaultName = state.settings.vaultPath?.split(/[\\/]/).filter(Boolean).pop()
-  const glasses = state.water?.enabled ? waterCount(state.water) : null
+  const showNotes = sectionVisible(state, 'notes')
+  const showMusic = sectionVisible(state, 'music')
+  const showPlan = sectionVisible(state, 'planner')
+  const showSessions = sectionVisible(state, 'sessions')
+  const showWater = sectionVisible(state, 'water')
+  const glasses = showWater ? waterCount(state.water) : null
   return (
     <div className="home-shell">
-      {state.water?.enabled && <WaterGlance />}
-      <div className="dashboard">
+      {showWater && <WaterGlance />}
+      <div className={`dashboard ${showMusic ? '' : 'is-no-music'}`}>
       <div className="dashboard-sr">
-        {greeting()}. {vaultName ? `${vaultName} folder connected.` : 'No notes folder connected.'}
+        {greeting()}. {showNotes ? (vaultName ? `${vaultName} folder connected.` : 'No notes folder connected.') : ''}
         {glasses !== null ? ` Water, ${glasses} of ${state.water.goalGlasses} glasses.` : ''}
       </div>
       <TimerCard />
-      <MusicCard />
-      <TasksCard />
-      <ObsidianCard />
-      <SessionsCard />
-      <CalendarCard />
+      {showMusic && <MusicCard />}
+      {showPlan && <TasksCard />}
+      {showNotes && <ObsidianCard />}
+      {showSessions && <SessionsCard />}
+      {showPlan && <CalendarCard />}
       </div>
     </div>
   )

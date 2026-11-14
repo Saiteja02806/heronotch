@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { EventEmitter } from 'node:events'
 import { promises as fs, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { normalizeSectionPrefs, sectionsEqual } from '../shared/sections'
 import {
   WATER_GLASS_ML,
   WATER_GOAL_MAX,
@@ -29,7 +30,12 @@ const DEFAULT_SETTINGS: Settings = {
   spotifyRedirectPort: 43821,
   userName: '',
   pinOnOpen: false,
-  panelSize: 'full'
+  panelSize: 'full',
+  focusMode: true,
+  mediaSource: 'auto',
+  autoHideFullscreen: true,
+  neverOver: [],
+  reduceMotion: false
 }
 
 function localDayKey(date = new Date()): string {
@@ -99,7 +105,8 @@ function createDefaultState(): AppState {
       dayKey: today,
       pours: []
     },
-    focusLog: []
+    focusLog: [],
+    spotifyMemory: null
   }
 }
 
@@ -161,20 +168,18 @@ function sameWater(left: WaterState | undefined, right: WaterState): boolean {
 
 function normalizeDay(state: AppState): AppState {
   const today = localDayKey()
-  const settings =
+  let settings =
     state.settings.timerNotifications === undefined
       ? { ...state.settings, timerNotifications: true }
       : state.settings
-  const needsTimerFix = state.timer.durations.long === 15
-  const timer = needsTimerFix
-    ? { ...state.timer, durations: { ...state.timer.durations, long: 45 } }
-    : state.timer
+  const sections = normalizeSectionPrefs(settings.sections, Boolean(state.water?.enabled))
+  if (!sectionsEqual(settings.sections, sections)) settings = { ...settings, sections }
+  const timer = state.timer
   const water = normalizeWater(state, today)
   if (
     state.timer.dayKey === today &&
     state.posture?.dayKey === today &&
     settings === state.settings &&
-    !needsTimerFix &&
     sameWater(state.water, water)
   ) {
     return state

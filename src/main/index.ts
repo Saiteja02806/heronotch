@@ -18,7 +18,11 @@ import {
 import { execFile, execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { AppState, AppStatePatch, NotchStyle } from '../shared/types'
+import type { AppState, AppStatePatch, NotchMetrics } from '../shared/types'
+import { pauseForegroundWatch, resumeForegroundWatch, startForegroundWatch, stopForegroundWatch } from './foreground'
+import { shouldAutoHide } from '../shared/presence'
+import { followWithSpotifyApi } from '../shared/mediaFollow'
+import { collapsedLayout } from '../shared/notchLayout'
 import * as backdrop from './backdrop'
 import * as localMedia from './localMedia'
 import * as obsidian from './obsidian'
@@ -30,31 +34,13 @@ if (process.env.NOTCH_CAPTURE) {
   app.disableHardwareAcceleration()
 }
 
-const COLLAPSED_SIZES: Record<NotchStyle, { width: number; height: number }> = {
-  full: { width: 412, height: 44 },
-  compact: { width: 332, height: 38 },
-  minimal: { width: 212, height: 34 },
-  pill: { width: 332, height: 42 },
-  'pill-tiny': { width: 132, height: 32 },
-  'notch-wide': { width: 252, height: 36 },
-  'notch-micro': { width: 122, height: 26 }
-}
-const EXPANDED_WIDTH = 1160
-const EXPANDED_HEIGHT = 632
-
-// The collapsed window keeps some extra room below the tab so a reminder or
-// posture notice can unfold without resizing the window (which would flicker
-// and re-run the layout). Everything outside the shaped region is click-through,
-// so this footprint is invisible and untouchable.
-const COLLAPSED_NOTICE_WIDTH = 460
-const COLLAPSED_NOTICE_HEIGHT = 132
-
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let expanded = false
 let expandToken = 0
 let expanding: Promise<boolean> | null = null
 let collapsedShape: Electron.Rectangle | null = null
+let expandedShape: Electron.Rectangle[] | null = null
 let lastWatchedVault: string | null = null
 let reminderTimers = new Map<string, NodeJS.Timeout>()
 let reminderReschedule: NodeJS.Timeout | null = null
@@ -65,6 +51,34 @@ let revealTimer: NodeJS.Timeout | null = null
 let topmostTimer: NodeJS.Timeout | null = null
 let rendererRecoveries = 0
 let failureDialogOpen = false
+let currentMetrics: NotchMetrics | null = null
+let closeFallback: NodeJS.Timeout | null = null
+let userHidden = false
+let autoHidden = false
+let sessionLocked = false
+let presenceApplied: boolean | null = null
+
+function applyPresence(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const hidden = userHidden || autoHidden
+  if (presenceApplied === hidden) return
+  presenceApplied = hidden
+  if (hidden) {
+    if (expanded) void setExpanded(false)
+    mainWindow.setOpacity(0)
+    mainWindow.setIgnoreMouseEvents(true, { forward: true })
+    logLine(`notch hidden user=${userHidden} auto=${autoHidden}`)
+    mainWindow.webContents.send('notch:presence', { hidden: true })
+    return
+  }
+  mainWindow.setOpacity(1)
+  mainWindow.setIgnoreMouseEvents(false)
+  applyWindowShape()
+  mainWindow.showInactive()
+  mainWindow.setSkipTaskbar(true)
+  mainWindow.webContents.send('notch:presence', { hidden: false })
+  logLine('notch shown')
+}
 
 function logLine(message: string): void {
   try {
@@ -95,45 +109,76 @@ function notifyRaw(title: string, body: string): void {
   }
 }
 
-function screenWorkArea(): Electron.Rectangle {
-  return screen.getPrimaryDisplay().workArea
+function tabHit(metrics: NotchMetrics): Electron.Rectangle {
+  return {
+    x: Math.max(0, Math.round(metrics.tab.x - 6)),
+    y: Math.max(0, Math.round(metrics.tab.y - 6)),
+    width: Math.round(metrics.tab.width + 12),
+    height: Math.round(metrics.tab.height + 14)
+  }
 }
 
-function boundsFor(isExpanded: boolean): Electron.Rectangle {
-  const state = getState()
+// The window stays the size of the display. Opening only changes the click
+// shape and a CSS transform. Resizing a transparent window on Windows
+// reallocates the DWM surface and is what made the notch feel late.
+function refreshCollapsedLayout(): Electron.Rectangle {
   const display = screen.getPrimaryDisplay()
-  if (isExpanded) {
-    return {
-      x: display.bounds.x,
-      y: display.bounds.y,
-      width: display.bounds.width,
-      height: display.bounds.height
-    }
+  const settings = getState().settings
+  const layout = collapsedLayout(settings.notchPosition, display.workArea, settings.notchStyle)
+  const tab = layout.metrics.tabScreen
+  currentMetrics = {
+    tab: {
+      x: tab.x - display.bounds.x,
+      y: tab.y - display.bounds.y,
+      width: tab.width,
+      height: tab.height,
+      radius: layout.metrics.tab.radius
+    },
+    tabScreen: layout.metrics.tabScreen,
+    noticeAbove: layout.metrics.noticeAbove
   }
-  const workArea = display.workArea
-  const size = COLLAPSED_SIZES[state.settings.notchStyle] || COLLAPSED_SIZES.minimal
-  const width = Math.min(
-    Math.max(size.width, COLLAPSED_NOTICE_WIDTH),
-    workArea.width
-  )
-  const height = Math.min(
-    Math.max(size.height, COLLAPSED_NOTICE_HEIGHT),
-    workArea.height
-  )
-  const saved = state.settings.notchPosition || { x: 0.5, y: 0 }
-  const anchorX = Math.min(1, Math.max(0, Number(saved.x) || 0))
-  const anchorY = Math.min(1, Math.max(0, Number(saved.y) || 0))
+  const win = mainWindow
+  if (win && !win.isDestroyed()) win.webContents.send('notch:metrics', currentMetrics)
+  if (!expanded) collapsedShape = tabHit(currentMetrics)
   return {
-    x: Math.round(workArea.x + anchorX * Math.max(0, workArea.width - width)),
-    y: Math.round(workArea.y + anchorY * Math.max(0, workArea.height - height)),
-    width,
-    height
+    x: display.bounds.x,
+    y: display.bounds.y,
+    width: display.bounds.width,
+    height: display.bounds.height
   }
 }
 
 function applyBounds(): void {
-  if (!mainWindow) return
-  mainWindow.setBounds(boundsFor(expanded), false)
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const next = refreshCollapsedLayout()
+  const current = mainWindow.getBounds()
+  if (
+    current.x !== next.x ||
+    current.y !== next.y ||
+    current.width !== next.width ||
+    current.height !== next.height
+  ) {
+    mainWindow.setBounds(next, false)
+  }
+  applyWindowShape()
+}
+
+function clearCloseFallback(): void {
+  if (!closeFallback) return
+  clearTimeout(closeFallback)
+  closeFallback = null
+}
+
+// Ask the renderer to shrink the panel back into the tab, then actually resize.
+// A fallback covers a renderer that never finishes the animation.
+function requestAnimatedClose(): void {
+  if (!mainWindow || !expanded) return
+  mainWindow.webContents.send('notch:request-close')
+  clearCloseFallback()
+  closeFallback = setTimeout(() => {
+    closeFallback = null
+    if (expanded) void setExpanded(false)
+  }, 980)
 }
 
 async function setExpanded(next: boolean, notify = true): Promise<boolean> {
@@ -143,26 +188,31 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     if (expanded) return true
     if (expanding) return expanding
     const token = ++expandToken
+    const started = performance.now()
     const cached = backdrop.getCachedBackdrop()
-    // Open now. The blurred snapshot is only decoration, and waiting for it
-    // meant a failed or slow capture left the notch stuck shut.
+    // The window is already display-sized. Do not resize, and do not wait
+    // for a snapshot or a "hide the tab" frame.
     expanded = true
+    expandedShape = null
     backdrop.suspendBackdropCapture()
-    applyBounds()
     applyWindowShape()
     mainWindow.setAlwaysOnTop(true, 'screen-saver')
+    const display = screen.getPrimaryDisplay()
+    const focusMode = getState().settings.focusMode !== false
     if (notify) {
-      if (cached) mainWindow.webContents.send('notch:backdrop', { image: cached })
-      mainWindow.webContents.send('notch:expanded', { expanded: true })
+      if (focusMode && cached) mainWindow.webContents.send('notch:backdrop', { image: cached })
+      mainWindow.webContents.send('notch:expanded', {
+        expanded: true,
+        viewport: { width: display.bounds.width, height: display.bounds.height }
+      })
     }
     mainWindow.showInactive()
-    // The expanded panel is a screen-edge widget, not an app window: it must
-    // never own a taskbar button (Windows would show it as "Electron").
     mainWindow.setSkipTaskbar(true)
     syncEscapeShortcut()
     expanding = null
+    logLine(`open dispatched in ${(performance.now() - started).toFixed(1)}ms`)
 
-    if (notify && !cached) {
+    if (notify && focusMode && !cached) {
       const target = mainWindow
       void backdrop
         .captureDesktopBackdrop(true)
@@ -175,20 +225,24 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     return true
   }
 
+  clearCloseFallback()
+  const started = performance.now()
   expandToken += 1
   expanding = null
   expanded = false
+  expandedShape = null
   syncEscapeShortcut()
   backdrop.resumeBackdropCapture()
-  applyBounds()
+  if (currentMetrics) collapsedShape = tabHit(currentMetrics)
   applyWindowShape()
   if (notify && mainWindow) {
     mainWindow.webContents.send('notch:expanded', { expanded: false })
   }
+  logLine(`close dispatched in ${(performance.now() - started).toFixed(1)}ms`)
   setTimeout(() => {
     if (!expanded) backdrop.refreshBackdrop()
-  }, 550)
-  setTimeout(() => nudgePointerHover(), 160)
+  }, 400)
+  setTimeout(() => nudgePointerHover(), 40)
   return false
 }
 
@@ -228,7 +282,14 @@ function applyWindowShape(): void {
   try {
     const bounds = mainWindow.getBounds()
     const full = { x: 0, y: 0, width: bounds.width + 2, height: bounds.height + 2 }
-    if (expanded || !collapsedShape) {
+    if (expanded) {
+      // Focus mode owns the whole screen so the backdrop can take a click.
+      // With focus mode off, the renderer sends only the panel (and any
+      // toast) so the rest of the desktop keeps the mouse.
+      mainWindow.setShape(expandedShape && expandedShape.length > 0 ? expandedShape : [full])
+      return
+    }
+    if (!collapsedShape) {
       mainWindow.setShape([full])
       return
     }
@@ -295,13 +356,13 @@ function syncEscapeShortcut(): void {
     if (want && !registered) {
       globalShortcut.register('Escape', () => {
         logLine('global escape: collapsing notch')
-        void setExpanded(false)
+        requestAnimatedClose()
       })
     } else if (!want && registered) {
       globalShortcut.unregister('Escape')
     }
   } catch {
-    // If another app owns Esc, the collapse arrow still works.
+    // If another app owns Esc, the Collapse button still works.
   }
 }
 
@@ -397,7 +458,7 @@ function showRendererFailure(details: Electron.RenderProcessGoneDetails): void {
 }
 
 function createWindow(): void {
-  const initial = boundsFor(false)
+  const initial = refreshCollapsedLayout()
   windowShown = false
   rendererRecoveries = 0
   if (revealTimer) {
@@ -505,13 +566,14 @@ function createWindow(): void {
   }
   topmostTimer = setInterval(() => {
     if (quitting || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return
+    if (userHidden || autoHidden || sessionLocked) return
     mainWindow.setAlwaysOnTop(true, 'screen-saver')
-  }, 4000)
+  }, 15000)
 
   mainWindow.on('close', (event) => {
     if (quitting) return
     event.preventDefault()
-    void setExpanded(false)
+    requestAnimatedClose()
     mainWindow?.showInactive()
     mainWindow?.setSkipTaskbar(true)
   })
@@ -529,9 +591,6 @@ function createWindow(): void {
   })
   mainWindow.on('blur', () => {
     syncEscapeShortcut()
-    if (expanded && !getState().settings.pinOnOpen) {
-      mainWindow?.webContents.send('notch:blur')
-    }
   })
 
   mainWindow.on('focus', () => {
@@ -550,23 +609,58 @@ function createWindow(): void {
       setTimeout(async () => {
         const page = process.env.NOTCH_CAPTURE_PAGE
         if (page) mainWindow?.webContents.send('navigate', page)
-        if (process.env.NOTCH_CAPTURE_EXPANDED !== '0') await setExpanded(true)
-        setTimeout(async () => {
-          try {
-            if (!mainWindow) return
-            if (process.env.NOTCH_CAPTURE_JS) {
-              const jsResult = await mainWindow.webContents.executeJavaScript(process.env.NOTCH_CAPTURE_JS)
-              if (jsResult !== undefined) console.log('CAPTURE_JS:', JSON.stringify(jsResult))
-              await new Promise((resolve) => setTimeout(resolve, 650))
-            }
-            const image = await mainWindow.webContents.capturePage()
-            await fs.writeFile(capturePath, image.toPNG())
-          } catch (error) {
-            console.error('Capture failed', error)
-          } finally {
-            app.quit()
+        const frames = (process.env.NOTCH_CAPTURE_FRAMES || '')
+          .split(',')
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0)
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value >= 0)
+        const wantClose = process.env.NOTCH_CAPTURE_CLOSE === '1'
+        const expandedShot = process.env.NOTCH_CAPTURE_EXPANDED !== '0'
+        if (expandedShot) await setExpanded(true)
+        const writeShot = async (file: string): Promise<void> => {
+          if (!mainWindow || mainWindow.isDestroyed()) return
+          const image = await mainWindow.webContents.capturePage()
+          await fs.writeFile(file, image.toPNG())
+        }
+        const stamp = (suffix: string): string => {
+          const ext = path.extname(capturePath)
+          const base = ext ? capturePath.slice(0, -ext.length) : capturePath
+          return `${base}${suffix}${ext || '.png'}`
+        }
+        const grabSequence = async (suffix: (at: number) => string): Promise<void> => {
+          const started = Date.now()
+          for (const at of frames) {
+            const wait = at - (Date.now() - started)
+            if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+            await writeShot(suffix(at))
           }
-        }, 1400)
+        }
+        try {
+          if (process.env.NOTCH_CAPTURE_JS && mainWindow) {
+            const jsResult = await mainWindow.webContents.executeJavaScript(process.env.NOTCH_CAPTURE_JS)
+            if (jsResult !== undefined) console.log('CAPTURE_JS:', JSON.stringify(jsResult))
+            const jsSettle = Number(process.env.NOTCH_CAPTURE_JS_SETTLE ?? 650)
+            if (jsSettle > 0) await new Promise((resolve) => setTimeout(resolve, jsSettle))
+          }
+          const closeOnly = process.env.NOTCH_CAPTURE_CLOSE_ONLY === '1'
+          if (frames.length > 0 && !closeOnly) {
+            await grabSequence((at) => stamp(`-${at}`))
+          }
+          if (wantClose && frames.length > 0) {
+            const settle = Number(process.env.NOTCH_CAPTURE_SETTLE || 0)
+            if (settle > 0) await new Promise((resolve) => setTimeout(resolve, settle))
+            requestAnimatedClose()
+            await grabSequence((at) => stamp(`-close-${at}`))
+          } else if (frames.length === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 1400))
+            await writeShot(capturePath)
+          }
+        } catch (error) {
+          console.error('Capture failed', error)
+        } finally {
+          app.quit()
+        }
       }, 500)
     })
   }
@@ -586,7 +680,7 @@ function createTray(): void {
           void setExpanded(true)
         }
       },
-      { label: 'Collapse Notch', click: () => void setExpanded(false) },
+      { label: 'Collapse Notch', click: () => requestAnimatedClose() },
       {
         label: 'Open log file',
         click: () => {
@@ -607,7 +701,8 @@ function createTray(): void {
     tray.on('click', () => {
       if (!mainWindow) createWindow()
       revealWindow('tray')
-      void setExpanded(!expanded)
+      if (expanded) requestAnimatedClose()
+      else void setExpanded(true)
     })
   } catch {
     tray = null
@@ -734,12 +829,40 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('notch:set-expanded', (_event, value: boolean) => setExpanded(Boolean(value)))
-  ipcMain.handle('notch:get-expanded', () => expanded)
-  ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())
-  ipcMain.on('notch:shape', (_event, rect: Electron.Rectangle | null) => {
-    if (rect && rect.width > 0 && rect.height > 0) collapsedShape = rect
-    if (!expanded) applyWindowShape()
+  ipcMain.on('notch:timing', (_event, mark: string, ms: number) => {
+    if (typeof mark !== 'string' || !Number.isFinite(ms)) return
+    logLine(`timing ${mark} ${ms.toFixed(1)}ms`)
   })
+  ipcMain.handle('notch:get-expanded', () => expanded)
+  ipcMain.handle('notch:get-metrics', () => currentMetrics)
+  ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())
+  ipcMain.on(
+    'notch:shape',
+    (
+      _event,
+      payload:
+        | Electron.Rectangle
+        | Electron.Rectangle[]
+        | { focusOff: true; rects: Electron.Rectangle[] | null }
+        | null
+    ) => {
+      if (payload && typeof payload === 'object' && 'focusOff' in payload) {
+        // Only the open, focus-off panel may clip the full-screen window.
+        // A collapsed-tab report that arrives during the open animation must
+        // not shrink that window down to the tab.
+        if (!expanded) return
+        const list = Array.isArray(payload.rects) ? payload.rects : []
+        const usable = list.filter((item) => item && item.width > 0 && item.height > 0)
+        expandedShape = usable.length > 0 ? usable : null
+        applyWindowShape()
+        return
+      }
+      if (expanded) return
+      const rect = Array.isArray(payload) ? payload[0] : payload
+      if (rect && rect.width > 0 && rect.height > 0) collapsedShape = rect
+      applyWindowShape()
+    }
+  )
   ipcMain.handle('notch:reposition', () => {
     applyBounds()
     return true
@@ -849,7 +972,8 @@ function registerIpc(): void {
       ...status,
       localAvailable: local.available,
       localTitle: local.title,
-      localArtist: local.artist
+      localArtist: local.artist,
+      mediaSources: localMedia.listMediaSources()
     }
   })
 
@@ -869,15 +993,16 @@ function registerIpc(): void {
   ipcMain.handle('spotify:player', async () => {
     const settings = getState().settings
     const status = await spotify.getStatus(settings.spotifyRedirectPort)
-    if (status.connected) {
+    const sessionId = localMedia.currentMediaId(settings.mediaSource)
+    if (followWithSpotifyApi(settings.mediaSource, sessionId, status.connected)) {
       try {
         const playback = await spotify.getPlayback(settings.spotifyClientId)
-        if (playback.track || !localMedia.isLocalAvailable()) return playback
+        if (playback.track || !localMedia.isLocalAvailable(settings.mediaSource)) return playback
       } catch {
-        // Fall through to the local Windows media session.
+        // Fall through to the Windows media session.
       }
     }
-    return localMedia.getLocalPlayback()
+    return localMedia.getLocalPlayback(settings.mediaSource)
   })
 
   ipcMain.handle('spotify:queue', async () => {
@@ -886,6 +1011,54 @@ function registerIpc(): void {
     if (!status.connected) return []
     return spotify.getQueue(settings.spotifyClientId)
   })
+
+  ipcMain.handle('spotify:library', async () => {
+    const settings = getState().settings
+    const status = await spotify.getStatus(settings.spotifyRedirectPort)
+    if (!status.connected) return { recent: [], playlists: [] }
+    return spotify.getLibrary(settings.spotifyClientId)
+  })
+
+async function openSpotifyApp(target = 'spotify:'): Promise<boolean> {
+  const uri =
+    target === 'spotify:' || /^spotify:(track|episode|album|playlist):[A-Za-z0-9]+$/.test(target)
+      ? target
+      : 'spotify:'
+  try {
+    await shell.openExternal(uri)
+    return true
+  } catch {
+    // Fall back to common install locations. Those only start the app.
+  }
+  const candidates = [
+    'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Roaming\\Spotify\\Spotify.exe',
+    'C:\\Program Files\\Spotify\\Spotify.exe',
+    'C:\\Program Files (x86)\\Spotify\\Spotify.exe'
+  ]
+  const fileSystem = await import('node:fs')
+  for (const candidate of candidates) {
+    try {
+      if (fileSystem.existsSync(candidate)) {
+        spawn(candidate, [], { detached: true, stdio: 'ignore' }).unref()
+        return true
+      }
+    } catch {
+      // try next
+    }
+  }
+  return false
+}
+
+async function recoverSpotifyDevice(clientId: string): Promise<boolean> {
+  const opened = await openSpotifyApp('spotify:')
+  if (opened && (await spotify.waitForDevice(clientId, 12000))) return true
+  try {
+    await shell.openExternal('https://open.spotify.com')
+  } catch {
+    return false
+  }
+  return spotify.waitForDevice(clientId, 8000)
+}
 
 async function startTrackOnDesktop(clientId: string, uri: string) {
   if (!/^spotify:(track|episode):[A-Za-z0-9]+$/.test(uri)) return null
@@ -910,22 +1083,37 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
     const run = spotifyActionQueue.then(async () => {
       const settings = getState().settings
       const status = await spotify.getStatus(settings.spotifyRedirectPort)
-      if (action?.type === 'play-track') {
-        if (!status.connected) {
-          throw new Error('Connect your Spotify account to choose a track from the queue.')
-        }
+      const sessionId = localMedia.currentMediaId(settings.mediaSource)
+      const enhanced = followWithSpotifyApi(settings.mediaSource, sessionId, status.connected)
+      const recoverable =
+        action?.type === 'play' || action?.type === 'play-track' || action?.type === 'play-context'
+      if ((action?.type === 'play-track' || action?.type === 'play-context') && !status.connected) {
+        throw new Error('Connect your Spotify account to choose what plays. Opening the Spotify app still works.')
+      }
+      if (enhanced && recoverable) {
+        const memory = getState().spotifyMemory
         try {
-          return await spotify.performAction(settings.spotifyClientId, action)
+          return await spotify.performAction(settings.spotifyClientId, action, memory)
         } catch (error) {
-          const recovered = await startTrackOnDesktop(settings.spotifyClientId, action.uri)
-          if (recovered) return recovered
-          throw error
+          if (spotify.isPremiumRequired(error)) throw error
+          if (!spotify.isNoActiveDevice(error)) {
+            if (!localMedia.isLocalAvailable()) throw error
+            return localMedia.performLocalAction(action)
+          }
+          const ready = await recoverSpotifyDevice(settings.spotifyClientId)
+          if (ready) return spotify.performAction(settings.spotifyClientId, action, memory)
+          if (action.type === 'play-track') {
+            const recovered = await startTrackOnDesktop(settings.spotifyClientId, action.uri)
+            if (recovered) return recovered
+          }
+          throw new Error('No Spotify device yet. Open Spotify, then press play again.')
         }
       }
-      if (status.connected) {
+      if (enhanced) {
         try {
-          return await spotify.performAction(settings.spotifyClientId, action)
+          return await spotify.performAction(settings.spotifyClientId, action, getState().spotifyMemory)
         } catch (error) {
+          if (spotify.isPremiumRequired(error) || spotify.isNoActiveDevice(error)) throw error
           if (!localMedia.isLocalAvailable()) throw error
         }
       }
@@ -936,34 +1124,7 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
   })
 
   ipcMain.handle('spotify:launch', async (_event, target?: string) => {
-    const uri =
-      typeof target === 'string' &&
-      (target === 'spotify:' || /^spotify:track:[A-Za-z0-9]+$/.test(target))
-        ? target
-        : 'spotify:'
-    try {
-      await shell.openExternal(uri)
-      return true
-    } catch {
-      // Fall back to common install locations. Those only start the app.
-    }
-    const candidates = [
-      'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Roaming\\Spotify\\Spotify.exe',
-      'C:\\Program Files\\Spotify\\Spotify.exe',
-      'C:\\Program Files (x86)\\Spotify\\Spotify.exe'
-    ]
-    for (const candidate of candidates) {
-      try {
-        const fs = await import('node:fs')
-        if (fs.existsSync(candidate)) {
-          spawn(candidate, [], { detached: true, stdio: 'ignore' }).unref()
-          return true
-        }
-      } catch {
-        // try next
-      }
-    }
-    return false
+    return openSpotifyApp(typeof target === 'string' ? target : 'spotify:')
   })
   ipcMain.handle('sessions:scan', () => sessions.scanSessions())
   ipcMain.handle('sessions:open-project', (_event, directory: string) => {
@@ -989,9 +1150,19 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
 function registerGlobalShortcuts(): void {
   try {
     globalShortcut.register('CommandOrControl+Shift+Space', () => {
-      void setExpanded(!expanded).then((value) => {
-        if (value) mainWindow?.focus()
-      })
+      if (userHidden || autoHidden) {
+        userHidden = false
+        applyPresence()
+      }
+      if (expanded) {
+        requestAnimatedClose()
+        return
+      }
+      void setExpanded(true).then(() => mainWindow?.focus())
+    })
+    globalShortcut.register('CommandOrControl+Alt+Space', () => {
+      userHidden = !userHidden
+      applyPresence()
     })
   } catch {
     // Another app may already own the shortcut; the notch is still hoverable.
@@ -1065,16 +1236,26 @@ if (!gotLock) {
     }
     registerIpc()
     localMedia.startLocalMediaMonitor()
+    startForegroundWatch((sample) => {
+      const next = shouldAutoHide(sample, getState().settings)
+      if (next === autoHidden) return
+      autoHidden = next
+      applyPresence()
+    })
     createWindow()
     createTray()
     logLine(`window created bounds=${JSON.stringify(mainWindow?.getBounds())} tray=${Boolean(tray)}`)
     sessions.sessionSendEvents.on('result', (result) => {
       mainWindow?.webContents.send('session:send-result', result)
     })
+    sessions.sessionReplyEvents.on('reply', (event) => {
+      mainWindow?.webContents.send('session:reply', event)
+    })
     backdrop.scheduleBackdropRefresh()
     setInterval(() => {
-      if (!expanded) backdrop.refreshBackdrop()
-    }, 30_000)
+      if (expanded || userHidden || autoHidden || sessionLocked) return
+      backdrop.refreshBackdrop()
+    }, 60_000)
     refreshVaultWatcher(true)
     scheduleReminders()
     registerGlobalShortcuts()
@@ -1088,9 +1269,34 @@ if (!gotLock) {
     screen.on('display-metrics-changed', applyBounds)
     screen.on('display-added', applyBounds)
     screen.on('display-removed', applyBounds)
+    powerMonitor.on('suspend', () => {
+      sessionLocked = true
+      localMedia.pauseLocalMediaMonitor()
+      pauseForegroundWatch()
+      logLine('system suspend')
+    })
     powerMonitor.on('resume', () => {
+      sessionLocked = false
       scheduleReminders()
       applyBounds()
+      localMedia.resumeLocalMediaMonitor()
+      resumeForegroundWatch()
+      if (!expanded) backdrop.refreshBackdrop()
+      logLine('system resume')
+    })
+    powerMonitor.on('lock-screen', () => {
+      sessionLocked = true
+      logLine('session locked')
+    })
+    powerMonitor.on('unlock-screen', () => {
+      sessionLocked = false
+      applyBounds()
+      if (!expanded && !userHidden && !autoHidden) backdrop.refreshBackdrop()
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setAlwaysOnTop(true, 'screen-saver')
+        mainWindow.setSkipTaskbar(true)
+      }
+      logLine('session unlocked')
     })
 
     app.on('activate', () => {
@@ -1108,6 +1314,7 @@ if (!gotLock) {
     logLine('quitting')
     flushState()
     localMedia.stopLocalMediaMonitor()
+    stopForegroundWatch()
     obsidian.closeVaultWatcher()
     clearReminderTimers()
     globalShortcut.unregisterAll()

@@ -1,16 +1,17 @@
 import {
   ArrowUpRight,
   Bell,
+  Blocks,
   Check,
   ChevronRight,
   Copy,
   ExternalLink,
   FolderOpen,
+  GripVertical,
   Info,
   Keyboard,
   Loader2,
   LogOut,
-  Blocks,
   Music2,
   NotebookPen,
   Palette,
@@ -29,14 +30,21 @@ import {
   type PointerEvent as ReactPointerEvent
 } from 'react'
 import type { Accent, NotchPosition, NotchStyle } from '../../../shared/types'
+import { placementPreview } from '../../../shared/notchLayout'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
 import { useVaultPicker } from '../hooks/useVaultPicker'
 import { ACCENTS } from '../lib/theme'
-import { OPTIONAL_SECTIONS } from '../lib/sections'
+import {
+  SECTION_META,
+  moveSection,
+  sectionPrefs,
+  sectionVisible,
+  toggleSection,
+  visibleSections,
+  type SectionId
+} from '../lib/sections'
 import { formatTime } from '../lib/time'
-import { waterCount, waterFill } from '../lib/water'
-import { WaterPreview } from './WaterPage'
 
 type Section = 'appearance' | 'notch' | 'sections' | 'obsidian' | 'spotify' | 'about'
 
@@ -65,6 +73,135 @@ const NOTCH_STYLES: { id: NotchStyle; label: string; description: string }[] = [
   { id: 'notch-wide', label: 'Notch wide', description: 'Bare, wide tab.' },
   { id: 'notch-micro', label: 'Notch micro', description: 'Bare, extra tiny.' }
 ]
+
+function NeverOverField() {
+  const { state, updateSettings } = useApp()
+  const [text, setText] = useState((state.settings.neverOver || []).join(', '))
+  return (
+    <label className="setting-field">
+      <span>Never show over</span>
+      <input
+        value={text}
+        placeholder="obs64, League of Legends"
+        onChange={(event) => setText(event.target.value)}
+        onBlur={() => {
+          const names = text
+            .split(',')
+            .map((name) => name.trim())
+            .filter((name) => name.length > 0)
+          updateSettings({ neverOver: names })
+        }}
+      />
+      <small>Process names, separated by commas. The tab stays hidden while one of these is in front.</small>
+    </label>
+  )
+}
+
+function SectionManager() {
+  const { state, updateSettings, showToast } = useApp()
+  const prefs = sectionPrefs(state)
+  const compact = state.settings.panelSize === 'compact'
+  const visible = visibleSections(prefs, { compact })
+  const [dragId, setDragId] = useState<SectionId | null>(null)
+  const [overId, setOverId] = useState<SectionId | null>(null)
+  const visibleCount = prefs.order.length - prefs.hidden.length
+
+  const toggle = (id: SectionId): void => {
+    const next = toggleSection(prefs, id)
+    const meta = SECTION_META[id]
+    if (!next) {
+      showToast('Keep one section', 'The notch needs at least one section on the bar.')
+      return
+    }
+    const nowOn = !next.hidden.includes(id)
+    updateSettings({ sections: next })
+    showToast(
+      nowOn ? `${meta.label} is back` : `${meta.label} hidden`,
+      nowOn ? 'Everything you saved is still there.' : meta.kept,
+      'success'
+    )
+  }
+
+  const dropOn = (target: SectionId): void => {
+    if (!dragId || dragId === target) return
+    updateSettings({ sections: moveSection(prefs, dragId, prefs.order.indexOf(target)) })
+    setDragId(null)
+    setOverId(null)
+  }
+
+  return (
+    <div className="section-manager">
+      {prefs.order.map((id) => {
+        const meta = SECTION_META[id]
+        const Icon = meta.icon
+        const on = !prefs.hidden.includes(id)
+        const shortcut = visible.indexOf(id)
+        return (
+          <div
+            key={id}
+            className={`section-row ${on ? 'is-on' : ''} ${dragId === id ? 'is-dragging' : ''} ${overId === id && dragId !== id ? 'is-over' : ''}`}
+            onDragOver={(event) => {
+              event.preventDefault()
+              if (overId !== id) setOverId(id)
+            }}
+            onDrop={() => dropOn(id)}
+          >
+            <button
+              type="button"
+              className="section-handle"
+              draggable
+              aria-label={`Reorder ${meta.label}`}
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = 'move'
+                event.dataTransfer.setData('text/plain', id)
+                setDragId(id)
+              }}
+              onDragEnd={() => {
+                setDragId(null)
+                setOverId(null)
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+                event.preventDefault()
+                const index = prefs.order.indexOf(id)
+                updateSettings({
+                  sections: moveSection(prefs, id, event.key === 'ArrowUp' ? index - 1 : index + 1)
+                })
+              }}
+            >
+              <GripVertical size={14} />
+            </button>
+            <span className="section-row-icon" aria-hidden="true">
+              <Icon size={15} />
+            </span>
+            <span className="section-row-copy">
+              <strong>{meta.label}</strong>
+              <small>{meta.kept}</small>
+            </span>
+            <span className="section-shortcut">{shortcut >= 0 ? <kbd>{shortcut + 1}</kbd> : ''}</span>
+            <button
+              type="button"
+              className={`switch ${on ? 'is-on' : ''}`}
+              role="switch"
+              aria-checked={on}
+              aria-label={`${on ? 'Hide' : 'Show'} ${meta.label}`}
+              title={
+                on && visibleCount <= 1
+                  ? 'At least one section stays on the notch'
+                  : on
+                    ? 'Hide this section'
+                    : 'Show this section'
+              }
+              onClick={() => toggle(id)}
+            >
+              <motion.span animate={{ x: on ? 16 : 0 }} transition={{ type: 'spring', stiffness: 520, damping: 32 }} />
+            </button>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
 function Toggle({
   checked,
@@ -101,8 +238,7 @@ export function SettingsPage() {
     setExpanded,
     setPage,
     settingsSection,
-    setSettingsSection,
-    setWaterEnabled
+    setSettingsSection
   } = useApp()
   const { status, connecting, connect, disconnect } = useMedia()
   const { chooseVault } = useVaultPicker()
@@ -119,6 +255,8 @@ export function SettingsPage() {
     state.settings.notchPosition || { x: 0.5, y: 0 }
   )
   const [draggingPlacement, setDraggingPlacement] = useState(false)
+  const preview = placementPreview(state.settings.notchStyle)
+  const previewCenter = `calc(${position.x} * (100% - ${preview.width}px) + ${preview.width / 2}px)`
   const [focusMin, setFocusMin] = useState(String(state.timer.durations.focus))
   const [shortMin, setShortMin] = useState(String(state.timer.durations.short))
   const [longMin, setLongMin] = useState(String(state.timer.durations.long || 45))
@@ -196,7 +334,7 @@ export function SettingsPage() {
     updateSettings({ notchPosition: next })
     showToast(
       'Notch position saved',
-      `It will open at the ${positionLabel(next).toLowerCase()} of the screen.`,
+      `The tab sits at the ${positionLabel(next).toLowerCase()}. The workspace opens along the top.`,
       'success'
     )
   }
@@ -284,6 +422,22 @@ export function SettingsPage() {
       </aside>
 
       <main className="settings-main">
+        {state.settings.panelSize === 'compact' && (
+          <div className="settings-compact-nav" role="tablist" aria-label="Settings sections">
+            {SECTIONS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                className={section === item.id ? 'is-active' : ''}
+                aria-selected={section === item.id}
+                onClick={() => setSection(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        )}
         <motion.div
           key={section}
           initial={{ opacity: 0, y: 7 }}
@@ -296,7 +450,7 @@ export function SettingsPage() {
             <h1>
               {section === 'appearance' && 'A little more you.'}
               {section === 'notch' && 'Tune the notch.'}
-              {section === 'sections' && 'Add a section.'}
+              {section === 'sections' && 'Choose what stays on the notch.'}
               {section === 'obsidian' && 'Your notes, connected.'}
               {section === 'spotify' && 'Let the music in.'}
               {section === 'about' && 'Small app, big flow.'}
@@ -371,69 +525,28 @@ export function SettingsPage() {
             <div className="settings-sections">
               <section className="setting-group">
                 <div className="setting-group-head">
-                  <h3>Optional</h3>
-                  <p>Home, notes, music, plan, sessions and posture stay on the notch.</p>
+                  <h3>On the notch</h3>
+                  <p>Drag to reorder. At least one stays.</p>
                 </div>
-                <div className="section-shelf">
-                  {OPTIONAL_SECTIONS.map((item) => {
-                    const added = item.id === 'water' && Boolean(state.water?.enabled)
-                    const count = added ? waterCount(state.water) : 0
-                    const fill = added ? waterFill(count, state.water.goalGlasses) : 0.62
-                    return (
-                      <article key={item.id} className={`section-card ${added ? 'is-added' : ''}`}>
-                        <div className="section-card-glass">
-                          <WaterPreview fill={fill} />
-                        </div>
-                        <div className="section-card-copy">
-                          <span className="eyebrow">{added ? 'On your notch' : 'Available'}</span>
-                          <h3>{item.label}</h3>
-                          <p>{item.detail}</p>
-                          {added && (
-                            <p className="section-card-live">
-                              {count} of {state.water.goalGlasses} today · press {item.shortcut} to open
-                            </p>
-                          )}
-                        </div>
-                        <div className="section-card-actions">
-                          {added ? (
-                            <>
-                              <button type="button" className="primary-button" onClick={() => setPage('water')}>
-                                Open
-                              </button>
-                              <button
-                                type="button"
-                                className="soft-button"
-                                onClick={() => {
-                                  setWaterEnabled(false)
-                                  showToast('Water removed', 'The tab is gone. Today’s glasses stay saved.', 'success')
-                                }}
-                              >
-                                Remove section
-                              </button>
-                            </>
-                          ) : (
-                            <button
-                              type="button"
-                              className="primary-button"
-                              onClick={() => {
-                                setWaterEnabled(true)
-                                showToast('Water added', 'It now has a tab on the notch.', 'success')
-                              }}
-                            >
-                              Add section
-                            </button>
-                          )}
-                        </div>
-                      </article>
-                    )
-                  })}
-                </div>
+                <p className="section-manager-note">
+                  Hiding a section only takes it off the bar, the home cards, and its number key. Notes,
+                  tasks, Spotify, posture and water stay saved. Turn it back on and it is as you left it.
+                </p>
+                <SectionManager />
               </section>
             </div>
           )}
 
           {section === 'notch' && (
             <div className="settings-sections">
+              <section className="setting-group">
+                <Toggle
+                  checked={state.settings.focusMode !== false}
+                  onChange={(value) => updateSettings({ focusMode: value })}
+                  label="Focus mode"
+                  description="Blur the screen behind the notch. When this is off, the panel stands alone and clicks outside it reach the desktop."
+                />
+              </section>
               <section className="setting-group">
                 <div className="setting-group-head">
                   <h3>Style</h3>
@@ -493,10 +606,18 @@ export function SettingsPage() {
                 >
                   <span className="placement-map-grid" aria-hidden="true" />
                   <span
+                    className="placement-panel-hint"
+                    style={{ left: previewCenter }}
+                    aria-hidden="true"
+                  />
+                  <span
                     className="placement-preview"
                     style={{
-                      left: `calc(${position.x} * (100% - 58px))`,
-                      top: `calc(${position.y} * (100% - 20px))`
+                      left: `calc(${position.x} * (100% - ${preview.width}px))`,
+                      top: `calc(${position.y} * (100% - ${preview.height}px))`,
+                      width: preview.width,
+                      height: preview.height,
+                      borderRadius: preview.radius
                     }}
                   >
                     <i />
@@ -506,7 +627,7 @@ export function SettingsPage() {
                   <span className="placement-map-caption">{positionLabel(position)}</span>
                 </div>
                 <div className="placement-footer">
-                  <span>Saved automatically. The notch reopens in this spot.</span>
+                  <span>The tab sits on this spot. The workspace opens along the top, lined up with the tab.</span>
                   <div className="placement-buttons">
                     <button
                       className="soft-button compact"
@@ -533,7 +654,7 @@ export function SettingsPage() {
                   checked={state.settings.pinOnOpen}
                   onChange={setPinned}
                   label="Keep the notch pinned"
-                  description="Stop it collapsing when the pointer leaves."
+                  description="Stays open when the pointer leaves. Collapse and Esc still close it."
                 />
                 <Toggle
                   checked={state.settings.launchAtLogin}
@@ -542,10 +663,16 @@ export function SettingsPage() {
                   description="Have the notch waiting after you sign in."
                 />
                 <Toggle
+                  checked={state.settings.reduceMotion === true}
+                  onChange={(value) => updateSettings({ reduceMotion: value })}
+                  label="Reduce motion"
+                  description="Opens and closes in place, and turns off the other animations in the notch."
+                />
+                <Toggle
                   checked={state.settings.notifications}
                   onChange={(value) => updateSettings({ notifications: value })}
                   label="Reminder notifications"
-                  description="System alerts for tasks and completed focus sessions."
+                  description="Notch notices for reminders, and Windows alerts for reminders, finished focus sessions, and posture nudges."
                 />
                 <Toggle
                   checked={state.settings.timerNotifications ?? true}
@@ -601,6 +728,23 @@ export function SettingsPage() {
                   <span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Space</kbd></span>
                   <strong>Toggle the notch</strong>
                 </div>
+                <div className="shortcut-card">
+                  <span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>Space</kbd></span>
+                  <strong>Hide or show the tab</strong>
+                </div>
+              </section>
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Get out of the way</h3>
+                  <p>The tab steps aside for fullscreen apps, and for any app you name.</p>
+                </div>
+                <Toggle
+                  checked={state.settings.autoHideFullscreen !== false}
+                  onChange={(value) => updateSettings({ autoHideFullscreen: value })}
+                  label="Hide over fullscreen apps"
+                  description="When another window covers the primary display, the tab disappears until you come back."
+                />
+                <NeverOverField />
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">
@@ -666,9 +810,11 @@ export function SettingsPage() {
                       <button className="soft-button" onClick={() => void window.notch.obsidian.reveal(state.settings.vaultPath!, null)}>
                         <ExternalLink size={13} /> Show in Explorer
                       </button>
-                      <button className="soft-button" onClick={() => setPage('notes')}>
-                        <NotebookPen size={13} /> Open notes
-                      </button>
+                      {sectionVisible(state, 'notes') && (
+                        <button className="soft-button" onClick={() => setPage('notes')}>
+                          <NotebookPen size={13} /> Open notes
+                        </button>
+                      )}
                     </>
                   )}
                 </div>
@@ -694,27 +840,57 @@ export function SettingsPage() {
                   <h3>Connection</h3>
                   <p>
                     {status?.connected
-                      ? 'Full Spotify control is connected.'
+                      ? 'Full Spotify control is connected. Other players still use the Windows media session.'
                       : status?.localAvailable
-                        ? 'Spotify Desktop is detected — no setup needed for basic controls.'
-                        : 'Open Spotify on this computer to use the local session.'}
+                        ? 'A player on this PC is detected — no setup needed for basic controls.'
+                        : 'Start playback in any app to control it from the notch.'}
                   </p>
                 </div>
+                <label className="setting-field">
+                  <span>Follow</span>
+                  <select
+                    className="setting-select"
+                    value={state.settings.mediaSource || 'auto'}
+                    onChange={(event) => updateSettings({ mediaSource: event.target.value })}
+                  >
+                    <option value="auto">Automatic — whichever app is playing</option>
+                    {(status?.mediaSources || []).map((source) => (
+                      <option key={source.id} value={source.id}>
+                        {source.label}
+                      </option>
+                    ))}
+                    {state.settings.mediaSource &&
+                      state.settings.mediaSource !== 'auto' &&
+                      !(status?.mediaSources || []).some((source) => source.id === state.settings.mediaSource) && (
+                        <option value={state.settings.mediaSource}>{state.settings.mediaSource}</option>
+                      )}
+                  </select>
+                </label>
                 {status?.connected ? (
-                  <div className="spotify-connected">
-                    {status.profile?.image ? (
-                      <img src={status.profile.image} alt="" />
-                    ) : (
-                      <span className="profile-fallback">{status.profile?.name?.slice(0, 1) || 'S'}</span>
-                    )}
-                    <div>
-                      <strong>{status.profile?.name || 'Spotify listener'}</strong>
-                      <span>{status.profile?.product === 'premium' ? 'Premium' : 'Free'} account · connected</span>
+                  <>
+                    <div className="spotify-connected">
+                      {status.profile?.image ? (
+                        <img src={status.profile.image} alt="" />
+                      ) : (
+                        <span className="profile-fallback">{status.profile?.name?.slice(0, 1) || 'S'}</span>
+                      )}
+                      <div>
+                        <strong>{status.profile?.name || 'Spotify listener'}</strong>
+                        <span>{status.profile?.product === 'premium' ? 'Premium' : 'Free'} account · connected</span>
+                      </div>
+                      <button className="soft-button compact" onClick={() => void disconnect()}>
+                        <LogOut size={12} /> Disconnect
+                      </button>
                     </div>
-                    <button className="soft-button compact" onClick={() => void disconnect()}>
-                      <LogOut size={12} /> Disconnect
-                    </button>
-                  </div>
+                    {status.needsConsent && (
+                      <div className="settings-note">
+                        Reconnect once so Notch can show recently played. Playback control stays as it is.
+                        <button className="link-button" onClick={() => void connect()} disabled={connecting}>
+                          Reconnect
+                        </button>
+                      </div>
+                    )}
+                  </>
                 ) : status?.localAvailable ? (
                   <>
                     <div className="spotify-local-connected">
@@ -731,8 +907,8 @@ export function SettingsPage() {
                     </div>
                     <p className="settings-note">
                       <ShieldCheck size={12} /> Current track, play/pause, previous/next and seek work
-                      without a Spotify app. Queue, volume, shuffle and repeat need the optional full
-                      connection.
+                      through the Windows media session, without a Client ID. Queue, volume, shuffle
+                      and repeat need the optional full connection.
                     </p>
                     <div className="button-row">
                       <button className="primary-button" onClick={() => setShowSpotifyAdvanced(true)}>
@@ -745,8 +921,18 @@ export function SettingsPage() {
                     <Music2 size={20} />
                     <div>
                       <strong>No Spotify session detected</strong>
-                      <span>Open Spotify, then the notch can control it through Windows. Full queue controls are optional below.</span>
+                      <span>Open the Spotify app, then the notch can control it through Windows. Full queue controls are optional below.</span>
                     </div>
+                    <button
+                      className="soft-button compact"
+                      onClick={() => {
+                        void window.notch.spotify.launch('spotify:').then((opened) => {
+                          if (!opened) window.notch.openExternal('https://open.spotify.com')
+                        })
+                      }}
+                    >
+                      <ExternalLink size={12} /> Open Spotify
+                    </button>
                   </div>
                 )}
               </section>
@@ -826,8 +1012,7 @@ export function SettingsPage() {
                 <div className="shortcut-list">
                   <div><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Space</kbd></span><strong>Toggle notch</strong></div>
                   <div><span><kbd>Esc</kbd></span><strong>Collapse</strong></div>
-                  <div><span><kbd>1</kbd>–<kbd>7</kbd></span><strong>Switch sections</strong></div>
-                  <div><span><kbd>8</kbd></span><strong>Water, once added</strong></div>
+                  <div><span><kbd>1</kbd>–<kbd>N</kbd></span><strong>Open the sections on the bar, in order</strong></div>
                   <div><span><kbd>Ctrl</kbd><kbd>K</kbd></span><strong>Search notes</strong></div>
                   <div><span><kbd>Ctrl</kbd><kbd>S</kbd></span><strong>Save note</strong></div>
                 </div>

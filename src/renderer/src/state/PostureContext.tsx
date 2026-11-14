@@ -11,6 +11,7 @@ import { FilesetResolver, PoseLandmarker, type NormalizedLandmark } from '@media
 import type { PostureBaseline } from '../../../shared/types'
 import { useApp } from './AppContext'
 import { playPostureRing } from '../lib/alertSound'
+import { sectionVisible } from '../lib/sections'
 import { todayKey } from '../lib/time'
 
 const WASM_PATH = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.2/wasm'
@@ -118,8 +119,12 @@ function isPlausible(metrics: PostureSample): boolean {
     metrics.headOffset < 0.35 &&
     metrics.headTilt >= 0 &&
     metrics.headTilt < 0.28 &&
-    metrics.scale > 0.2 &&
-    metrics.scale < 0.6 &&
+    // Shoulder width as a fraction of the frame. A normal laptop view is
+    // often just under 0.2 when the person sits back, and over 0.6 when they
+    // lean in. Those poses still need a score; only tiny or full-frame
+    // detections are treated as noise.
+    metrics.scale > 0.12 &&
+    metrics.scale < 0.9 &&
     Math.abs(metrics.forwardHead) < 1.8
   )
 }
@@ -300,6 +305,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
   const goodRef = useRef(posture.goodSeconds)
   const badRef = useRef(posture.badSeconds)
   const lastTickRef = useRef(0)
+  const dayKeyRef = useRef(posture.dayKey)
   const lastPersistRef = useRef(0)
   const lastUiRef = useRef(0)
   const lastTraceRef = useRef(0)
@@ -313,7 +319,10 @@ export function PostureProvider({ children }: { children: ReactNode }) {
     frames: number
     hipFrames: number
   } | null>(null)
-  const enabled = posture.enabled
+  // Hiding Posture stops the camera. The coach preference, baseline and day
+  // totals stay, so turning the section back on resumes exactly where it left off.
+  const postureVisible = sectionVisible(state, 'posture')
+  const enabled = posture.enabled && postureVisible
 
   const persistStats = useCallback(() => {
     const today = todayKey()
@@ -379,32 +388,40 @@ export function PostureProvider({ children }: { children: ReactNode }) {
         }
         streamRef.current = media
         setStream(media)
-        if (video) {
-          video.srcObject = media
-          await video.play().catch(() => undefined)
+        const preview = videoRef.current
+        if (preview) {
+          preview.srcObject = media
+          await preview.play().catch(() => undefined)
         }
 
         let landmarker: PoseLandmarker
         try {
           const vision = await FilesetResolver.forVisionTasks(WASM_PATH)
-          try {
-            landmarker = await PoseLandmarker.createFromOptions(vision, {
-              baseOptions: { modelAssetPath: MODEL_PATH, delegate: 'GPU' },
-              runningMode: 'VIDEO',
-              numPoses: 1,
-              minPoseDetectionConfidence: 0.45,
-              minPosePresenceConfidence: 0.45,
-              minTrackingConfidence: 0.45
-            })
-          } catch {
-            landmarker = await PoseLandmarker.createFromOptions(vision, {
-              baseOptions: { modelAssetPath: MODEL_PATH, delegate: 'CPU' },
-              runningMode: 'VIDEO',
-              numPoses: 1,
-              minPoseDetectionConfidence: 0.45,
-              minPosePresenceConfidence: 0.45,
-              minTrackingConfidence: 0.45
-            })
+          const landmarkerOptions = (delegate: 'GPU' | 'CPU') => ({
+            baseOptions: { modelAssetPath: MODEL_PATH, delegate },
+            runningMode: 'VIDEO' as const,
+            numPoses: 1,
+            minPoseDetectionConfidence: 0.45,
+            minPosePresenceConfidence: 0.45,
+            minTrackingConfidence: 0.45
+          })
+          // A missing GPU can leave the GPU delegate pending forever, which
+          // keeps the camera on and the score blank. Fall back to CPU.
+          const gpuCreate = PoseLandmarker.createFromOptions(vision, landmarkerOptions('GPU'))
+          const gpuLandmarker = await Promise.race([
+            gpuCreate,
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000))
+          ])
+          if (cancelled) {
+            if (gpuLandmarker) gpuLandmarker.close()
+            else gpuCreate.then((created) => created.close()).catch(() => undefined)
+            return
+          }
+          if (gpuLandmarker) {
+            landmarker = gpuLandmarker
+          } else {
+            gpuCreate.then((created) => created.close()).catch(() => undefined)
+            landmarker = await PoseLandmarker.createFromOptions(vision, landmarkerOptions('CPU'))
           }
         } catch {
           throw new Error(
@@ -433,7 +450,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
 
         const finishSetupIfReady = (now: number): void => {
           const setup = setupRef.current
-          if (!setup) return
+          if (!setup || setup.start === 0) return
           const elapsed = (now - setup.start) / 1000
           setSetupProgress(Math.min(1, elapsed / 8))
           if (elapsed < 8) return
@@ -502,199 +519,223 @@ export function PostureProvider({ children }: { children: ReactNode }) {
         }
 
         const step = (): void => {
-          if (cancelled || !videoRef.current || !landmarkerRef.current) return
-          const element = videoRef.current
-          if (element.paused) void element.play().catch(() => undefined)
-          if (element.readyState >= 2 && element.videoWidth > 0) {
-            staleFramesRef.current = 0
-            try {
-              const now = performance.now()
-              const result = landmarkerRef.current.detectForVideo(element, now)
-              const pose = result.landmarks?.[0] || null
-              const baseline = postureRef.current.baseline || DEFAULT_BASELINE
-              if (!pose) {
-                setLandmarks(null)
-                setStatus('no-pose')
-                setScore(null)
-                metricsRef.current = null
-                smoothedRef.current = null
-                sampleHistoryRef.current = []
-                invalidFramesRef.current = 0
-                // Nobody in frame: never start or continue a slouch alert.
-                badSinceRef.current = null
-                setCoverage({ shoulders: false, ears: false, hips: false })
-                traceStatus('no-pose')
-                finishSetupIfReady(now)
-              } else {
-                setLandmarks(pose)
-                const leftShoulder = pose[11]
-                const rightShoulder = pose[12]
-                const leftEar = pose[7]
-                const rightEar = pose[8]
-                const leftHip = pose[23]
-                const rightHip = pose[24]
-                const nextCoverage: PostureCoverage = {
-                  shoulders: Boolean(
-                    leftShoulder &&
-                      rightShoulder &&
-                      visibility(leftShoulder) >= 0.42 &&
-                      visibility(rightShoulder) >= 0.42
-                  ),
-                  ears: Boolean(
-                    leftEar &&
-                      rightEar &&
-                      visibility(leftEar) >= 0.35 &&
-                      visibility(rightEar) >= 0.35
-                  ),
-                  hips: Boolean(
-                    leftHip &&
-                      rightHip &&
-                      visibility(leftHip) >= 0.42 &&
-                      visibility(rightHip) >= 0.42
-                  )
-                }
-                setCoverage(nextCoverage)
-                const computed = computeMetrics(pose, element, baseline)
-                if (!computed) {
+          if (cancelled) return
+          try {
+            if (!videoRef.current || !landmarkerRef.current) return
+            const element = videoRef.current
+            if (element.paused) void element.play().catch(() => undefined)
+            if (element.readyState >= 2 && element.videoWidth > 0) {
+              if (setupRef.current && setupRef.current.start === 0) {
+                setupRef.current.start = performance.now()
+              }
+              staleFramesRef.current = 0
+              try {
+                const now = performance.now()
+                const result = landmarkerRef.current.detectForVideo(element, now)
+                const pose = result.landmarks?.[0] || null
+                const baseline = postureRef.current.baseline || DEFAULT_BASELINE
+                if (!pose) {
+                  setLandmarks(null)
                   setStatus('no-pose')
                   setScore(null)
                   metricsRef.current = null
                   smoothedRef.current = null
                   sampleHistoryRef.current = []
                   invalidFramesRef.current = 0
+                  // Nobody in frame: never start or continue a slouch alert.
                   badSinceRef.current = null
-                  traceStatus('no-metrics')
-                  finishSetupIfReady(now)
-                } else if (!isPlausible(computed)) {
-                  invalidFramesRef.current += 1
-                  if (invalidFramesRef.current >= 6) {
-                    sampleHistoryRef.current = []
-                    smoothedRef.current = null
-                    metricsRef.current = null
-                    badSinceRef.current = null
-                    setMetrics(null)
-                    setScore(null)
-                    setStatus('no-pose')
-                  }
+                  setCoverage({ shoulders: false, ears: false, hips: false })
+                  traceStatus('no-pose')
                   finishSetupIfReady(now)
                 } else {
-                  invalidFramesRef.current = 0
-                  const history = [...sampleHistoryRef.current, computed].slice(-5)
-                  sampleHistoryRef.current = history
-                  const stable = medianSample(history)
-                  const verdict = scorePosture(stable, baseline)
-                  const delta = Math.min(1.4, (now - lastTickRef.current) / 1000)
-                  lastTickRef.current = now
-                  const smoothed =
-                    smoothedRef.current === null
-                      ? verdict.score
-                      : smoothedRef.current * 0.4 + verdict.score * 0.6
-                  smoothedRef.current = smoothed
-                  const displayMetrics: PostureMetrics = { ...stable, advice: verdict.advice }
-                  metricsRef.current = displayMetrics
-                  setMetrics(displayMetrics)
-                  setStatus('running')
-                  setScore(Math.round(smoothed))
-
-                  if (now - lastTraceRef.current >= 500) {
-                    lastTraceRef.current = now
-                    window.notch.postureTrace({
-                      t: Date.now(),
-                      score: Math.round(smoothed),
-                      frameScore: verdict.score,
-                      neck: Number(stable.neck.toFixed(3)),
-                      tilt: Number(stable.tilt.toFixed(3)),
-                      headOffset: Number(stable.headOffset.toFixed(3)),
-                      headTilt: Number(stable.headTilt.toFixed(3)),
-                      forwardHead: Number(stable.forwardHead.toFixed(3)),
-                      scale: Number(stable.scale.toFixed(3)),
-                      lean: Number(stable.lean.toFixed(3)),
-                      baselineVersion: postureRef.current.baseline?.version ?? 0,
-                      setup: Boolean(setupRef.current)
-                    })
+                  setLandmarks(pose)
+                  const leftShoulder = pose[11]
+                  const rightShoulder = pose[12]
+                  const leftEar = pose[7]
+                  const rightEar = pose[8]
+                  const leftHip = pose[23]
+                  const rightHip = pose[24]
+                  const nextCoverage: PostureCoverage = {
+                    shoulders: Boolean(
+                      leftShoulder &&
+                        rightShoulder &&
+                        visibility(leftShoulder) >= 0.42 &&
+                        visibility(rightShoulder) >= 0.42
+                    ),
+                    ears: Boolean(
+                      leftEar &&
+                        rightEar &&
+                        visibility(leftEar) >= 0.35 &&
+                        visibility(rightEar) >= 0.35
+                    ),
+                    hips: Boolean(
+                      leftHip &&
+                        rightHip &&
+                        visibility(leftHip) >= 0.42 &&
+                        visibility(rightHip) >= 0.42
+                    )
                   }
-
-                  const setup = setupRef.current
-                  if (setup) {
-                    // Ignore the first moment while the overlay appears and
-                    // the user settles, so a transition pose is not baked in.
-                    if (now - setup.start > 900) setup.samples.push(stable)
-                    setup.frames += 1
-                    if (nextCoverage.hips) setup.hipFrames += 1
-                    setup.coverage = {
-                      shoulders: setup.coverage.shoulders || nextCoverage.shoulders,
-                      ears: setup.coverage.ears || nextCoverage.ears,
-                      hips: setup.coverage.hips || nextCoverage.hips
-                    }
-                  } else {
-                    const current = postureRef.current
-                    if (smoothed >= current.threshold) {
-                      goodRef.current += delta
+                  setCoverage(nextCoverage)
+                  const computed = computeMetrics(pose, element, baseline)
+                  if (!computed) {
+                    setStatus('no-pose')
+                    setScore(null)
+                    metricsRef.current = null
+                    smoothedRef.current = null
+                    sampleHistoryRef.current = []
+                    invalidFramesRef.current = 0
+                    badSinceRef.current = null
+                    traceStatus('no-metrics')
+                    finishSetupIfReady(now)
+                  } else if (!isPlausible(computed)) {
+                    invalidFramesRef.current += 1
+                    if (invalidFramesRef.current >= 6) {
+                      sampleHistoryRef.current = []
+                      smoothedRef.current = null
+                      metricsRef.current = null
                       badSinceRef.current = null
+                      setMetrics(null)
+                      setScore(null)
+                      setStatus('no-pose')
+                    }
+                    finishSetupIfReady(now)
+                  } else {
+                    invalidFramesRef.current = 0
+                    const history = [...sampleHistoryRef.current, computed].slice(-5)
+                    sampleHistoryRef.current = history
+                    const stable = medianSample(history)
+                    const verdict = scorePosture(stable, baseline)
+                    const delta = Math.min(1.4, (now - lastTickRef.current) / 1000)
+                    lastTickRef.current = now
+                    const smoothed =
+                      smoothedRef.current === null
+                        ? verdict.score
+                        : smoothedRef.current * 0.4 + verdict.score * 0.6
+                    smoothedRef.current = smoothed
+                    const displayMetrics: PostureMetrics = { ...stable, advice: verdict.advice }
+                    metricsRef.current = displayMetrics
+                    setMetrics(displayMetrics)
+                    setStatus('running')
+                    setScore(Math.round(smoothed))
+
+                    if (now - lastTraceRef.current >= 500) {
+                      lastTraceRef.current = now
+                      window.notch.postureTrace({
+                        t: Date.now(),
+                        score: Math.round(smoothed),
+                        frameScore: verdict.score,
+                        neck: Number(stable.neck.toFixed(3)),
+                        tilt: Number(stable.tilt.toFixed(3)),
+                        headOffset: Number(stable.headOffset.toFixed(3)),
+                        headTilt: Number(stable.headTilt.toFixed(3)),
+                        forwardHead: Number(stable.forwardHead.toFixed(3)),
+                        scale: Number(stable.scale.toFixed(3)),
+                        lean: Number(stable.lean.toFixed(3)),
+                        baselineVersion: postureRef.current.baseline?.version ?? 0,
+                        setup: Boolean(setupRef.current)
+                      })
+                    }
+
+                    const today = todayKey()
+                    if (dayKeyRef.current !== today) {
+                      dayKeyRef.current = today
+                      goodRef.current = 0
+                      badRef.current = 0
+                      lastAlertRef.current = 0
+                      setGoodDisplay(0)
+                      setBadDisplay(0)
+                      update({
+                        posture: { dayKey: today, goodSeconds: 0, badSeconds: 0, lastAlertAt: null }
+                      })
+                    }
+                    const setup = setupRef.current
+                    if (setup) {
+                      // Ignore the first moment while the overlay appears and
+                      // the user settles, so a transition pose is not baked in.
+                      if (now - setup.start > 900) setup.samples.push(stable)
+                      setup.frames += 1
+                      if (nextCoverage.hips) setup.hipFrames += 1
+                      setup.coverage = {
+                        shoulders: setup.coverage.shoulders || nextCoverage.shoulders,
+                        ears: setup.coverage.ears || nextCoverage.ears,
+                        hips: setup.coverage.hips || nextCoverage.hips
+                      }
                     } else {
-                      badRef.current += delta
-                      if (badSinceRef.current === null) badSinceRef.current = now
-                      // Ring only while a real pose is being tracked: the
-                      // presence checks above clear the alert when the seat is
-                      // empty, so an empty chair can never ring.
-                      if (
-                        current.notifications &&
-                        now - badSinceRef.current > 4000 &&
-                        Date.now() - lastAlertRef.current > 30_000
-                      ) {
-                        lastAlertRef.current = Date.now()
-                        badSinceRef.current = now
-                        playPostureRing()
-                        showToast(
-                          'Posture check',
-                          displayMetrics.advice || 'Sit tall and relax your shoulders.',
-                          'default'
-                        )
-                        window.notch.notify(
-                          'Posture check',
-                          displayMetrics.advice || 'Sit tall and relax your shoulders.',
-                          true
-                        )
+                      const current = postureRef.current
+                      if (smoothed >= current.threshold) {
+                        goodRef.current += delta
+                        badSinceRef.current = null
+                      } else {
+                        badRef.current += delta
+                        if (badSinceRef.current === null) badSinceRef.current = now
+                        // Ring only while a real pose is being tracked: the
+                        // presence checks above clear the alert when the seat is
+                        // empty, so an empty chair can never ring.
+                        if (
+                          current.notifications &&
+                          now - badSinceRef.current > 4000 &&
+                          Date.now() - lastAlertRef.current > 30_000
+                        ) {
+                          lastAlertRef.current = Date.now()
+                          badSinceRef.current = now
+                          playPostureRing()
+                          showToast(
+                            'Posture check',
+                            displayMetrics.advice || 'Sit tall and relax your shoulders.',
+                            'default'
+                          )
+                          window.notch.notify(
+                            'Posture check',
+                            displayMetrics.advice || 'Sit tall and relax your shoulders.',
+                            true
+                          )
+                        }
+                      }
+
+                      if (now - lastUiRef.current > 900) {
+                        lastUiRef.current = now
+                        setGoodDisplay(goodRef.current)
+                        setBadDisplay(badRef.current)
+                      }
+                      if (now - lastPersistRef.current > 20_000) {
+                        lastPersistRef.current = now
+                        persistStats()
                       }
                     }
-
-                    if (now - lastUiRef.current > 900) {
-                      lastUiRef.current = now
-                      setGoodDisplay(goodRef.current)
-                      setBadDisplay(badRef.current)
-                    }
-                    if (now - lastPersistRef.current > 20_000) {
-                      lastPersistRef.current = now
-                      persistStats()
-                    }
+                    finishSetupIfReady(now)
                   }
-                  finishSetupIfReady(now)
                 }
+              } catch (error) {
+                setStatus('no-pose')
+                setScore(null)
+                setMetrics(null)
+                metricsRef.current = null
+                smoothedRef.current = null
+                sampleHistoryRef.current = []
+                badSinceRef.current = null
+                window.notch.postureTrace({
+                  t: Date.now(),
+                  status: 'detect-error',
+                  message: error instanceof Error ? error.message : String(error)
+                })
+                traceStatus('detect-error')
               }
-            } catch {
-              setStatus('no-pose')
-              setScore(null)
-              setMetrics(null)
-              metricsRef.current = null
-              smoothedRef.current = null
-              sampleHistoryRef.current = []
-              badSinceRef.current = null
-              traceStatus('detect-error')
+            } else {
+              staleFramesRef.current += 1
+              traceStatus('no-frames')
+              if (staleFramesRef.current >= 6) {
+                setStatus('no-pose')
+                setScore(null)
+                setMetrics(null)
+                metricsRef.current = null
+                smoothedRef.current = null
+                sampleHistoryRef.current = []
+                badSinceRef.current = null
+              }
             }
-          } else {
-            staleFramesRef.current += 1
-            traceStatus('no-frames')
-            if (staleFramesRef.current >= 6) {
-              setStatus('no-pose')
-              setScore(null)
-              setMetrics(null)
-              metricsRef.current = null
-              smoothedRef.current = null
-              sampleHistoryRef.current = []
-              badSinceRef.current = null
-            }
+          } finally {
+            if (!cancelled) timer = setTimeout(step, 420)
           }
-          timer = setTimeout(step, 420)
         }
         step()
       } catch (caught) {
@@ -710,6 +751,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
         streamRef.current = null
         setStream(null)
         if (video) video.srcObject = null
+        if (videoRef.current) videoRef.current.srcObject = null
         if (setupRef.current) {
           setupRef.current = null
           setSetupRunning(false)
@@ -733,6 +775,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
       landmarkerRef.current?.close()
       landmarkerRef.current = null
       if (video) video.srcObject = null
+      if (videoRef.current) videoRef.current.srcObject = null
       if (setupRef.current) {
         setupRef.current = null
         setSetupRunning(false)
@@ -794,7 +837,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
       return
     }
     setupRef.current = {
-      start: performance.now(),
+      start: 0,
       samples: [],
       coverage: { shoulders: false, ears: false, hips: false },
       frames: 0,
