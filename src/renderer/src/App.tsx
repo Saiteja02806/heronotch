@@ -19,28 +19,17 @@ import { PosturePage } from './pages/PosturePage'
 import { SessionsPage } from './pages/SessionsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { WaterPage } from './pages/WaterPage'
-import { OPTIONAL_SECTIONS, sectionEnabled } from './lib/sections'
-import { AppProvider, useApp, type Page } from './state/AppContext'
+import { sectionPrefs, visibleSections, type SectionId } from './lib/sections'
+import { AppProvider, useApp } from './state/AppContext'
 import { MediaProvider } from './state/MediaContext'
 import { PostureProvider } from './state/PostureContext'
 
-const PAGE_KEYS: Record<string, Page> = {
-  '1': 'home',
-  '2': 'notes',
-  '3': 'music',
-  '4': 'planner',
-  '5': 'sessions',
-  '6': 'posture',
-  '7': 'settings'
-}
-
 const FLIGHT_MS = 420
 
-function pageForKey(key: string, enabled: (page: Page) => boolean): Page | null {
-  if (key in PAGE_KEYS) return PAGE_KEYS[key]
-  const extra = OPTIONAL_SECTIONS.find((section) => section.shortcut === key)
-  if (!extra || !enabled(extra.page)) return null
-  return extra.page
+function pageForKey(key: string, visible: SectionId[]): SectionId | null {
+  const index = Number(key) - 1
+  if (!Number.isInteger(index) || index < 0 || index >= visible.length) return null
+  return visible[index] ?? null
 }
 
 function prefersReducedMotion(): boolean {
@@ -202,26 +191,21 @@ function Shell() {
       }
       if (typing) return
       if (event.ctrlKey || event.metaKey || event.altKey) return
-      const next = pageForKey(event.key, (target) => {
-        const section = OPTIONAL_SECTIONS.find((item) => item.page === target)
-        return section ? sectionEnabled(state, section.id) : true
-      })
+      const next = pageForKey(event.key, visibleSections(sectionPrefs(state), { compact }))
       if (!next) return
       event.preventDefault()
-      setPage(compact && next === 'home' ? 'notes' : next)
+      setPage(next)
       if (!expanded) setExpanded(true)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [compact, expanded, setExpanded, setPage, state.water.enabled])
+  }, [compact, expanded, setExpanded, setPage, state.settings.sections, state.water.enabled])
 
   useEffect(() => {
-    if (compact && page === 'home') setPage('notes')
-  }, [compact, page, setPage])
-
-  useEffect(() => {
-    if (page === 'water' && !state.water.enabled) setPage(compact ? 'notes' : 'home')
-  }, [compact, page, setPage, state.water.enabled])
+    if (page === 'settings') return
+    const visible = visibleSections(sectionPrefs(state), { compact })
+    if (!visible.includes(page as SectionId)) setPage(visible[0])
+  }, [compact, page, setPage, state.settings.sections, state.water.enabled])
 
   useEffect(() => {
     return () => {

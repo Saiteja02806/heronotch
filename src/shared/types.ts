@@ -1,3 +1,5 @@
+import type { SectionPrefs } from './sections'
+
 export type Accent = 'coral' | 'mint' | 'violet' | 'ice' | 'gold'
 
 export type TimerMode = 'focus' | 'short' | 'long'
@@ -33,6 +35,11 @@ export interface Settings {
   panelSize: 'full' | 'compact'
   /** Blur and dim the desktop behind the open notch. On unless turned off. */
   focusMode: boolean
+  /**
+   * Which header sections are on the notch, and in what order.
+   * Absent on older saves; filled in from the water switch on load.
+   */
+  sections?: SectionPrefs
 }
 
 export interface TimerState {

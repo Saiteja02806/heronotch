@@ -1,6 +1,7 @@
 import { CircleCheck, Droplet, FolderOpen, Music2 } from 'lucide-react'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
+import { sectionPrefs, sectionVisible, visibleSections } from '../lib/sections'
 import { waterCount } from '../lib/water'
 import { todayKey } from '../lib/time'
 import { CompactSlot } from './CompactSlot'
@@ -13,9 +14,10 @@ export function Footer() {
   const vaultName = state.settings.vaultPath?.split(/[\\/]/).filter(Boolean).pop()
   const openToday = state.tasks.filter((task) => !task.done && task.date === todayKey()).length
   const spotifyLive = Boolean(status?.connected || status?.localAvailable)
-  const waterOn = Boolean(state.water?.enabled)
+  const waterOn = sectionVisible(state, 'water')
   const glasses = waterOn ? waterCount(state.water) : 0
   const compact = state.settings.panelSize === 'compact'
+  const sectionCount = visibleSections(sectionPrefs(state)).length
 
   if (compact) {
     return (
@@ -67,13 +69,14 @@ export function Footer() {
           <kbd>Space</kbd> toggle
         </span>
         <span>
-          <kbd>1</kbd>–<kbd>7</kbd> sections
+          <kbd>1</kbd>
+          {sectionCount > 1 && (
+            <>
+              –<kbd>{sectionCount}</kbd>
+            </>
+          )}{' '}
+          sections
         </span>
-        {waterOn && (
-          <span>
-            <kbd>8</kbd> water
-          </span>
-        )}
         <span>
           <kbd>Esc</kbd> close
         </span>

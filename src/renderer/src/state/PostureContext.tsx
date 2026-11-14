@@ -11,6 +11,7 @@ import { FilesetResolver, PoseLandmarker, type NormalizedLandmark } from '@media
 import type { PostureBaseline } from '../../../shared/types'
 import { useApp } from './AppContext'
 import { playPostureRing } from '../lib/alertSound'
+import { sectionVisible } from '../lib/sections'
 import { todayKey } from '../lib/time'
 
 const WASM_PATH = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.2/wasm'
@@ -318,7 +319,10 @@ export function PostureProvider({ children }: { children: ReactNode }) {
     frames: number
     hipFrames: number
   } | null>(null)
-  const enabled = posture.enabled
+  // Hiding Posture stops the camera. The coach preference, baseline and day
+  // totals stay, so turning the section back on resumes exactly where it left off.
+  const postureVisible = sectionVisible(state, 'posture')
+  const enabled = posture.enabled && postureVisible
 
   const persistStats = useCallback(() => {
     const today = todayKey()

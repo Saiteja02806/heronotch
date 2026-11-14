@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { EventEmitter } from 'node:events'
 import { promises as fs, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { normalizeSectionPrefs, sectionsEqual } from '../shared/sections'
 import {
   WATER_GLASS_ML,
   WATER_GOAL_MAX,
@@ -162,10 +163,12 @@ function sameWater(left: WaterState | undefined, right: WaterState): boolean {
 
 function normalizeDay(state: AppState): AppState {
   const today = localDayKey()
-  const settings =
+  let settings =
     state.settings.timerNotifications === undefined
       ? { ...state.settings, timerNotifications: true }
       : state.settings
+  const sections = normalizeSectionPrefs(settings.sections, Boolean(state.water?.enabled))
+  if (!sectionsEqual(settings.sections, sections)) settings = { ...settings, sections }
   const needsTimerFix = state.timer.durations.long === 15
   const timer = needsTimerFix
     ? { ...state.timer, durations: { ...state.timer.durations, long: 45 } }

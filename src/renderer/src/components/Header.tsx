@@ -1,53 +1,26 @@
-import {
-  Bot,
-  CalendarDays,
-  ChevronUp,
-  Droplet,
-  LayoutGrid,
-  Maximize2,
-  Minimize2,
-  Music2,
-  NotebookPen,
-  PersonStanding,
-  Pin,
-  PinOff,
-  Settings2
-} from 'lucide-react'
+import { ChevronUp, Maximize2, Minimize2, Pin, PinOff, Settings2 } from 'lucide-react'
 import { motion } from 'framer-motion'
-import { useApp, type Page } from '../state/AppContext'
-import { OPTIONAL_SECTIONS, sectionEnabled } from '../lib/sections'
+import { useApp } from '../state/AppContext'
+import { SECTION_META, sectionPrefs, visibleSections } from '../lib/sections'
 import { formatDateShort, greeting, todayKey } from '../lib/time'
 import { Logo } from './Logo'
-
-const EXTRA_ICONS = {
-  water: Droplet
-} as const
-
-const TABS: { id: Page; label: string; icon: typeof LayoutGrid }[] = [
-  { id: 'home', label: 'Home', icon: LayoutGrid },
-  { id: 'notes', label: 'Notes', icon: NotebookPen },
-  { id: 'music', label: 'Music', icon: Music2 },
-  { id: 'planner', label: 'Plan', icon: CalendarDays },
-  { id: 'sessions', label: 'Sessions', icon: Bot },
-  { id: 'posture', label: 'Posture', icon: PersonStanding }
-]
 
 export function SectionNav() {
   const { page, setPage, state } = useApp()
   const compact = state.settings.panelSize === 'compact'
-  const tabs = compact ? TABS.filter((tab) => tab.id !== 'home') : TABS
-  const extras = OPTIONAL_SECTIONS.filter((section) => sectionEnabled(state, section.id))
+  const tabs = visibleSections(sectionPrefs(state), { compact })
 
   return (
     <nav className="nav-tabs" aria-label="Sections">
-      {tabs.map((tab) => {
+      {tabs.map((id) => {
+        const tab = SECTION_META[id]
         const Icon = tab.icon
-        const active = page === tab.id
+        const active = page === id
         return (
           <button
-            key={tab.id}
+            key={id}
             className={`nav-tab ${active ? 'is-active' : ''}`}
-            onClick={() => setPage(tab.id)}
+            onClick={() => setPage(id)}
             title={tab.label}
             aria-current={active ? 'page' : undefined}
           >
@@ -63,30 +36,6 @@ export function SectionNav() {
           </button>
         )
       })}
-      {extras.length > 0 && <span className="nav-divider" aria-hidden="true" />}
-      {extras.map((section) => {
-        const Icon = EXTRA_ICONS[section.id]
-        const active = page === section.page
-        return (
-          <button
-            key={section.id}
-            className={`nav-tab ${active ? 'is-active' : ''}`}
-            onClick={() => setPage(section.page)}
-            title={section.label}
-            aria-current={active ? 'page' : undefined}
-          >
-            {active && (
-              <motion.span
-                className="nav-active"
-                layoutId="nav-active"
-                transition={{ type: 'spring', stiffness: 430, damping: 34 }}
-              />
-            )}
-            <Icon size={compact ? 13 : 15} />
-            <span>{section.label}</span>
-          </button>
-        )
-      })}
     </nav>
   )
 }
@@ -94,6 +43,7 @@ export function SectionNav() {
 export function Header() {
   const { page, setPage, pinned, setPinned, state, openSettings, updateSettings, setExpanded } = useApp()
   const compact = state.settings.panelSize === 'compact'
+  const firstSection = visibleSections(sectionPrefs(state), { compact })[0]
   const clock = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
   const vaultName = state.settings.vaultPath?.split(/[\\/]/).filter(Boolean).pop()
 
@@ -134,7 +84,7 @@ export function Header() {
         </button>
         <button
           className={`icon-button ${page === 'settings' ? 'is-on' : ''}`}
-          onClick={() => (page === 'settings' ? setPage('home') : openSettings())}
+          onClick={() => (page === 'settings' ? setPage(firstSection) : openSettings())}
           title="Settings"
           aria-pressed={page === 'settings'}
         >

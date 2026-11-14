@@ -76,7 +76,6 @@ interface AppContextValue {
   addGlass: () => void
   undoGlass: () => void
   setWaterGoal: (glasses: number) => void
-  setWaterEnabled: (enabled: boolean) => void
   vaultRevision: number
   sessions: SessionsSnapshot | null
   sessionsLoading: boolean
@@ -555,13 +554,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [commitWater]
   )
 
-  const setWaterEnabled = useCallback(
-    (enabled: boolean) => {
-      commitWater((current) => ({ ...current, enabled }))
-    },
-    [commitWater]
-  )
-
   if (!state) {
     return <div className="boot" aria-hidden="true" />
   }
@@ -604,7 +596,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     addGlass,
     undoGlass,
     setWaterGoal,
-    setWaterEnabled,
     vaultRevision,
     sessions,
     sessionsLoading,
