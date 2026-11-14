@@ -801,20 +801,30 @@ export function SettingsPage() {
                   </p>
                 </div>
                 {status?.connected ? (
-                  <div className="spotify-connected">
-                    {status.profile?.image ? (
-                      <img src={status.profile.image} alt="" />
-                    ) : (
-                      <span className="profile-fallback">{status.profile?.name?.slice(0, 1) || 'S'}</span>
-                    )}
-                    <div>
-                      <strong>{status.profile?.name || 'Spotify listener'}</strong>
-                      <span>{status.profile?.product === 'premium' ? 'Premium' : 'Free'} account · connected</span>
+                  <>
+                    <div className="spotify-connected">
+                      {status.profile?.image ? (
+                        <img src={status.profile.image} alt="" />
+                      ) : (
+                        <span className="profile-fallback">{status.profile?.name?.slice(0, 1) || 'S'}</span>
+                      )}
+                      <div>
+                        <strong>{status.profile?.name || 'Spotify listener'}</strong>
+                        <span>{status.profile?.product === 'premium' ? 'Premium' : 'Free'} account · connected</span>
+                      </div>
+                      <button className="soft-button compact" onClick={() => void disconnect()}>
+                        <LogOut size={12} /> Disconnect
+                      </button>
                     </div>
-                    <button className="soft-button compact" onClick={() => void disconnect()}>
-                      <LogOut size={12} /> Disconnect
-                    </button>
-                  </div>
+                    {status.needsConsent && (
+                      <div className="settings-note">
+                        Reconnect once so Notch can show recently played. Playback control stays as it is.
+                        <button className="link-button" onClick={() => void connect()} disabled={connecting}>
+                          Reconnect
+                        </button>
+                      </div>
+                    )}
+                  </>
                 ) : status?.localAvailable ? (
                   <>
                     <div className="spotify-local-connected">
@@ -831,8 +841,8 @@ export function SettingsPage() {
                     </div>
                     <p className="settings-note">
                       <ShieldCheck size={12} /> Current track, play/pause, previous/next and seek work
-                      without a Spotify app. Queue, volume, shuffle and repeat need the optional full
-                      connection.
+                      through the Windows media session, without a Client ID. Queue, volume, shuffle
+                      and repeat need the optional full connection.
                     </p>
                     <div className="button-row">
                       <button className="primary-button" onClick={() => setShowSpotifyAdvanced(true)}>
@@ -845,8 +855,18 @@ export function SettingsPage() {
                     <Music2 size={20} />
                     <div>
                       <strong>No Spotify session detected</strong>
-                      <span>Open Spotify, then the notch can control it through Windows. Full queue controls are optional below.</span>
+                      <span>Open the Spotify app, then the notch can control it through Windows. Full queue controls are optional below.</span>
                     </div>
+                    <button
+                      className="soft-button compact"
+                      onClick={() => {
+                        void window.notch.spotify.launch('spotify:').then((opened) => {
+                          if (!opened) window.notch.openExternal('https://open.spotify.com')
+                        })
+                      }}
+                    >
+                      <ExternalLink size={12} /> Open Spotify
+                    </button>
                   </div>
                 )}
               </section>

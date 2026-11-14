@@ -122,6 +122,7 @@ export interface AppState {
   posture: PostureState
   water: WaterState
   focusLog: FocusSession[]
+  spotifyMemory: SpotifyMemory | null
 }
 
 export interface AppStatePatch {
@@ -132,6 +133,7 @@ export interface AppStatePatch {
   posture?: Partial<PostureState>
   water?: Partial<WaterState>
   focusLog?: FocusSession[]
+  spotifyMemory?: SpotifyMemory | null
 }
 
 export type SessionProvider = 'codex' | 'opencode' | 'antigravity' | 'claude' | 'cursor' | 'windsurf' | 'zed'
@@ -216,6 +218,10 @@ export interface SpotifyStatus {
   localAvailable: boolean
   localTitle?: string | null
   localArtist?: string | null
+  /** The saved grant is missing a scope this version asks for, usually recently played. */
+  needsConsent: boolean
+  /** Screenshot-only hint. Absent in normal use. */
+  demoPhase?: 'opening' | 'nodevice' | 'premium' | null
 }
 
 export interface SpotifyTrack {
@@ -260,6 +266,39 @@ export interface SpotifyQueueItem {
   duration: number
 }
 
+export interface SpotifyRecentItem {
+  id: string
+  uri: string
+  name: string
+  artists: string
+  image: string | null
+  duration: number
+  contextUri: string | null
+  contextType: 'album' | 'playlist' | 'show' | 'artist' | null
+  contextName: string | null
+  playedAt: number
+}
+
+export interface SpotifyPlaylistItem {
+  id: string
+  uri: string
+  name: string
+  image: string | null
+  owner: string
+}
+
+export interface SpotifyLibrary {
+  recent: SpotifyRecentItem[]
+  playlists: SpotifyPlaylistItem[]
+}
+
+/** Last track Notch saw, so the music card has something to show before Spotify answers. */
+export interface SpotifyMemory {
+  track: SpotifyTrack
+  contextUri: string | null
+  updatedAt: number
+}
+
 export interface NotchToggleEvent {
   expanded: boolean
   /** Display size the window was just resized to. Present when opening. */
@@ -290,6 +329,7 @@ export type SpotifyAction =
   | { type: 'next' }
   | { type: 'previous' }
   | { type: 'play-track'; uri: string; queue?: string[]; deviceId?: string; contextUri?: string }
+  | { type: 'play-context'; contextUri: string; deviceId?: string }
   | { type: 'seek'; position: number }
   | { type: 'volume'; volume: number }
   | { type: 'shuffle'; state: boolean }
@@ -346,6 +386,7 @@ export interface NotchApi {
     disconnect: () => Promise<SpotifyStatus>
     player: () => Promise<SpotifyPlayback>
     queue: () => Promise<SpotifyQueueItem[]>
+    library: () => Promise<SpotifyLibrary>
     action: (action: SpotifyAction) => Promise<SpotifyPlayback>
     launch: (target?: string) => Promise<boolean>
   }

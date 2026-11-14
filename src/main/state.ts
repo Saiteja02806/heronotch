@@ -101,7 +101,8 @@ function createDefaultState(): AppState {
       dayKey: today,
       pours: []
     },
-    focusLog: []
+    focusLog: [],
+    spotifyMemory: null
   }
 }
 

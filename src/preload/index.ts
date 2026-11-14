@@ -9,6 +9,7 @@ import type {
   SessionSendResult,
   SessionsSnapshot,
   SpotifyAction,
+  SpotifyLibrary,
   SpotifyPlayback,
   SpotifyQueueItem,
   SpotifyStatus,
@@ -77,6 +78,7 @@ const api: NotchApi = {
     disconnect: () => ipcRenderer.invoke('spotify:disconnect') as Promise<SpotifyStatus>,
     player: () => ipcRenderer.invoke('spotify:player') as Promise<SpotifyPlayback>,
     queue: () => ipcRenderer.invoke('spotify:queue') as Promise<SpotifyQueueItem[]>,
+    library: () => ipcRenderer.invoke('spotify:library') as Promise<SpotifyLibrary>,
     action: (action: SpotifyAction) =>
       ipcRenderer.invoke('spotify:action', action) as Promise<SpotifyPlayback>,
     launch: (target?: string) => ipcRenderer.invoke('spotify:launch', target) as Promise<boolean>

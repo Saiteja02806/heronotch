@@ -949,6 +949,54 @@ function registerIpc(): void {
     return spotify.getQueue(settings.spotifyClientId)
   })
 
+  ipcMain.handle('spotify:library', async () => {
+    const settings = getState().settings
+    const status = await spotify.getStatus(settings.spotifyRedirectPort)
+    if (!status.connected) return { recent: [], playlists: [] }
+    return spotify.getLibrary(settings.spotifyClientId)
+  })
+
+async function openSpotifyApp(target = 'spotify:'): Promise<boolean> {
+  const uri =
+    target === 'spotify:' || /^spotify:(track|episode|album|playlist):[A-Za-z0-9]+$/.test(target)
+      ? target
+      : 'spotify:'
+  try {
+    await shell.openExternal(uri)
+    return true
+  } catch {
+    // Fall back to common install locations. Those only start the app.
+  }
+  const candidates = [
+    'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Roaming\\Spotify\\Spotify.exe',
+    'C:\\Program Files\\Spotify\\Spotify.exe',
+    'C:\\Program Files (x86)\\Spotify\\Spotify.exe'
+  ]
+  const fileSystem = await import('node:fs')
+  for (const candidate of candidates) {
+    try {
+      if (fileSystem.existsSync(candidate)) {
+        spawn(candidate, [], { detached: true, stdio: 'ignore' }).unref()
+        return true
+      }
+    } catch {
+      // try next
+    }
+  }
+  return false
+}
+
+async function recoverSpotifyDevice(clientId: string): Promise<boolean> {
+  const opened = await openSpotifyApp('spotify:')
+  if (opened && (await spotify.waitForDevice(clientId, 12000))) return true
+  try {
+    await shell.openExternal('https://open.spotify.com')
+  } catch {
+    return false
+  }
+  return spotify.waitForDevice(clientId, 8000)
+}
+
 async function startTrackOnDesktop(clientId: string, uri: string) {
   if (!/^spotify:(track|episode):[A-Za-z0-9]+$/.test(uri)) return null
   try {
@@ -972,22 +1020,35 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
     const run = spotifyActionQueue.then(async () => {
       const settings = getState().settings
       const status = await spotify.getStatus(settings.spotifyRedirectPort)
-      if (action?.type === 'play-track') {
-        if (!status.connected) {
-          throw new Error('Connect your Spotify account to choose a track from the queue.')
-        }
+      const recoverable =
+        action?.type === 'play' || action?.type === 'play-track' || action?.type === 'play-context'
+      if ((action?.type === 'play-track' || action?.type === 'play-context') && !status.connected) {
+        throw new Error('Connect your Spotify account to choose what plays. Opening the Spotify app still works.')
+      }
+      if (status.connected && recoverable) {
+        const memory = getState().spotifyMemory
         try {
-          return await spotify.performAction(settings.spotifyClientId, action)
+          return await spotify.performAction(settings.spotifyClientId, action, memory)
         } catch (error) {
-          const recovered = await startTrackOnDesktop(settings.spotifyClientId, action.uri)
-          if (recovered) return recovered
-          throw error
+          if (spotify.isPremiumRequired(error)) throw error
+          if (!spotify.isNoActiveDevice(error)) {
+            if (!localMedia.isLocalAvailable()) throw error
+            return localMedia.performLocalAction(action)
+          }
+          const ready = await recoverSpotifyDevice(settings.spotifyClientId)
+          if (ready) return spotify.performAction(settings.spotifyClientId, action, memory)
+          if (action.type === 'play-track') {
+            const recovered = await startTrackOnDesktop(settings.spotifyClientId, action.uri)
+            if (recovered) return recovered
+          }
+          throw new Error('No Spotify device yet. Open Spotify, then press play again.')
         }
       }
       if (status.connected) {
         try {
-          return await spotify.performAction(settings.spotifyClientId, action)
+          return await spotify.performAction(settings.spotifyClientId, action, getState().spotifyMemory)
         } catch (error) {
+          if (spotify.isPremiumRequired(error) || spotify.isNoActiveDevice(error)) throw error
           if (!localMedia.isLocalAvailable()) throw error
         }
       }
@@ -998,34 +1059,7 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
   })
 
   ipcMain.handle('spotify:launch', async (_event, target?: string) => {
-    const uri =
-      typeof target === 'string' &&
-      (target === 'spotify:' || /^spotify:track:[A-Za-z0-9]+$/.test(target))
-        ? target
-        : 'spotify:'
-    try {
-      await shell.openExternal(uri)
-      return true
-    } catch {
-      // Fall back to common install locations. Those only start the app.
-    }
-    const candidates = [
-      'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Roaming\\Spotify\\Spotify.exe',
-      'C:\\Program Files\\Spotify\\Spotify.exe',
-      'C:\\Program Files (x86)\\Spotify\\Spotify.exe'
-    ]
-    for (const candidate of candidates) {
-      try {
-        const fs = await import('node:fs')
-        if (fs.existsSync(candidate)) {
-          spawn(candidate, [], { detached: true, stdio: 'ignore' }).unref()
-          return true
-        }
-      } catch {
-        // try next
-      }
-    }
-    return false
+    return openSpotifyApp(typeof target === 'string' ? target : 'spotify:')
   })
   ipcMain.handle('sessions:scan', () => sessions.scanSessions())
   ipcMain.handle('sessions:open-project', (_event, directory: string) => {

@@ -88,8 +88,9 @@ function ConnectSpotify() {
           <span className="eyebrow"><span className="spotify-dot" /> Spotify</span>
           <h1>Your soundtrack,<br />in the notch.</h1>
           <p>
-            Control play, pause, skip, volume and queue from the top of your screen. Notch talks
-            straight to Spotify — no extra app running in between.
+            Notch controls Spotify. The audio still plays in the Spotify app or on another Connect
+            device. A Client ID adds the queue, volume, and recently played. Without one, the
+            desktop app can still be controlled through Windows.
           </p>
           <div className="spotify-hero-actions">
             {hasClientId ? (
@@ -103,6 +104,16 @@ function ConnectSpotify() {
                 Add Client ID in Settings
               </button>
             )}
+            <button
+              className="soft-button"
+              onClick={() => {
+                void window.notch.spotify.launch('spotify:').then((opened) => {
+                  if (!opened) window.notch.openExternal('https://open.spotify.com')
+                })
+              }}
+            >
+              <ExternalLink size={13} /> Open Spotify
+            </button>
             <button
               className="soft-button"
               onClick={() => window.notch.openExternal('https://developer.spotify.com/dashboard')}
@@ -175,9 +186,13 @@ export function MusicPage() {
     action,
     togglePlay,
     launchSpotify,
+    connect,
+    connecting,
     progressMs,
     disconnect,
-    pending
+    pending,
+    library,
+    phase
   } = useMedia()
   const [scrub, setScrub] = useState<number | null>(null)
   const [volumeDraft, setVolumeDraft] = useState<number | null>(null)
@@ -196,6 +211,14 @@ export function MusicPage() {
   const apiConnected = Boolean(status?.connected)
   const localMode = !apiConnected && Boolean(status?.localAvailable)
   const changing = pending === 'next' || pending === 'previous'
+  const phaseCopy =
+    phase === 'opening'
+      ? 'Opening Spotify…'
+      : phase === 'no-device'
+        ? 'No device — open Spotify'
+        : phase === 'premium'
+          ? 'Spotify Premium is required to start playback from Notch.'
+          : null
 
   const commitSeek = (): void => {
     if (scrub === null) return
@@ -229,16 +252,25 @@ export function MusicPage() {
           <div>
             <span className="eyebrow">
               <span className="spotify-dot" /> Spotify ·{' '}
-              {track && !playback?.device?.active && !status?.localAvailable
-                ? 'Closed · cached'
-                : status?.connected || status?.localAvailable
-                  ? playback?.device?.name || 'No device'
-                  : 'Closed · cached'}
+              {phase === 'opening'
+                ? 'Opening Spotify…'
+                : phase === 'no-device'
+                  ? 'No device'
+                  : track && !playback?.device?.active && !status?.localAvailable
+                    ? 'Closed · cached'
+                    : status?.connected || status?.localAvailable
+                      ? playback?.device?.name || 'No device'
+                      : 'Closed · cached'}
             </span>
             <h1>{track ? 'Now playing' : 'Quiet for a moment'}</h1>
           </div>
           <div className="player-head-actions">
             {status?.profile?.image && <img className="profile-face" src={status.profile.image} alt="" />}
+            {!apiConnected && (
+              <button className="soft-button compact" onClick={() => void launchSpotify()} title="Open the Spotify app">
+                <ExternalLink size={13} /> Open Spotify
+              </button>
+            )}
             <button className="soft-button compact" onClick={() => openSettings('spotify')} title="Spotify settings">
               <SlidersHorizontal size={13} />
             </button>
@@ -291,9 +323,16 @@ export function MusicPage() {
                   className="player-play"
                   onClick={() => void togglePlay()}
                   whileTap={{ scale: 0.93 }}
-                  title={playback?.playing ? 'Pause' : 'Play'}
+                  title={phase === 'opening' ? 'Opening Spotify…' : playback?.playing ? 'Pause' : 'Play'}
+                  aria-busy={phase === 'opening'}
                 >
-                  {playback?.playing ? <Pause size={23} fill="currentColor" /> : <Play size={23} fill="currentColor" />}
+                  {phase === 'opening' ? (
+                    <Loader2 size={22} className="spin" />
+                  ) : playback?.playing ? (
+                    <Pause size={23} fill="currentColor" />
+                  ) : (
+                    <Play size={23} fill="currentColor" />
+                  )}
                 </motion.button>
                 <button className="player-control" onClick={() => void action({ type: 'next' })} title="Next">
                   <SkipForward size={21} fill="currentColor" />
@@ -309,11 +348,7 @@ export function MusicPage() {
                 )}
               </div>
 
-              {localMode ? (
-                <button className="local-session-note" onClick={() => openSettings('spotify')}>
-                  Spotify Desktop · local controls <span>Unlock queue and full controls</span>
-                </button>
-              ) : (
+              {apiConnected ? (
                 <div className="volume-row">
                   <button
                     className="volume-button"
@@ -335,6 +370,21 @@ export function MusicPage() {
                   />
                   <span className="volume-value">{volume}%</span>
                 </div>
+              ) : (
+                <button className="local-session-note" onClick={() => (localMode ? openSettings('spotify') : void launchSpotify())}>
+                  {localMode ? 'Spotify Desktop · local controls' : 'Saved on this computer'}
+                  <span>{localMode ? 'Unlock queue and full controls' : 'Open Spotify to play this again'}</span>
+                </button>
+              )}
+              {phaseCopy && (
+                <div className={`player-phase is-${phase}`}>
+                  <span>{phaseCopy}</span>
+                  {phase === 'no-device' && (
+                    <button type="button" onClick={() => void launchSpotify()}>
+                      Open Spotify
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -349,9 +399,16 @@ export function MusicPage() {
                   }. Press play on any device and the track will appear here.`
                 : 'Open Spotify on this computer and press play. Notch reads the Windows media session, so there is nothing to set up.'}
             </p>
+            {phaseCopy && <p className={`player-phase is-${phase}`}>{phaseCopy}</p>}
             <div>
+              {apiConnected && (
+                <button className="primary-button" onClick={() => void togglePlay()}>
+                  {phase === 'opening' ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
+                  {phase === 'opening' ? 'Opening Spotify…' : 'Play'}
+                </button>
+              )}
               <button
-                className="primary-button"
+                className={apiConnected ? 'soft-button' : 'primary-button'}
                 onClick={() => {
                   void launchSpotify().then((opened) => {
                     if (!opened) window.notch.openExternal('https://open.spotify.com')
@@ -450,6 +507,72 @@ export function MusicPage() {
           </div>
         )}
 
+        {apiConnected && (
+          <section className="jump-back">
+            <div className="jump-head">
+              <span className="eyebrow">Continue</span>
+              <h2>Jump back in</h2>
+            </div>
+            {status?.needsConsent ? (
+              <div className="jump-consent">
+                <p>Reconnect Spotify to show what you were just listening to. Your playback connection stays.</p>
+                <button className="soft-button compact" onClick={() => void connect()} disabled={connecting}>
+                  {connecting ? <Loader2 size={12} className="spin" /> : <Music2 size={12} />}
+                  Reconnect
+                </button>
+              </div>
+            ) : (
+              <div className="jump-list">
+                {library.recent.length === 0 && library.playlists.length === 0 && (
+                  <p className="jump-empty">Recently played shows up here after the next track.</p>
+                )}
+                {library.playlists.length > 0 && (
+                  <div className="jump-playlists">
+                    {library.playlists.map((playlist) => (
+                      <button
+                        type="button"
+                        key={playlist.id}
+                        className="jump-playlist"
+                        onClick={() => void action({ type: 'play-context', contextUri: playlist.uri })}
+                      >
+                        <Cover image={playlist.image} seed={playlist.id} size={22} className="queue-cover" />
+                        <span>{playlist.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {library.recent.map((item) => (
+                  <button
+                    type="button"
+                    key={`${item.uri}-${item.playedAt}`}
+                    className="jump-item"
+                    onClick={() =>
+                      void action({
+                        type: 'play-track',
+                        uri: item.uri,
+                        contextUri:
+                          item.contextType === 'album' || item.contextType === 'playlist' || item.contextType === 'show'
+                            ? item.contextUri || undefined
+                            : undefined
+                      })
+                    }
+                  >
+                    <Cover image={item.image} seed={item.id} size={34} className="queue-cover" />
+                    <span className="queue-meta">
+                      <strong>{item.name}</strong>
+                      <small>
+                        {item.artists}
+                        {item.contextName ? ` · ${item.contextName}` : ''}
+                      </small>
+                    </span>
+                    <Play size={11} className="queue-play" fill="currentColor" />
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
         <div className="account-card">
           <div className="account-profile">
             {status?.profile?.image ? (
@@ -464,10 +587,12 @@ export function MusicPage() {
               <span>
                 {localMode
                   ? 'Local Windows media session'
-                  : `${status?.profile?.product === 'premium' ? 'Premium' : 'Free'} account`}
+                  : apiConnected
+                    ? `${status?.profile?.product === 'premium' ? 'Premium' : 'Free'} account`
+                    : 'Last track, saved on this computer'}
               </span>
             </div>
-            <span className="account-live">{localMode ? 'Local' : 'Live'}</span>
+            <span className="account-live">{localMode ? 'Local' : apiConnected ? 'Live' : 'Cached'}</span>
           </div>
           <div className="account-actions">
             <button className="link-button" onClick={() => window.notch.openExternal('https://open.spotify.com')}>

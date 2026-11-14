@@ -3,11 +3,21 @@ import { createHash, randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
+import {
+  needsRecentScope,
+  pickConnectDevice,
+  readSpotifyFailure,
+  type SpotifyFailure
+} from '../shared/spotifyPlayback'
 import type {
   SpotifyAction,
+  SpotifyLibrary,
+  SpotifyMemory,
   SpotifyPlayback,
+  SpotifyPlaylistItem,
   SpotifyProfile,
   SpotifyQueueItem,
+  SpotifyRecentItem,
   SpotifyStatus
 } from '../shared/types'
 
@@ -17,6 +27,28 @@ interface TokenFile {
   expiresAt: number
   profile: SpotifyProfile | null
   clientId?: string
+  /** Space-separated scopes from the last token response. Absent on older grants. */
+  scope?: string
+}
+
+export class SpotifyControlError extends Error {
+  status: number
+  reason: SpotifyFailure['reason']
+
+  constructor(failure: SpotifyFailure) {
+    super(failure.message)
+    this.name = 'SpotifyControlError'
+    this.status = failure.status
+    this.reason = failure.reason
+  }
+}
+
+export function isNoActiveDevice(error: unknown): boolean {
+  return error instanceof SpotifyControlError && error.reason === 'NO_ACTIVE_DEVICE'
+}
+
+export function isPremiumRequired(error: unknown): boolean {
+  return error instanceof SpotifyControlError && error.reason === 'PREMIUM_REQUIRED'
 }
 
 interface SpotifyCredentials {
@@ -28,9 +60,20 @@ const SCOPES = [
   'user-read-playback-state',
   'user-modify-playback-state',
   'user-read-currently-playing',
+  'user-read-recently-played',
   'playlist-read-private',
   'user-read-private'
 ].join(' ')
+
+function demoPhase(): SpotifyStatus['demoPhase'] {
+  const value = process.env.NOTCH_DEMO_MEDIA_PHASE
+  if (value === 'opening' || value === 'nodevice' || value === 'premium') return value
+  return null
+}
+
+function controlError(status: number, text: string): SpotifyControlError {
+  return new SpotifyControlError(readSpotifyFailure(status, text))
+}
 
 const DEMO_MEDIA = process.env.NOTCH_DEMO_MEDIA === '1'
 let authInProgress = false
@@ -38,9 +81,11 @@ let cachedTokens: TokenFile | null | undefined
 
 function demoPlayback(): SpotifyPlayback {
   const started = Date.now() % 214000
+  const phase = demoPhase()
+  const deviceDown = phase === 'opening' || phase === 'nodevice'
   return {
     connected: true,
-    playing: true,
+    playing: !phase,
     track: {
       id: 'demo-1',
       name: 'A Walk Through the Void',
@@ -51,7 +96,9 @@ function demoPlayback(): SpotifyPlayback {
       progress: started,
       url: 'https://open.spotify.com'
     },
-    device: { id: 'demo', name: 'This computer', type: 'Computer', active: true, volume: 68 },
+    device: deviceDown
+      ? null
+      : { id: 'demo', name: 'This computer', type: 'Computer', active: phase !== 'premium', volume: 68 },
     shuffle: false,
     repeat: 'context',
     volume: 68,
@@ -168,6 +215,7 @@ async function exchangeCode(
     access_token: string
     refresh_token?: string
     expires_in: number
+    scope?: string
   }
 
   let profile: SpotifyProfile | null = null
@@ -198,7 +246,8 @@ async function exchangeCode(
     refreshToken: data.refresh_token ?? null,
     expiresAt: Date.now() + data.expires_in * 1000,
     profile,
-    clientId
+    clientId,
+    scope: data.scope
   }
 }
 
@@ -246,13 +295,15 @@ async function getAccessToken(clientId: string): Promise<string> {
     access_token: string
     refresh_token?: string
     expires_in: number
+    scope?: string
   }
   const next: TokenFile = {
     ...tokens,
     accessToken: data.access_token,
     refreshToken: data.refresh_token ?? tokens.refreshToken,
     expiresAt: Date.now() + data.expires_in * 1000,
-    clientId: tokens.clientId ?? effectiveClientId
+    clientId: tokens.clientId ?? effectiveClientId,
+    scope: data.scope || tokens.scope
   }
   await saveTokens(next)
   return next.accessToken
@@ -284,11 +335,8 @@ async function spotifyFetch(
   return response
 }
 
-function friendlyError(status: number, text: string): Error {
-  if (status === 404) return new Error('No active Spotify device. Open Spotify and start a track first.')
-  if (status === 403) return new Error('Spotify refused that action. Premium is required for playback control.')
-  if (status === 429) return new Error('Spotify is rate-limiting requests. Try again in a moment.')
-  return new Error(text ? text.slice(0, 200) : 'Spotify request failed.')
+function friendlyError(status: number, text: string): SpotifyControlError {
+  return controlError(status, text)
 }
 
 export async function getStatus(port: number): Promise<SpotifyStatus> {
@@ -297,7 +345,9 @@ export async function getStatus(port: number): Promise<SpotifyStatus> {
       connected: true,
       profile: { id: 'demo', name: 'Notch Listener', image: null, product: 'premium' },
       redirectUri: redirectUri(port),
-      localAvailable: false
+      localAvailable: false,
+      needsConsent: false,
+      demoPhase: demoPhase()
     }
   }
   const tokens = await loadTokens()
@@ -305,7 +355,9 @@ export async function getStatus(port: number): Promise<SpotifyStatus> {
     connected: Boolean(tokens),
     profile: tokens?.profile ?? null,
     redirectUri: redirectUri(port),
-    localAvailable: false
+    localAvailable: false,
+    needsConsent: Boolean(tokens) && needsRecentScope(tokens?.scope),
+    demoPhase: null
   }
 }
 
@@ -313,6 +365,8 @@ export async function connect(clientId: string, port: number): Promise<SpotifySt
   if (!clientId.trim()) throw new Error('Add your Spotify Client ID in Settings first.')
   if (authInProgress) throw new Error('Spotify sign-in is already waiting in your browser.')
   await saveCredentials(clientId, port)
+  const existing = await loadTokens()
+  const forceDialog = Boolean(existing && needsRecentScope(existing.scope))
   authInProgress = true
 
   const verifier = base64Url(randomBytes(64))
@@ -360,7 +414,9 @@ export async function connect(clientId: string, port: number): Promise<SpotifySt
             connected: true,
             profile: tokens.profile,
             redirectUri: uri,
-            localAvailable: false
+            localAvailable: false,
+            needsConsent: needsRecentScope(tokens.scope),
+            demoPhase: null
           })
         )
       } catch (error) {
@@ -383,7 +439,7 @@ export async function connect(clientId: string, port: number): Promise<SpotifySt
         code_challenge: challenge,
         state,
         scope: SCOPES,
-        show_dialog: 'false'
+        show_dialog: forceDialog ? 'true' : 'false'
       })
       void shell.openExternal(`https://accounts.spotify.com/authorize?${params.toString()}`)
       timeout = setTimeout(() => {
@@ -395,7 +451,14 @@ export async function connect(clientId: string, port: number): Promise<SpotifySt
 
 export async function disconnect(port: number): Promise<SpotifyStatus> {
   await saveTokens(null)
-  return { connected: false, profile: null, redirectUri: redirectUri(port), localAvailable: false }
+  return {
+    connected: false,
+    profile: null,
+    redirectUri: redirectUri(port),
+    localAvailable: false,
+    needsConsent: false,
+    demoPhase: null
+  }
 }
 
 function preferredCover(
@@ -520,9 +583,7 @@ export async function getQueue(clientId: string): Promise<SpotifyQueueItem[]> {
     return [
       { id: 'q1', uri: 'spotify:track:q1', name: 'Soft Focus', artists: 'Notch Ensemble', image: null, duration: 188000 },
       { id: 'q2', uri: 'spotify:track:q2', name: 'Late Light', artists: 'Mira Vale', image: null, duration: 241000 },
-      { id: 'q3', uri: 'spotify:track:q3', name: 'The Quiet Part', artists: 'Aster, Juniper', image: null, duration: 203000 },
-      { id: 'q4', uri: 'spotify:track:q4', name: 'Paper Sky', artists: 'Notch Ensemble', image: null, duration: 226000 },
-      { id: 'q5', uri: 'spotify:track:q5', name: 'Small Hours', artists: 'Mira Vale', image: null, duration: 197000 }
+      { id: 'q3', uri: 'spotify:track:q3', name: 'The Quiet Part', artists: 'Aster, Juniper', image: null, duration: 203000 }
     ]
   }
   const response = await spotifyFetch(clientId, '/me/player/queue')
@@ -540,6 +601,188 @@ export async function getQueue(clientId: string): Promise<SpotifyQueueItem[]> {
 
 const PLAYABLE_URI = /^spotify:(track|episode):[A-Za-z0-9]+$/
 const CONTEXT_URI = /^spotify:(album|playlist|show):[A-Za-z0-9]+$/
+const SPOTIFY_ID = /^[A-Za-z0-9]{10,}$/
+
+function demoLibrary(): SpotifyLibrary {
+  return {
+    recent: [
+      {
+        id: 'r1',
+        uri: 'spotify:track:r1',
+        name: 'Paper Sky',
+        artists: 'Notch Ensemble',
+        image: null,
+        duration: 226000,
+        contextUri: 'spotify:album:a1',
+        contextType: 'album',
+        contextName: 'Small Hours',
+        playedAt: Date.now() - 3600_000
+      },
+      {
+        id: 'r2',
+        uri: 'spotify:track:r2',
+        name: 'Late Light',
+        artists: 'Mira Vale',
+        image: null,
+        duration: 241000,
+        contextUri: 'spotify:playlist:p1',
+        contextType: 'playlist',
+        contextName: 'Playlist',
+        playedAt: Date.now() - 7200_000
+      },
+      {
+        id: 'r3',
+        uri: 'spotify:track:r3',
+        name: 'The Quiet Part',
+        artists: 'Aster, Juniper',
+        image: null,
+        duration: 203000,
+        contextUri: null,
+        contextType: null,
+        contextName: null,
+        playedAt: Date.now() - 86_400_000
+      }
+    ],
+    playlists: [
+      { id: 'p1', uri: 'spotify:playlist:p1', name: 'Evening desk', image: null, owner: 'Ada' },
+      { id: 'p2', uri: 'spotify:playlist:p2', name: 'Focus without words', image: null, owner: 'Ada' },
+      { id: 'p3', uri: 'spotify:playlist:p3', name: 'Walk home', image: null, owner: 'Ada' }
+    ]
+  }
+}
+
+function contextType(value: unknown): SpotifyRecentItem['contextType'] {
+  if (value === 'album' || value === 'playlist' || value === 'show' || value === 'artist') return value
+  return null
+}
+
+export async function getLibrary(clientId: string): Promise<SpotifyLibrary> {
+  if (DEMO_MEDIA) return demoLibrary()
+  const tokens = await loadTokens()
+  if (!tokens) return { recent: [], playlists: [] }
+
+  const recent: SpotifyRecentItem[] = []
+  if (!needsRecentScope(tokens.scope)) {
+    const response = await spotifyFetch(clientId, '/me/player/recently-played?limit=8')
+    if (response.ok) {
+      const payload = (await response.json()) as { items?: any[] }
+      for (const item of payload.items || []) {
+        const track = item.track
+        if (!track?.id || !track.uri) continue
+        const type = contextType(item.context?.type)
+        recent.push({
+          id: track.id,
+          uri: track.uri,
+          name: track.name,
+          artists: (track.artists || []).map((artist: { name: string }) => artist.name).join(', '),
+          image: preferredCover(track.album?.images || track.images),
+          duration: track.duration_ms ?? 0,
+          contextUri: typeof item.context?.uri === 'string' ? item.context.uri : null,
+          contextType: type,
+          contextName: type === 'album' ? track.album?.name || 'Album' : type === 'playlist' ? 'Playlist' : type === 'show' ? 'Show' : null,
+          playedAt: Date.parse(item.played_at) || Date.now()
+        })
+      }
+    }
+  }
+
+  const playlists: SpotifyPlaylistItem[] = []
+  const lists = await spotifyFetch(clientId, '/me/playlists?limit=6')
+  if (lists.ok) {
+    const payload = (await lists.json()) as { items?: any[] }
+    for (const item of payload.items || []) {
+      if (!item?.id || !item.uri) continue
+      playlists.push({
+        id: item.id,
+        uri: item.uri,
+        name: item.name,
+        image: preferredCover(item.images),
+        owner: item.owner?.display_name || ''
+      })
+    }
+  }
+  return { recent, playlists }
+}
+
+async function listDevices(clientId: string): Promise<Array<{ id: string | null; name?: string; type?: string; is_active?: boolean; is_restricted?: boolean }>> {
+  const response = await spotifyFetch(clientId, '/me/player/devices')
+  if (!response.ok) return []
+  const payload = (await response.json()) as { devices?: Array<{ id: string | null; name?: string; type?: string; is_active?: boolean; is_restricted?: boolean }> }
+  return payload.devices || []
+}
+
+async function transferPlayback(clientId: string, deviceId: string, play: boolean): Promise<void> {
+  const response = await spotifyFetch(clientId, '/me/player', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_ids: [deviceId], play })
+  })
+  if (!response.ok && response.status !== 204) {
+    const text = await response.text()
+    throw friendlyError(response.status, text)
+  }
+}
+
+/** Poll until Spotify lists a device Notch can control. Does not start audio. */
+export async function waitForDevice(clientId: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const device = pickConnectDevice(await listDevices(clientId).catch(() => []))
+    if (device?.id) return true
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+  return false
+}
+
+async function resumeMemory(clientId: string, memory: SpotifyMemory | null | undefined, deviceId?: string): Promise<SpotifyPlayback | null> {
+  const trackId = memory?.track?.id
+  if (!trackId || !SPOTIFY_ID.test(trackId)) return null
+  return playQueuedTrack(clientId, {
+    type: 'play-track',
+    uri: `spotify:track:${trackId}`,
+    contextUri: memory?.contextUri || undefined,
+    deviceId
+  })
+}
+
+async function playOrTransfer(clientId: string, memory: SpotifyMemory | null | undefined): Promise<SpotifyPlayback> {
+  const direct = await spotifyFetch(clientId, '/me/player/play', { method: 'PUT' })
+  if (direct.ok || direct.status === 204) {
+    const playback = await getPlayback(clientId).catch(() => null)
+    if (playback?.track) return { ...playback, playing: true, fetchedAt: Date.now() }
+    const resumed = await resumeMemory(clientId, memory).catch(() => null)
+    if (resumed) return resumed
+    if (playback) return { ...playback, playing: true, fetchedAt: Date.now() }
+  } else {
+    const text = await direct.text()
+    const error = friendlyError(direct.status, text)
+    if (error.reason !== 'NO_ACTIVE_DEVICE') throw error
+  }
+
+  const device = pickConnectDevice(await listDevices(clientId))
+  if (!device?.id) throw friendlyError(404, JSON.stringify({ error: { reason: 'NO_ACTIVE_DEVICE' } }))
+  await transferPlayback(clientId, device.id, true)
+  const playback = await getPlayback(clientId).catch(() => null)
+  if (playback?.track) return { ...playback, playing: true, fetchedAt: Date.now() }
+  const resumed = await resumeMemory(clientId, memory, device.id).catch(() => null)
+  if (resumed) return resumed
+  return {
+    ...(playback || {
+      connected: true,
+      playing: true,
+      track: null,
+      device: null,
+      shuffle: false,
+      repeat: 'off' as const,
+      volume: 0,
+      fetchedAt: Date.now(),
+      source: 'api' as const,
+      queueAvailable: true
+    }),
+    playing: true,
+    fetchedAt: Date.now()
+  }
+}
 
 async function putPlay(clientId: string, deviceId: string | undefined, body: object): Promise<Response> {
   const query = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : ''
@@ -578,14 +821,28 @@ async function playQueuedTrack(
 
   let lastStatus = 0
   let lastText = ''
+  let listedDevice: string | undefined
+  const deviceIds = deviceId ? [deviceId, undefined] : [undefined]
   for (const playBody of bodies) {
-    const deviceIds = deviceId ? [deviceId, undefined] : [undefined]
     for (const device of deviceIds) {
       const response = await putPlay(clientId, device, playBody)
       if (!response.ok) {
         lastStatus = response.status
         lastText = await response.text()
         if (response.status === 401) throw friendlyError(401, lastText)
+        if (response.status === 404 && !listedDevice && !deviceId) {
+          listedDevice = pickConnectDevice(await listDevices(clientId).catch(() => []))?.id || undefined
+          if (listedDevice) {
+            const retry = await putPlay(clientId, listedDevice, playBody)
+            if (retry.ok || retry.status === 204) {
+              const playback = await waitForTrackId(clientId, targetId, 2000)
+              if (playback) return { ...playback, playing: true, fetchedAt: Date.now() }
+            } else {
+              lastStatus = retry.status
+              lastText = await retry.text()
+            }
+          }
+        }
         continue
       }
       const playback = await waitForTrackId(clientId, targetId, 2000)
@@ -596,9 +853,49 @@ async function playQueuedTrack(
   throw friendlyError(lastStatus || 500, lastText || 'Spotify did not start that track.')
 }
 
-export async function performAction(clientId: string, action: SpotifyAction): Promise<SpotifyPlayback> {
+async function playContext(clientId: string, contextUri: string, deviceId?: string): Promise<SpotifyPlayback> {
+  if (!CONTEXT_URI.test(contextUri)) throw new Error('That playlist or album cannot be started.')
+  const preferred = deviceId && deviceId !== 'spotify-desktop' ? deviceId : undefined
+  let response = await putPlay(clientId, preferred, { context_uri: contextUri })
+  if (!response.ok && response.status === 404 && !preferred) {
+    const listed = pickConnectDevice(await listDevices(clientId).catch(() => []))
+    if (listed?.id) {
+      await transferPlayback(clientId, listed.id, false)
+      response = await putPlay(clientId, listed.id, { context_uri: contextUri })
+    }
+  }
+  if (!response.ok && response.status !== 204) {
+    const text = await response.text()
+    throw friendlyError(response.status, text)
+  }
+  const playback = await getPlayback(clientId).catch(() => null)
+  return {
+    ...(playback || {
+      connected: true,
+      playing: true,
+      track: null,
+      device: null,
+      shuffle: false,
+      repeat: 'off' as const,
+      volume: 0,
+      fetchedAt: Date.now(),
+      source: 'api' as const,
+      queueAvailable: true
+    }),
+    playing: true,
+    fetchedAt: Date.now()
+  }
+}
+
+export async function performAction(
+  clientId: string,
+  action: SpotifyAction,
+  memory?: SpotifyMemory | null
+): Promise<SpotifyPlayback> {
   if (DEMO_MEDIA) return demoPlayback()
+  if (action.type === 'play') return playOrTransfer(clientId, memory)
   if (action.type === 'play-track') return playQueuedTrack(clientId, action)
+  if (action.type === 'play-context') return playContext(clientId, action.contextUri, action.deviceId)
   let endpoint = ''
   let method = 'POST'
   let body: string | undefined
@@ -607,10 +904,6 @@ export async function performAction(clientId: string, action: SpotifyAction): Pr
   const before = waitForTrackChange ? await getPlayback(clientId).catch(() => null) : null
 
   switch (action.type) {
-    case 'play':
-      endpoint = '/me/player/play'
-      method = 'PUT'
-      break
     case 'pause':
       endpoint = '/me/player/pause'
       method = 'PUT'
