@@ -73,7 +73,8 @@ const api: NotchApi = {
     player: () => ipcRenderer.invoke('spotify:player') as Promise<SpotifyPlayback>,
     queue: () => ipcRenderer.invoke('spotify:queue') as Promise<SpotifyQueueItem[]>,
     action: (action: SpotifyAction) =>
-      ipcRenderer.invoke('spotify:action', action) as Promise<SpotifyPlayback>
+      ipcRenderer.invoke('spotify:action', action) as Promise<SpotifyPlayback>,
+    launch: (target?: string) => ipcRenderer.invoke('spotify:launch', target) as Promise<boolean>
   },
   sessions: {
     scan: () => ipcRenderer.invoke('sessions:scan') as Promise<SessionsSnapshot>,

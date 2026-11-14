@@ -3,6 +3,7 @@ import { useEffect, useRef, type CSSProperties } from 'react'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { CollapsedBar } from './components/CollapsedBar'
 import { CollapsedNotice } from './components/CollapsedNotice'
+import { CompactSlotProvider } from './components/CompactSlot'
 import { Footer } from './components/Footer'
 import { Header } from './components/Header'
 import { Toasts } from './components/Toasts'
@@ -14,6 +15,8 @@ import { PlannerPage } from './pages/PlannerPage'
 import { PosturePage } from './pages/PosturePage'
 import { SessionsPage } from './pages/SessionsPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { WaterPage } from './pages/WaterPage'
+import { OPTIONAL_SECTIONS, sectionEnabled } from './lib/sections'
 import { AppProvider, useApp, type Page } from './state/AppContext'
 import { MediaProvider } from './state/MediaContext'
 import { PostureProvider } from './state/PostureContext'
@@ -28,13 +31,25 @@ const PAGE_KEYS: Record<string, Page> = {
   '7': 'settings'
 }
 
+function pageForKey(key: string, enabled: (page: Page) => boolean): Page | null {
+  if (key in PAGE_KEYS) return PAGE_KEYS[key]
+  const extra = OPTIONAL_SECTIONS.find((section) => section.shortcut === key)
+  if (!extra || !enabled(extra.page)) return null
+  return extra.page
+}
+
 function Shell() {
   const { state, expanded, backdrop, setExpanded, pinned, page, setPage, toasts } = useApp()
+  const compact = state.settings.panelSize === 'compact'
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pointerInside = useRef(false)
   const reopenBlockedUntil = useRef(0)
   const accent = ACCENTS[state.settings.accent]
+
+  useEffect(() => {
+    if (compact && page === 'home') setPage('notes')
+  }, [compact, page, setPage])
 
   useEffect(() => {
     document.documentElement.style.setProperty('--accent', accent.color)
@@ -62,15 +77,23 @@ function Shell() {
         return
       }
       if (typing) return
-      if (event.key in PAGE_KEYS && !event.ctrlKey && !event.metaKey && !event.altKey) {
-        event.preventDefault()
-        setPage(PAGE_KEYS[event.key])
-        if (!expanded) setExpanded(true)
-      }
+      if (event.ctrlKey || event.metaKey || event.altKey) return
+      const next = pageForKey(event.key, (target) => {
+        const section = OPTIONAL_SECTIONS.find((item) => item.page === target)
+        return section ? sectionEnabled(state, section.id) : true
+      })
+      if (!next) return
+      event.preventDefault()
+      setPage(compact && next === 'home' ? 'notes' : next)
+      if (!expanded) setExpanded(true)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [expanded, setExpanded, setPage])
+  }, [compact, expanded, setExpanded, setPage, state.water.enabled])
+
+  useEffect(() => {
+    if (page === 'water' && !state.water.enabled) setPage(compact ? 'notes' : 'home')
+  }, [compact, page, setPage, state.water.enabled])
 
   useEffect(() => {
     return () => {
@@ -198,7 +221,9 @@ function Shell() {
 
   return (
     <div
-      className={`app ${expanded ? 'is-expanded is-focus-mode' : 'is-collapsed'}`}
+      className={`app ${expanded ? 'is-expanded is-focus-mode' : 'is-collapsed'}${
+        state.settings.panelSize === 'compact' ? ' is-panel-compact' : ''
+      }`}
       style={appStyle}
       onPointerEnter={onPointerEnter}
       onPointerMove={onPointerMove}
@@ -227,6 +252,7 @@ function Shell() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
         >
+          <CompactSlotProvider>
           <Header />
           <main className="page-host">
             <AnimatePresence mode="wait" initial={false}>
@@ -244,11 +270,13 @@ function Shell() {
                 {page === 'planner' && <PlannerPage />}
                 {page === 'sessions' && <SessionsPage />}
                 {page === 'posture' && <PosturePage />}
+                {page === 'water' && <WaterPage />}
                 {page === 'settings' && <SettingsPage />}
               </motion.div>
             </AnimatePresence>
           </main>
           <Footer />
+          </CompactSlotProvider>
         </motion.div>
       ) : (
         <CollapsedBar onOpen={openImmediately} />

@@ -398,6 +398,25 @@ export async function disconnect(port: number): Promise<SpotifyStatus> {
   return { connected: false, profile: null, redirectUri: redirectUri(port), localAvailable: false }
 }
 
+function preferredCover(
+  images: Array<{ url?: string; width?: number; height?: number }> | null | undefined
+): string | null {
+  const usable = (images || []).filter((image) => Boolean(image?.url))
+  if (!usable.length) return null
+  const stretch = (image: { width?: number; height?: number }): number => {
+    const width = image.width || 0
+    const height = image.height || 0
+    if (!width || !height) return 1
+    return Math.max(width / height, height / width)
+  }
+  usable.sort((a, b) => {
+    const ratio = stretch(a) - stretch(b)
+    if (Math.abs(ratio) > 0.02) return ratio
+    return (b.width || 0) * (b.height || 0) - (a.width || 0) * (a.height || 0)
+  })
+  return usable[0].url || null
+}
+
 function mapPlayback(payload: any): SpotifyPlayback {
   if (!payload || !payload.item) {
     return {
@@ -417,8 +436,9 @@ function mapPlayback(payload: any): SpotifyPlayback {
       repeat: payload?.repeat_state ?? 'off',
       volume: payload?.device?.volume_percent ?? 0,
       fetchedAt: Date.now(),
-    source: 'api',
-    queueAvailable: true
+      source: 'api',
+      queueAvailable: true,
+      contextUri: typeof payload?.context?.uri === 'string' ? payload.context.uri : null
     }
   }
 
@@ -429,8 +449,8 @@ function mapPlayback(payload: any): SpotifyPlayback {
       id: payload.item.id,
       name: payload.item.name,
       artists: (payload.item.artists || []).map((artist: { name: string }) => artist.name).join(', '),
-      album: payload.item.album?.name ?? '',
-      image: payload.item.album?.images?.[0]?.url ?? null,
+      album: payload.item.album?.name ?? payload.item.show?.name ?? '',
+      image: preferredCover(payload.item.album?.images || payload.item.images),
       duration: payload.item.duration_ms ?? 0,
       progress: payload.progress_ms ?? 0,
       url: payload.item.external_urls?.spotify ?? null
@@ -449,7 +469,8 @@ function mapPlayback(payload: any): SpotifyPlayback {
     volume: payload.device?.volume_percent ?? 0,
     fetchedAt: Date.now(),
     source: 'api',
-    queueAvailable: true
+    queueAvailable: true,
+    contextUri: typeof payload?.context?.uri === 'string' ? payload.context.uri : null
   }
 }
 
@@ -471,7 +492,7 @@ export async function getPlayback(clientId: string): Promise<SpotifyPlayback> {
     }
   }
 
-  const response = await spotifyFetch(clientId, '/me/player?additional_types=track')
+  const response = await spotifyFetch(clientId, '/me/player?additional_types=track,episode')
   if (response.status === 204) {
     return {
       connected: true,
@@ -509,22 +530,80 @@ export async function getQueue(clientId: string): Promise<SpotifyQueueItem[]> {
   const payload = (await response.json()) as any
   return (payload.queue || []).slice(0, 10).map((item: any) => ({
     id: item.id,
-    uri: item.uri ?? (item.id ? `spotify:track:${item.id}` : ''),
+    uri: item.uri ?? (item.id ? `spotify:${item.type === 'episode' ? 'episode' : 'track'}:${item.id}` : ''),
     name: item.name,
-    artists: (item.artists || []).map((artist: { name: string }) => artist.name).join(', '),
-    image: item.album?.images?.[0]?.url ?? null,
+    artists: (item.artists || []).map((artist: { name: string }) => artist.name).join(', ') || item.show?.publisher || '',
+    image: preferredCover(item.album?.images || item.images),
     duration: item.duration_ms ?? 0
   }))
 }
 
+const PLAYABLE_URI = /^spotify:(track|episode):[A-Za-z0-9]+$/
+const CONTEXT_URI = /^spotify:(album|playlist|show):[A-Za-z0-9]+$/
+
+async function putPlay(clientId: string, deviceId: string | undefined, body: object): Promise<Response> {
+  const query = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : ''
+  return spotifyFetch(clientId, `/me/player/play${query}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+}
+
+async function waitForTrackId(clientId: string, targetId: string, timeoutMs: number): Promise<SpotifyPlayback | null> {
+  const deadline = Date.now() + timeoutMs
+  let playback = await getPlayback(clientId).catch(() => null)
+  while (Date.now() < deadline) {
+    if (playback?.track?.id === targetId) return playback
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    playback = (await getPlayback(clientId).catch(() => null)) ?? playback
+  }
+  return playback?.track?.id === targetId ? playback : null
+}
+
+async function playQueuedTrack(
+  clientId: string,
+  action: Extract<SpotifyAction, { type: 'play-track' }>
+): Promise<SpotifyPlayback> {
+  if (!PLAYABLE_URI.test(action.uri)) {
+    throw new Error('That item cannot be started from the queue.')
+  }
+  const targetId = action.uri.split(':').pop() || ''
+  const deviceId = action.deviceId && action.deviceId !== 'spotify-desktop' ? action.deviceId : undefined
+  const bodies: object[] = []
+  if (action.contextUri && CONTEXT_URI.test(action.contextUri)) {
+    bodies.push({ context_uri: action.contextUri, offset: { uri: action.uri }, position_ms: 0 })
+  }
+  bodies.push({ uris: [action.uri], position_ms: 0 })
+
+  let lastStatus = 0
+  let lastText = ''
+  for (const playBody of bodies) {
+    const deviceIds = deviceId ? [deviceId, undefined] : [undefined]
+    for (const device of deviceIds) {
+      const response = await putPlay(clientId, device, playBody)
+      if (!response.ok) {
+        lastStatus = response.status
+        lastText = await response.text()
+        if (response.status === 401) throw friendlyError(401, lastText)
+        continue
+      }
+      const playback = await waitForTrackId(clientId, targetId, 2000)
+      if (playback) return { ...playback, playing: true, fetchedAt: Date.now() }
+      break
+    }
+  }
+  throw friendlyError(lastStatus || 500, lastText || 'Spotify did not start that track.')
+}
+
 export async function performAction(clientId: string, action: SpotifyAction): Promise<SpotifyPlayback> {
   if (DEMO_MEDIA) return demoPlayback()
+  if (action.type === 'play-track') return playQueuedTrack(clientId, action)
   let endpoint = ''
   let method = 'POST'
   let body: string | undefined
 
-  const waitForTrackChange =
-    action.type === 'next' || action.type === 'previous' || action.type === 'play-track'
+  const waitForTrackChange = action.type === 'next' || action.type === 'previous'
   const before = waitForTrackChange ? await getPlayback(clientId).catch(() => null) : null
 
   switch (action.type) {
@@ -541,15 +620,6 @@ export async function performAction(clientId: string, action: SpotifyAction): Pr
       break
     case 'previous':
       endpoint = '/me/player/previous'
-      break
-    case 'play-track':
-      endpoint = `/me/player/play${
-        action.deviceId ? `?device_id=${encodeURIComponent(action.deviceId)}` : ''
-      }`
-      method = 'PUT'
-      body = JSON.stringify({
-        uris: action.queue?.length ? action.queue : [action.uri]
-      })
       break
     case 'seek':
       endpoint = `/me/player/seek?position_ms=${Math.max(0, Math.round(action.position))}`
@@ -593,19 +663,12 @@ export async function performAction(clientId: string, action: SpotifyAction): Pr
     }
     if (waitForTrackChange) {
       const beforeId = before?.track?.id ?? null
-      const targetId = action.type === 'play-track' ? action.uri.split(':').pop() ?? null : null
-      if (action.type !== 'play-track' || targetId) {
-        const deadline = Date.now() + 2200
-        while (Date.now() < deadline) {
-          const changed =
-            action.type === 'play-track'
-              ? Boolean(targetId && playback.track?.id === targetId)
-              : !beforeId || (playback.track?.id && playback.track.id !== beforeId)
-          if (changed) break
-          await new Promise((resolve) => setTimeout(resolve, 200))
-          const next = await getPlayback(clientId).catch(() => null)
-          if (next) playback = next
-        }
+      const deadline = Date.now() + 2200
+      while (Date.now() < deadline) {
+        if (!beforeId || (playback.track?.id && playback.track.id !== beforeId)) break
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        const next = await getPlayback(clientId).catch(() => null)
+        if (next) playback = next
       }
     }
     return playback

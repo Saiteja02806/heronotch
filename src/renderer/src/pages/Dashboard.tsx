@@ -40,8 +40,11 @@ import {
 } from '../lib/time'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
+import { playPostureRing as playChime } from '../lib/alertSound'
 import { SessionBadge, relativeSessionTime } from '../components/SessionBits'
 import { useVaultPicker } from '../hooks/useVaultPicker'
+import { waterCount } from '../lib/water'
+import { WaterGlance } from './WaterPage'
 
 function Artwork({
   image,
@@ -86,13 +89,33 @@ function TimerCard() {
     startTimer,
     pauseTimer,
     resetTimer,
-    setTimerMode
+    setTimerMode,
+    update
   } = useApp()
   const timer = state.timer
   const total = timer.durations[timer.mode] * 60
-  const label = timer.mode === 'focus' ? 'Focus' : timer.mode === 'short' ? 'Short break' : 'Long break'
+  const label = timer.mode === 'focus' ? 'Focus' : timer.mode === 'short' ? 'Break' : 'Long'
   const ringProgress = Math.max(0, Math.min(1, timerRemaining / Math.max(1, total)))
   const running = timer.running
+  const [customMin, setCustomMin] = useState(String(timer.durations[timer.mode]))
+
+  useEffect(() => {
+    if (!running) setCustomMin(String(timer.durations[timer.mode]))
+  }, [timer.mode, timer.durations, running])
+
+  const applyCustom = (): void => {
+    const minutes = Math.min(180, Math.max(1, Number(customMin) || timer.durations[timer.mode]))
+    setCustomMin(String(minutes))
+    update({
+      timer: {
+        ...timer,
+        durations: { ...timer.durations, [timer.mode]: minutes },
+        remaining: minutes * 60,
+        running: false,
+        endsAt: null
+      }
+    })
+  }
 
   return (
     <article className="card timer-card">
@@ -123,7 +146,7 @@ function TimerCard() {
             className={timer.mode === mode ? 'is-active' : ''}
             onClick={() => setTimerMode(mode)}
           >
-            {mode === 'focus' ? 'Focus' : mode === 'short' ? 'Short' : 'Long'}
+            {mode === 'focus' ? 'Focus' : mode === 'short' ? 'Break' : 'Long'}
           </button>
         ))}
       </div>
@@ -136,7 +159,24 @@ function TimerCard() {
           {running ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}
           {running ? 'Pause' : 'Start'}
         </button>
-        <span className="timer-length">{timer.durations[timer.mode]} min</span>
+        <label className="timer-length timer-length--edit">
+          <input
+            type="number"
+            min={1}
+            max={180}
+            value={customMin}
+            onChange={(event) => setCustomMin(event.target.value)}
+            onBlur={applyCustom}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                applyCustom()
+              }
+            }}
+            aria-label="Minutes for this timer"
+          />
+          <span>min</span>
+        </label>
       </div>
     </article>
   )
@@ -473,14 +513,22 @@ function SessionsCard() {
             {app.label}
           </span>
         ))}
-        {apps.length === 0 && <span className="session-app-chip">Scanning…</span>}
+        {apps.length === 0 && (
+          <span className="session-app-chip">{sessions?.error ? 'Unavailable' : 'Scanning…'}</span>
+        )}
       </div>
 
       <div className="session-preview">
         {preview.length === 0 && (
           <div className="session-empty">
             <SquareTerminal size={17} />
-            <span>No coding sessions found. Open Codex, OpenCode or Anti Gravity.</span>
+            <span>
+              {sessions?.error
+                ? 'Session scan failed. Open Sessions to refresh.'
+                : running > 0
+                  ? 'An app is open, but no conversation was found yet.'
+                  : 'No coding sessions found. Open Codex, OpenCode or Anti Gravity.'}
+            </span>
           </div>
         )}
         {preview.map((session) => (
@@ -600,10 +648,14 @@ function CalendarCard() {
 export function Dashboard() {
   const { state } = useApp()
   const vaultName = state.settings.vaultPath?.split(/[\\/]/).filter(Boolean).pop()
+  const glasses = state.water?.enabled ? waterCount(state.water) : null
   return (
-    <div className="dashboard">
+    <div className="home-shell">
+      {state.water?.enabled && <WaterGlance />}
+      <div className="dashboard">
       <div className="dashboard-sr">
         {greeting()}. {vaultName ? `${vaultName} folder connected.` : 'No notes folder connected.'}
+        {glasses !== null ? ` Water, ${glasses} of ${state.water.goalGlasses} glasses.` : ''}
       </div>
       <TimerCard />
       <MusicCard />
@@ -611,6 +663,7 @@ export function Dashboard() {
       <ObsidianCard />
       <SessionsCard />
       <CalendarCard />
+      </div>
     </div>
   )
 }

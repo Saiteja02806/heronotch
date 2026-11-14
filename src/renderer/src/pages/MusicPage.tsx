@@ -166,13 +166,15 @@ function ConnectSpotify() {
 }
 
 export function MusicPage() {
-  const { openSettings } = useApp()
+  const { openSettings, state } = useApp()
+  const artSize = state.settings.panelSize === 'compact' ? 108 : 226
   const {
     status,
     playback,
     queue,
     action,
     togglePlay,
+    launchSpotify,
     progressMs,
     disconnect,
     pending
@@ -187,7 +189,9 @@ export function MusicPage() {
   const shownProgress = duration ? Math.min(rawProgress, duration) : rawProgress
   const volume = volumeDraft ?? playback?.volume ?? 0
 
-  if (!status?.connected && !status?.localAvailable) return <ConnectSpotify />
+  const hasCachedTrack = Boolean(playback?.track)
+
+  if (!status?.connected && !status?.localAvailable && !hasCachedTrack) return <ConnectSpotify />
 
   const apiConnected = Boolean(status?.connected)
   const localMode = !apiConnected && Boolean(status?.localAvailable)
@@ -223,11 +227,18 @@ export function MusicPage() {
         </div>
         <header className="player-head">
           <div>
-            <span className="eyebrow"><span className="spotify-dot" /> Spotify · {playback?.device?.name || 'No device'}</span>
+            <span className="eyebrow">
+              <span className="spotify-dot" /> Spotify ·{' '}
+              {track && !playback?.device?.active && !status?.localAvailable
+                ? 'Closed · cached'
+                : status?.connected || status?.localAvailable
+                  ? playback?.device?.name || 'No device'
+                  : 'Closed · cached'}
+            </span>
             <h1>{track ? 'Now playing' : 'Quiet for a moment'}</h1>
           </div>
           <div className="player-head-actions">
-            {status.profile?.image && <img className="profile-face" src={status.profile.image} alt="" />}
+            {status?.profile?.image && <img className="profile-face" src={status.profile.image} alt="" />}
             <button className="soft-button compact" onClick={() => openSettings('spotify')} title="Spotify settings">
               <SlidersHorizontal size={13} />
             </button>
@@ -237,7 +248,7 @@ export function MusicPage() {
         {track ? (
           <div className="player-main">
             <button className="player-art-button" onClick={openTrack} title="Open track in Spotify">
-              <Cover image={track.image} seed={track.id} size={226} />
+              <Cover image={track.image} seed={track.id} size={artSize} />
               <span className="art-open"><ArrowUpRight size={13} /> Spotify</span>
             </button>
             <div className={`player-details ${changing ? 'is-changing' : ''}`}>
@@ -334,12 +345,19 @@ export function MusicPage() {
             <p>
               {apiConnected
                 ? `Spotify is connected${
-                    status.profile?.name ? ` as ${status.profile.name}` : ''
+                    status?.profile?.name ? ` as ${status.profile.name}` : ''
                   }. Press play on any device and the track will appear here.`
                 : 'Open Spotify on this computer and press play. Notch reads the Windows media session, so there is nothing to set up.'}
             </p>
             <div>
-              <button className="primary-button" onClick={() => window.notch.openExternal('https://open.spotify.com')}>
+              <button
+                className="primary-button"
+                onClick={() => {
+                  void launchSpotify().then((opened) => {
+                    if (!opened) window.notch.openExternal('https://open.spotify.com')
+                  })
+                }}
+              >
                 <ExternalLink size={14} /> Open Spotify
               </button>
               {!apiConnected && (
@@ -397,15 +415,14 @@ export function MusicPage() {
                   if (!item.uri || queuePending.current) return
                   queuePending.current = item.uri
                   setQueuePendingUri(item.uri)
-                  const remaining = queue
-                    .slice(index)
-                    .map((entry) => entry.uri)
-                    .filter(Boolean)
                   void action({
                     type: 'play-track',
                     uri: item.uri,
-                    queue: remaining.length ? remaining : undefined,
-                    deviceId: playback?.device?.id
+                    contextUri: playback?.contextUri || undefined,
+                    deviceId:
+                      playback?.device?.id && playback.device.id !== 'spotify-desktop'
+                        ? playback.device.id
+                        : undefined
                   }).finally(() => {
                     queuePending.current = null
                     setQueuePendingUri(null)
@@ -435,19 +452,19 @@ export function MusicPage() {
 
         <div className="account-card">
           <div className="account-profile">
-            {status.profile?.image ? (
+            {status?.profile?.image ? (
               <img src={status.profile.image} alt="" />
             ) : (
               <span className="profile-fallback">
-                {localMode ? <Music2 size={13} /> : status.profile?.name?.slice(0, 1) || 'S'}
+                {localMode ? <Music2 size={13} /> : status?.profile?.name?.slice(0, 1) || 'S'}
               </span>
             )}
             <div>
-              <strong>{status.profile?.name || (localMode ? 'Spotify Desktop' : 'Spotify listener')}</strong>
+              <strong>{status?.profile?.name || (localMode ? 'Spotify Desktop' : 'Spotify listener')}</strong>
               <span>
                 {localMode
                   ? 'Local Windows media session'
-                  : `${status.profile?.product === 'premium' ? 'Premium' : 'Free'} account`}
+                  : `${status?.profile?.product === 'premium' ? 'Premium' : 'Free'} account`}
               </span>
             </div>
             <span className="account-live">{localMode ? 'Local' : 'Live'}</span>

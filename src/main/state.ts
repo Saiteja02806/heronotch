@@ -2,7 +2,16 @@ import { app } from 'electron'
 import { EventEmitter } from 'node:events'
 import { promises as fs, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import type { AppState, AppStatePatch, Settings, Task } from '../shared/types'
+import {
+  WATER_GLASS_ML,
+  WATER_GOAL_MAX,
+  WATER_GOAL_MIN,
+  type AppState,
+  type AppStatePatch,
+  type Settings,
+  type Task,
+  type WaterState
+} from '../shared/types'
 
 export const stateEvents = new EventEmitter()
 
@@ -15,10 +24,12 @@ const DEFAULT_SETTINGS: Settings = {
   notchStyle: 'minimal',
   launchAtLogin: false,
   notifications: true,
+  timerNotifications: true,
   spotifyClientId: '',
   spotifyRedirectPort: 43821,
   userName: '',
-  pinOnOpen: false
+  pinOnOpen: false,
+  panelSize: 'full'
 }
 
 function localDayKey(date = new Date()): string {
@@ -58,7 +69,7 @@ function createDefaultState(): AppState {
     settings: { ...DEFAULT_SETTINGS },
     timer: {
       mode: 'focus',
-      durations: { focus: 25, short: 5, long: 15 },
+      durations: { focus: 25, short: 5, long: 45 },
       endsAt: null,
       remaining: 25 * 60,
       running: false,
@@ -80,6 +91,13 @@ function createDefaultState(): AppState {
       goodSeconds: 0,
       badSeconds: 0,
       lastAlertAt: null
+    },
+    water: {
+      enabled: false,
+      goalGlasses: 8,
+      glassMl: WATER_GLASS_ML,
+      dayKey: today,
+      pours: []
     },
     focusLog: []
   }
@@ -108,16 +126,67 @@ function merge<T>(base: T, patch: unknown): T {
   return next as T
 }
 
+function normalizeWater(state: AppState, today: string): WaterState {
+  const water = state.water
+  const goalGlasses = Math.min(
+    WATER_GOAL_MAX,
+    Math.max(WATER_GOAL_MIN, Math.round(Number(water?.goalGlasses) || 8))
+  )
+  const glassMl = Math.min(500, Math.max(100, Math.round(Number(water?.glassMl) || WATER_GLASS_ML)))
+  const pours = Array.isArray(water?.pours)
+    ? water.pours.filter((value) => typeof value === 'number' && Number.isFinite(value))
+    : []
+  return {
+    enabled: Boolean(water?.enabled),
+    goalGlasses,
+    glassMl,
+    dayKey: today,
+    pours: water?.dayKey === today ? pours : []
+  }
+}
+
+function sameWater(left: WaterState | undefined, right: WaterState): boolean {
+  if (!left) return false
+  if (
+    left.enabled !== right.enabled ||
+    left.goalGlasses !== right.goalGlasses ||
+    left.glassMl !== right.glassMl ||
+    left.dayKey !== right.dayKey ||
+    left.pours.length !== right.pours.length
+  ) {
+    return false
+  }
+  return left.pours.every((value, index) => value === right.pours[index])
+}
+
 function normalizeDay(state: AppState): AppState {
   const today = localDayKey()
-  if (state.timer.dayKey === today && state.posture?.dayKey === today) return state
+  const settings =
+    state.settings.timerNotifications === undefined
+      ? { ...state.settings, timerNotifications: true }
+      : state.settings
+  const needsTimerFix = state.timer.durations.long === 15
+  const timer = needsTimerFix
+    ? { ...state.timer, durations: { ...state.timer.durations, long: 45 } }
+    : state.timer
+  const water = normalizeWater(state, today)
+  if (
+    state.timer.dayKey === today &&
+    state.posture?.dayKey === today &&
+    settings === state.settings &&
+    !needsTimerFix &&
+    sameWater(state.water, water)
+  ) {
+    return state
+  }
   return {
     ...state,
+    settings,
     timer: {
-      ...state.timer,
+      ...timer,
       dayKey: today,
-      sessionsToday: state.timer.dayKey === today ? state.timer.sessionsToday : 0,
-      completedToday: state.timer.dayKey === today ? state.timer.completedToday : 0
+      sessionsToday: state.timer.dayKey === today ? timer.sessionsToday : 0,
+      completedToday: state.timer.dayKey === today ? timer.completedToday : 0
     },
     posture: state.posture
       ? {
@@ -126,7 +195,8 @@ function normalizeDay(state: AppState): AppState {
           goodSeconds: state.posture.dayKey === today ? state.posture.goodSeconds : 0,
           badSeconds: state.posture.dayKey === today ? state.posture.badSeconds : 0
         }
-      : state.posture
+      : state.posture,
+    water: sameWater(state.water, water) && state.water ? state.water : water
   }
 }
 

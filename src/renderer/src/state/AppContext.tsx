@@ -14,12 +14,15 @@ import type {
   SessionsSnapshot,
   Settings,
   Task,
-  TimerMode
+  TimerMode,
+  WaterState
 } from '../../../shared/types'
 import { formatDateShort, formatTime, timeToTimestamp, todayKey, uid } from '../lib/time'
+import { clampWaterGoal, waterToday } from '../lib/water'
+import { playPostureRing as playChime } from '../lib/alertSound'
 
-export type Page = 'home' | 'notes' | 'music' | 'planner' | 'sessions' | 'posture' | 'settings'
-export type SettingsSection = 'appearance' | 'notch' | 'obsidian' | 'spotify' | 'about'
+export type Page = 'home' | 'notes' | 'music' | 'planner' | 'sessions' | 'posture' | 'water' | 'settings'
+export type SettingsSection = 'appearance' | 'notch' | 'sections' | 'obsidian' | 'spotify' | 'about'
 
 export interface ToastItem {
   id: string
@@ -69,6 +72,10 @@ interface AppContextValue {
   toggleTask: (id: string) => void
   deleteTask: (id: string) => void
   patchTask: (id: string, patch: Partial<Task>) => void
+  addGlass: () => void
+  undoGlass: () => void
+  setWaterGoal: (glasses: number) => void
+  setWaterEnabled: (enabled: boolean) => void
   vaultRevision: number
   sessions: SessionsSnapshot | null
   sessionsLoading: boolean
@@ -84,7 +91,8 @@ function mergeLocal(prev: AppState, patch: AppStatePatch): AppState {
     settings: patch.settings ? { ...prev.settings, ...patch.settings } : prev.settings,
     timer: patch.timer ? { ...prev.timer, ...patch.timer } : prev.timer,
     notes: patch.notes ? { ...prev.notes, ...patch.notes } : prev.notes,
-    posture: patch.posture ? { ...prev.posture, ...patch.posture } : prev.posture
+    posture: patch.posture ? { ...prev.posture, ...patch.posture } : prev.posture,
+    water: patch.water ? { ...prev.water, ...patch.water } : prev.water
   }
 }
 
@@ -181,10 +189,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!state) return
     const day = todayKey()
-    if (state.timer.dayKey !== day) {
-      void window.notch.getState().then(setState)
-    }
-  }, [state?.timer.dayKey, state])
+    const stale =
+      state.timer.dayKey !== day ||
+      state.posture.dayKey !== day ||
+      state.water.dayKey !== day
+    if (!stale) return
+    const seq = writeSeq.current
+    void window.notch.getState().then((remote) => {
+      if (writeSeq.current !== seq) return
+      setState(remote)
+    })
+  }, [now, state])
 
   const refreshSessions = useCallback(async () => {
     setSessionsLoading(true)
@@ -390,8 +405,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const minutes = current.durations[current.mode]
     const completed = current.mode === 'focus'
     const label = current.mode === 'focus' ? 'Focus session complete' : 'Break is over'
-    window.notch.notify(label, completed ? `${minutes} minutes of focus logged.` : 'Ready for another round?')
-    showToast(label, completed ? `${minutes} focused minutes logged.` : 'Time to stretch.', 'success')
+    if (state.settings?.timerNotifications !== false) {
+      window.notch.notify(label, completed ? `${minutes} minutes of focus logged.` : 'Ready for another round?')
+      showToast(label, completed ? `${minutes} focused minutes logged.` : 'Time to stretch.', 'success')
+      playChime()
+    }
     update({
       timer: {
         ...current,
@@ -460,6 +478,45 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [state, update]
   )
 
+  const waterRef = useRef<WaterState | null>(state?.water ?? null)
+  if (state?.water) waterRef.current = state.water
+
+  const commitWater = useCallback(
+    (recipe: (current: WaterState) => WaterState) => {
+      const base = waterRef.current
+      if (!base) return
+      const next = recipe(waterToday(base))
+      waterRef.current = next
+      update({ water: next })
+    },
+    [update]
+  )
+
+  const addGlass = useCallback(() => {
+    commitWater((current) => ({ ...current, pours: [...current.pours, Date.now()] }))
+  }, [commitWater])
+
+  const undoGlass = useCallback(() => {
+    commitWater((current) => ({
+      ...current,
+      pours: current.pours.length ? current.pours.slice(0, -1) : current.pours
+    }))
+  }, [commitWater])
+
+  const setWaterGoal = useCallback(
+    (glasses: number) => {
+      commitWater((current) => ({ ...current, goalGlasses: clampWaterGoal(glasses) }))
+    },
+    [commitWater]
+  )
+
+  const setWaterEnabled = useCallback(
+    (enabled: boolean) => {
+      commitWater((current) => ({ ...current, enabled }))
+    },
+    [commitWater]
+  )
+
   if (!state) {
     return <div className="boot" aria-hidden="true" />
   }
@@ -498,6 +555,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     toggleTask,
     deleteTask,
     patchTask,
+    addGlass,
+    undoGlass,
+    setWaterGoal,
+    setWaterEnabled,
     vaultRevision,
     sessions,
     sessionsLoading,

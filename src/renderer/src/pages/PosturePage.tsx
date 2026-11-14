@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, type CSSProperties } from 'react'
 import { ProgressRing } from '../components/ProgressRing'
+import { useApp } from '../state/AppContext'
 import { usePosture } from '../state/PostureContext'
 import { formatMinutes } from '../lib/time'
 
@@ -22,6 +23,8 @@ function scoreColor(score: number, threshold: number): string {
 }
 
 export function PosturePage() {
+  const { state } = useApp()
+  const compact = state.settings.panelSize === 'compact'
   const posture = usePosture()
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -203,14 +206,20 @@ export function PosturePage() {
               </span>
             </div>
             {hasScore && (
-              <div className="posture-camera-score" style={{ '--score-color': color } as CSSProperties}>
+              <div className={`posture-camera-score ${compact ? 'is-hero' : ''}`} style={{ '--score-color': color } as CSSProperties}>
                 <strong>{score}</strong>
                 <span>{posture.metrics?.advice || 'Posture score'}</span>
               </div>
             )}
           </>
         ) : (
-          <div className="posture-invite">
+          <div className={`posture-invite ${compact ? 'is-compact' : ''}`}>
+            {compact && (
+              <div className="posture-compact-score" style={{ color }}>
+                <strong>{hasScore ? score : '—'}</strong>
+                <span>score</span>
+              </div>
+            )}
             <div className="posture-orbit" aria-hidden="true">
               <span className="posture-orbit-ring one" />
               <span className="posture-orbit-ring two" />
@@ -224,9 +233,12 @@ export function PosturePage() {
               nudges you when you start to shrimp. Frames are processed on this computer and never
               stored or uploaded.
             </p>
-            <button className="primary-button" onClick={posture.enable}>
-              <Camera size={15} /> Turn on posture coach
-            </button>
+            <div className="posture-option-row">
+              <button className="primary-button" onClick={posture.enable}>
+                <Camera size={15} /> Turn on posture coach
+              </button>
+              {compact && <span className="posture-option-note">Enlarge for the rest of the settings.</span>}
+            </div>
             <div className="posture-feature-row">
               <span><Activity size={12} /> Live 0–100 score</span>
               <span><Sparkles size={12} /> Slouch alerts</span>

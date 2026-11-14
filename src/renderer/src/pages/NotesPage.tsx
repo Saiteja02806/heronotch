@@ -43,6 +43,7 @@ import {
 import type { NoteSearchResult, VaultNode } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
 import { useVaultPicker } from '../hooks/useVaultPicker'
+import { CompactSlotPortal } from '../components/CompactSlot'
 import { Modal } from '../components/Modal'
 import { formatDateShort } from '../lib/time'
 
@@ -78,8 +79,9 @@ function countNotes(nodes: VaultNode[]): number {
 // The textarea stays the input engine (caret, selection, undo) but its glyphs
 // are transparent. A mirror layer underneath re-renders the same characters
 // with Markdown formatting: real checkbox boxes, bold, headings, code. Every
-// source character keeps its place — markers are kept but dimmed, the checkbox
-// characters are covered by a drawn box — so the mirror and the caret line up
+// source character keeps its place — syntax markers keep their width so the
+// caret stays aligned, emphasis stars are not drawn, and the checkbox
+// characters are covered by a box — so the mirror and the caret line up
 // exactly, line for line.
 // ---------------------------------------------------------------------------
 
@@ -87,7 +89,10 @@ const escapeLive = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 const LIVE_INLINE_SOURCE =
-  '(`+[^`]*?`+)|(\\*\\*[^*]+\\*\\*)|(__[^_]+__)|(\\*[^*\\s][^*]*?\\*)|(_[^_\\s][^_]*?_)|(~~[^~]+~~)|(!?\\[[^\\]]*\\]\\([^)]*\\))|(\\[\\[[^\\]]+\\]\\])'
+  '(`+[^`]*?`+)|(\\*\\*[^*]+\\*\\*)|(__[^_]+__)|(\\*[^*\\s][^*]*?\\*)|(_[^_\\s][^_]*?_)|(~~[^~]+~~)|(!?\\[[^\\]]*\\]\\([^)]*\\))|(\\[\\[[^\\]]+\\]\\])|(\\*{2,})'
+
+const silentMarker = (marker: string): string =>
+  `<span class="lm-marker is-silent">${escapeLive(marker)}</span>`
 
 function renderLiveInline(text: string, depth = 0): string {
   if (depth > 2) return escapeLive(text)
@@ -107,15 +112,20 @@ function renderLiveInline(text: string, depth = 0): string {
       const parts = /^(`+)([^`]*)(`+)$/.exec(token)
       out += `<span class="lm-marker">${escapeLive(parts?.[1] ?? '')}</span><span class="lm-code">${escapeLive(parts?.[2] ?? '')}</span><span class="lm-marker">${escapeLive(parts?.[3] ?? '')}</span>`
     } else if (match[2] || match[3]) {
-      // **bold** / __bold__
+      // **bold** / __bold__. Asterisks stay in the text so the caret lines up,
+      // but they are not drawn — the weight is the bold.
       const marker = match[2] ? '**' : '__'
       const inner = token.slice(marker.length, -marker.length)
-      out += `<span class="lm-marker">${marker}</span><span class="lm-b">${renderLiveInline(inner, depth + 1)}</span><span class="lm-marker">${marker}</span>`
+      const open = match[2] ? silentMarker(marker) : `<span class="lm-marker">${marker}</span>`
+      const close = match[2] ? silentMarker(marker) : `<span class="lm-marker">${marker}</span>`
+      out += `${open}<span class="lm-b">${renderLiveInline(inner, depth + 1)}</span>${close}`
     } else if (match[4] || match[5]) {
       // *italic* / _italic_
       const marker = match[4] ? '*' : '_'
       const inner = token.slice(marker.length, -marker.length)
-      out += `<span class="lm-marker">${marker}</span><span class="lm-i">${renderLiveInline(inner, depth + 1)}</span><span class="lm-marker">${marker}</span>`
+      const open = match[4] ? silentMarker(marker) : `<span class="lm-marker">${marker}</span>`
+      const close = match[4] ? silentMarker(marker) : `<span class="lm-marker">${marker}</span>`
+      out += `${open}<span class="lm-i">${renderLiveInline(inner, depth + 1)}</span>${close}`
     } else if (match[6]) {
       // ~~strike~~
       out += `<span class="lm-marker">~~</span><span class="lm-s">${renderLiveInline(token.slice(2, -2), depth + 1)}</span><span class="lm-marker">~~</span>`
@@ -126,6 +136,9 @@ function renderLiveInline(text: string, depth = 0): string {
     } else if (match[8]) {
       // [[wiki link]]
       out += `<span class="lm-marker">[[</span><span class="lm-wiki">${renderLiveInline(token.slice(2, -2), depth + 1)}</span><span class="lm-marker">]]</span>`
+    } else if (match[9]) {
+      // A bold marker that is still open, or stars left at the end of a word.
+      out += silentMarker(token)
     } else {
       handled = false
     }
@@ -134,6 +147,82 @@ function renderLiveInline(text: string, depth = 0): string {
   }
   out += escapeLive(text.slice(last))
   return out
+}
+
+type EditorMarks = {
+  bold: boolean
+  italic: boolean
+  heading: boolean
+  list: boolean
+  task: boolean
+  code: boolean
+  link: boolean
+}
+
+const EMPTY_MARKS: EditorMarks = {
+  bold: false,
+  italic: false,
+  heading: false,
+  list: false,
+  task: false,
+  code: false,
+  link: false
+}
+
+function wrappedBy(text: string, start: number, end: number, marker: string): boolean {
+  const selected = text.slice(start, end)
+  const singleAsterisk = marker === '*'
+  if (
+    selected.length >= marker.length * 2 &&
+    selected.startsWith(marker) &&
+    selected.endsWith(marker) &&
+    !(singleAsterisk && selected.startsWith('**'))
+  ) {
+    return true
+  }
+  const before = text.slice(start - marker.length, start) === marker
+  const after = text.slice(end, end + marker.length) === marker
+  if (
+    before &&
+    after &&
+    !(singleAsterisk && (text[start - marker.length - 1] === '*' || text[end + marker.length] === '*'))
+  ) {
+    return true
+  }
+  if (start !== end) return false
+  const left = text.lastIndexOf(marker, Math.max(0, start - 1))
+  const right = text.indexOf(marker, start)
+  if (left < 0 || right < 0) return false
+  if (singleAsterisk && (text[left - 1] === '*' || text[right + marker.length] === '*')) return false
+  const gap = text.slice(left + marker.length, right)
+  return gap.length > 0 && !gap.includes('\n') && !gap.includes(marker)
+}
+
+function marksAt(text: string, start: number, end: number): EditorMarks {
+  const lineStart = text.lastIndexOf('\n', Math.max(0, start - 1)) + 1
+  const breakAt = text.indexOf('\n', Math.max(start, end))
+  const lineEnd = breakAt === -1 ? text.length : breakAt
+  const lines = text.slice(lineStart, lineEnd).split('\n').filter((line) => line.trim())
+  const task = /^\s*(?:[-*+]|\d+\.)\s+\[[ xX]\]/
+  const bullet = /^\s*(?:[-*+]|\d+\.)\s+/
+  return {
+    bold: wrappedBy(text, start, end, '**'),
+    italic: wrappedBy(text, start, end, '*') || wrappedBy(text, start, end, '_'),
+    heading: lines.length > 0 && lines.every((line) => /^#{1,6}\s+/.test(line)),
+    list: lines.length > 0 && lines.every((line) => bullet.test(line) && !task.test(line)),
+    task: lines.length > 0 && lines.every((line) => task.test(line)),
+    code: wrappedBy(text, start, end, '`'),
+    link: wrappedBy(text, start, end, '[') && text.slice(end, end + 1) === ']'
+  }
+}
+
+function listParts(line: string): { indent: string; body: string; kind: 'task' | 'bullet' | 'none' } {
+  const task = /^(\s*)(?:[-*+]|\d+\.)\s+\[[ xX]\]\s?(.*)$/.exec(line)
+  if (task) return { indent: task[1], body: task[2], kind: 'task' }
+  const bullet = /^(\s*)(?:[-*+]|\d+\.)\s+(.*)$/.exec(line)
+  if (bullet) return { indent: bullet[1], body: bullet[2], kind: 'bullet' }
+  const indent = /^\s*/.exec(line)?.[0] ?? ''
+  return { indent, body: line.slice(indent.length), kind: 'none' }
 }
 
 function renderLiveLine(line: string, checkboxIndex: number | null): string {
@@ -176,6 +265,7 @@ export function NotesPage() {
   } = useApp()
   const { chooseVault } = useVaultPicker()
   const vaultPath = state.settings.vaultPath
+  const compact = state.settings.panelSize === 'compact'
 
   const [tree, setTree] = useState<VaultNode[]>([])
   const [loadingTree, setLoadingTree] = useState(false)
@@ -192,6 +282,7 @@ export function NotesPage() {
   const [entryDialog, setEntryDialog] = useState<EntryDialog | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [titleDraft, setTitleDraft] = useState<string | null>(null)
+  const [marks, setMarks] = useState<EditorMarks>(EMPTY_MARKS)
   const [dragPath, setDragPath] = useState<string | null>(null)
   const [rootDrop, setRootDrop] = useState(false)
   const titleInputRef = useRef<HTMLInputElement>(null)
@@ -476,18 +567,133 @@ export function NotesPage() {
       .join('')
   }, [content])
 
-  const applyFormat = (before: string, after = before, placeholder = 'text'): void => {
+  const rememberMarks = (text: string, start: number, end: number): void => {
+    const next = marksAt(text, start, end)
+    setMarks((current) =>
+      current.bold === next.bold &&
+      current.italic === next.italic &&
+      current.heading === next.heading &&
+      current.list === next.list &&
+      current.task === next.task &&
+      current.code === next.code &&
+      current.link === next.link
+        ? current
+        : next
+    )
+  }
+
+  const replaceEditor = (start: number, end: number, insert: string, selectFrom: number, selectTo: number): void => {
+    const textarea = textareaRef.current
+    const next = `${content.slice(0, start)}${insert}${content.slice(end)}`
+    onChangeContent(next)
+    requestAnimationFrame(() => {
+      if (!textarea) return
+      textarea.focus()
+      textarea.setSelectionRange(selectFrom, selectTo)
+      rememberMarks(next, selectFrom, selectTo)
+    })
+  }
+
+  const applyFormat = (before: string, after = before): void => {
     const textarea = textareaRef.current
     if (!textarea) return
     const start = textarea.selectionStart
     const end = textarea.selectionEnd
-    const selected = content.slice(start, end) || placeholder
-    const next = `${content.slice(0, start)}${before}${selected}${after}${content.slice(end)}`
-    onChangeContent(next)
-    requestAnimationFrame(() => {
-      textarea.focus()
-      textarea.setSelectionRange(start + before.length, start + before.length + selected.length)
-    })
+    const selected = content.slice(start, end)
+    const caret = start + before.length
+    replaceEditor(
+      start,
+      end,
+      `${before}${selected}${after}`,
+      caret,
+      selected ? caret + selected.length : caret
+    )
+  }
+
+  const toggleLines = (kind: 'bullet' | 'task'): void => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    const start = textarea.selectionStart
+    const end = textarea.selectionEnd
+    const lineStart = content.lastIndexOf('\n', Math.max(0, start - 1)) + 1
+    const breakAt = content.indexOf('\n', end)
+    const lineEnd = breakAt === -1 ? content.length : breakAt
+    const lines = content.slice(lineStart, lineEnd).split('\n')
+    const prefix = kind === 'task' ? '- [ ] ' : '- '
+    if (!lines.some((line) => line.trim())) {
+      replaceEditor(lineStart, lineEnd, prefix, lineStart + prefix.length, lineStart + prefix.length)
+      return
+    }
+    const parsed = lines.map(listParts)
+    const meaningful = parsed.filter((_, index) => lines[index].trim())
+    const allOn = meaningful.length > 0 && meaningful.every((item) => item.kind === kind)
+    const next = lines
+      .map((line, index) => {
+        if (!line.trim()) return line
+        const item = parsed[index]
+        if (allOn) return `${item.indent}${item.body}`
+        return `${item.indent}${prefix}${item.body}`
+      })
+      .join('\n')
+    replaceEditor(lineStart, lineEnd, next, lineStart, lineStart + next.length)
+  }
+
+  const toggleInline = (marker: string): void => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    const start = textarea.selectionStart
+    const end = textarea.selectionEnd
+    const selected = content.slice(start, end)
+    const beforeMarker = content.slice(start - marker.length, start) === marker
+    const afterMarker = content.slice(end, end + marker.length) === marker
+    const around =
+      beforeMarker &&
+      afterMarker &&
+      (marker !== '*' ||
+        (content[start - marker.length - 1] !== '*' && content[end + marker.length] !== '*'))
+    const inside =
+      selected.length >= marker.length * 2 &&
+      selected.startsWith(marker) &&
+      selected.endsWith(marker) &&
+      !(marker === '*' && selected.startsWith('**'))
+    if (inside) {
+      const inner = selected.slice(marker.length, selected.length - marker.length)
+      replaceEditor(start, end, inner, start, start + inner.length)
+      return
+    }
+    if (around) {
+      replaceEditor(start - marker.length, end + marker.length, selected, start - marker.length, end - marker.length)
+      return
+    }
+  const inner = selected
+  const from = start + marker.length
+  replaceEditor(start, end, `${marker}${inner}${marker}`, from, inner ? from + inner.length : from)
+}
+
+  const toggleHeading = (): void => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    const start = textarea.selectionStart
+    const end = textarea.selectionEnd
+    const lineStart = content.lastIndexOf('\n', Math.max(0, start - 1)) + 1
+    const breakAt = content.indexOf('\n', end)
+    const lineEnd = breakAt === -1 ? content.length : breakAt
+    const lines = content.slice(lineStart, lineEnd).split('\n')
+    const meaningful = lines.filter((line) => line.trim())
+    const allH2 = meaningful.length > 0 && meaningful.every((line) => /^##\s+/.test(line))
+    const nextBlock = lines
+      .map((line) => {
+        if (!line.trim()) return line
+        if (allH2) return line.replace(/^##\s+/, '')
+        if (/^#{1,6}\s+/.test(line)) return line.replace(/^#{1,6}\s+/, '## ')
+        return `## ${line}`
+      })
+      .join('\n')
+    if (!nextBlock.trim()) {
+      replaceEditor(lineStart, lineEnd, '## ', lineStart + 3, lineStart + 3)
+      return
+    }
+    replaceEditor(lineStart, lineEnd, nextBlock, lineStart, lineStart + nextBlock.length)
   }
 
   const onEditorKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
@@ -565,11 +771,11 @@ export function NotesPage() {
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') {
       event.preventDefault()
-      applyFormat('**')
+      toggleInline('**')
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'i') {
       event.preventDefault()
-      applyFormat('_')
+      toggleInline('*')
     }
   }
 
@@ -776,12 +982,11 @@ export function NotesPage() {
     return -1
   }, [])
 
-  const onEditorClick = (event: ReactMouseEvent<HTMLTextAreaElement>): void => {
-    // A drag-selection ends with a click; never tick a box while selecting.
-    const textarea = event.currentTarget
-    if (textarea.selectionStart !== textarea.selectionEnd) return
+  const onEditorMouseDown = (event: ReactMouseEvent<HTMLTextAreaElement>): void => {
     const index = hitCheckbox(event.clientX, event.clientY)
-    if (index >= 0) toggleChecklistAt(index)
+    if (index < 0) return
+    event.preventDefault()
+    toggleChecklistAt(index)
   }
 
   const onEditorMouseMove = (event: ReactMouseEvent<HTMLTextAreaElement>): void => {
@@ -894,6 +1099,7 @@ export function NotesPage() {
   return (
     <div className="notes-page">
       <aside className="notes-sidebar">
+        {!compact && (
         <div className="sidebar-head">
           <div className="sidebar-vault">
             <span className="vault-avatar">{vaultPath.split(/[\\/]/).filter(Boolean).pop()?.slice(0, 1).toUpperCase()}</span>
@@ -914,6 +1120,7 @@ export function NotesPage() {
             </button>
           </div>
         </div>
+        )}
 
         <div className="search-box">
           <Search size={13} />
@@ -1039,6 +1246,31 @@ export function NotesPage() {
           </button>
         </div>
       </aside>
+
+      {compact && (
+        <CompactSlotPortal>
+          <div className="notes-compact-bar">
+            <div className="sidebar-vault">
+              <span className="vault-avatar">{vaultPath.split(/[\\/]/).filter(Boolean).pop()?.slice(0, 1).toUpperCase()}</span>
+              <div>
+                <span className="eyebrow">Folder</span>
+                <strong>{vaultPath.split(/[\\/]/).filter(Boolean).pop()}</strong>
+              </div>
+            </div>
+            <div className="sidebar-actions">
+              <button className="icon-button subtle" onClick={() => void loadTree()} title="Refresh folder">
+                <RefreshCw size={13} className={loadingTree ? 'spin' : ''} />
+              </button>
+              <button className="icon-button subtle" onClick={() => void createNoteNow()} title="New note">
+                <FilePlus2 size={14} />
+              </button>
+              <button className="icon-button subtle" onClick={() => setEntryDialog({ mode: 'folder', parent: currentFolder })} title="New folder">
+                <FolderPlus size={14} />
+              </button>
+            </div>
+          </div>
+        </CompactSlotPortal>
+      )}
 
       <main className="note-workspace">
         {!selectedPath ? (
@@ -1167,16 +1399,22 @@ export function NotesPage() {
 
             {!preview && (
               <div className="editor-toolbar">
-                <button onClick={() => applyFormat('**')} title="Bold (Ctrl+B)"><Bold size={14} /></button>
-                <button onClick={() => applyFormat('_')} title="Italic (Ctrl+I)"><Italic size={14} /></button>
-                <button onClick={() => applyFormat('## ', '', 'Heading')} title="Heading"><Heading2 size={14} /></button>
-                <button onClick={() => applyFormat('- ', '', 'List item')} title="Bullet list"><List size={14} /></button>
-                <button onClick={() => applyFormat('- [ ] ', '', 'Task')} title="Checklist"><CheckSquare size={14} /></button>
-                <button onClick={() => applyFormat('`', '`', 'code')} title="Inline code"><Code2 size={14} /></button>
-                <button onClick={() => applyFormat('[', '](url)', 'link text')} title="Link"><Link2 size={14} /></button>
-                <button onClick={() => applyFormat('[[', ']]', 'note')} title="Wiki link"><FileText size={14} /></button>
+                <div className="toolbar-group">
+                  <button type="button" className={marks.bold ? 'is-on' : ''} aria-pressed={marks.bold} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleInline('**')} title="Bold (Ctrl+B)"><Bold size={14} /></button>
+                  <button type="button" className={marks.italic ? 'is-on' : ''} aria-pressed={marks.italic} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleInline('*')} title="Italic (Ctrl+I)"><Italic size={14} /></button>
+                  <button type="button" className={marks.heading ? 'is-on' : ''} aria-pressed={marks.heading} onMouseDown={(event) => event.preventDefault()} onClick={toggleHeading} title="Heading"><Heading2 size={14} /></button>
+                </div>
+                <div className="toolbar-group">
+                  <button type="button" className={marks.list ? 'is-on' : ''} aria-pressed={marks.list} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleLines('bullet')} title="Bullet list"><List size={14} /></button>
+                  <button type="button" className={marks.task ? 'is-on' : ''} aria-pressed={marks.task} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleLines('task')} title="Checklist"><CheckSquare size={14} /></button>
+                </div>
+                <div className="toolbar-group">
+                  <button type="button" className={marks.code ? 'is-on' : ''} aria-pressed={marks.code} onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat('`', '`')} title="Inline code"><Code2 size={14} /></button>
+                  <button type="button" className={marks.link ? 'is-on' : ''} aria-pressed={marks.link} onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat('[', '](url)')} title="Link"><Link2 size={14} /></button>
+                  <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat('[[', ']]')} title="Wiki link"><FileText size={14} /></button>
+                </div>
                 <span className="toolbar-spacer" />
-                <button onClick={() => void saveNow()} title="Save now (Ctrl+S)"><Save size={14} /></button>
+                <button type="button" className="toolbar-save" onClick={() => void saveNow()} title="Save now (Ctrl+S)"><Save size={14} /></button>
               </div>
             )}
 
@@ -1203,8 +1441,9 @@ export function NotesPage() {
                   onChange={(event) => onChangeContent(event.target.value)}
                   onKeyDown={onEditorKeyDown}
                   onScroll={syncMirrorScroll}
-                  onClick={onEditorClick}
+                  onMouseDown={onEditorMouseDown}
                   onMouseMove={onEditorMouseMove}
+                  onSelect={() => rememberMarks(contentRef.current, textareaRef.current?.selectionStart ?? 0, textareaRef.current?.selectionEnd ?? 0)}
                   spellCheck
                   placeholder="Start writing…"
                 />

@@ -30,16 +30,34 @@ interface MediaContextValue {
   togglePlay: () => Promise<void>
   connect: () => Promise<void>
   disconnect: () => Promise<void>
+  launchSpotify: () => Promise<boolean>
   progressMs: number
   pending: SpotifyAction['type'] | null
 }
 
 const MediaContext = createContext<MediaContextValue | null>(null)
 
+function readCachedPlayback(): SpotifyPlayback | null {
+  try {
+    const raw = window.localStorage.getItem('notch:spotify:playback')
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as SpotifyPlayback
+    if (!parsed?.track?.id) return null
+    return { ...parsed, playing: false, device: null }
+  } catch {
+    return null
+  }
+}
+
+function spotifyTrackTarget(trackId: string | undefined): string | undefined {
+  if (!trackId || !/^[A-Za-z0-9]{10,}$/.test(trackId)) return undefined
+  return `spotify:track:${trackId}`
+}
+
 export function MediaProvider({ children }: { children: ReactNode }) {
   const { showToast, now, state } = useApp()
   const [status, setStatus] = useState<SpotifyStatus | null>(null)
-  const [playback, setPlayback] = useState<SpotifyPlayback | null>(null)
+  const [playback, setPlayback] = useState<SpotifyPlayback | null>(() => readCachedPlayback())
   const [queue, setQueue] = useState<SpotifyQueueItem[]>([])
   const [loading, setLoading] = useState(false)
   const [connecting, setConnecting] = useState(false)
@@ -49,19 +67,37 @@ export function MediaProvider({ children }: { children: ReactNode }) {
   const pollVersion = useRef(0)
   const actionPending = useRef(false)
   const actionSeq = useRef(0)
-  const playbackRef = useRef<SpotifyPlayback | null>(null)
+  const playbackRef = useRef(playback)
+  const cachedRef = useRef(playback)
+  const statusRef = useRef<SpotifyStatus | null>(null)
   const pollSuppressUntil = useRef(0)
 
   const applyPlayback = useCallback((next: SpotifyPlayback | null) => {
     playbackRef.current = next
     setPlayback(next)
+    if (next?.track) {
+      cachedRef.current = next
+      try {
+        window.localStorage.setItem('notch:spotify:playback', JSON.stringify(next))
+      } catch {
+        // ignore
+      }
+    }
   }, [])
 
   const refreshStatus = useCallback(async () => {
     try {
       const next = await window.notch.spotify.status()
+      statusRef.current = next
       setStatus(next)
-      if (!next.connected && !next.localAvailable) applyPlayback(null)
+      if (!next.connected && !next.localAvailable) {
+        // Keep the last known track visible when Spotify is closed.
+        if (playbackRef.current?.track) {
+          setPlayback(playbackRef.current)
+        } else {
+          applyPlayback(null)
+        }
+      }
     } catch {
       setStatus(null)
     }
@@ -75,7 +111,28 @@ export function MediaProvider({ children }: { children: ReactNode }) {
       try {
         const next = await window.notch.spotify.player()
         if (version !== pollVersion.current || actionPending.current) return
-        applyPlayback(next)
+        if (next?.track) {
+          applyPlayback(next)
+        } else {
+          const cached = cachedRef.current?.track ? cachedRef.current : playbackRef.current
+          if (cached?.track) {
+            const frozen: SpotifyPlayback = {
+              ...cached,
+              playing: false,
+              device: next?.device?.active ? next.device : null,
+              connected: Boolean(next?.connected),
+              fetchedAt: Date.now()
+            }
+            const visible = playbackRef.current
+            const unchanged =
+              visible?.track?.id === frozen.track.id &&
+              visible.playing === false &&
+              (visible.device?.id ?? null) === (frozen.device?.id ?? null)
+            if (!unchanged) applyPlayback(frozen)
+          } else {
+            applyPlayback(next)
+          }
+        }
         setError(null)
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : 'Spotify is unavailable.'
@@ -97,6 +154,10 @@ export function MediaProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const hasSource = Boolean(status?.connected || status?.localAvailable)
+
+  useEffect(() => {
+    statusRef.current = status
+  }, [status])
 
   useEffect(() => {
     void refreshStatus()
@@ -164,6 +225,7 @@ export function MediaProvider({ children }: { children: ReactNode }) {
           }, 600)
           setTimeout(() => {
             void refreshPlayer(true)
+            void refreshQueue()
           }, 1800)
         }
       } catch (caught) {
@@ -179,13 +241,68 @@ export function MediaProvider({ children }: { children: ReactNode }) {
     [applyPlayback, refreshPlayer, refreshQueue, showToast]
   )
 
+  const openSpotify = useCallback(
+    async (resumeTrack: boolean) => {
+      const target = resumeTrack ? spotifyTrackTarget(playbackRef.current?.track?.id) : undefined
+      try {
+        const ok = await window.notch.spotify.launch(target)
+        if (!ok) return false
+        // Spotify can take several seconds to publish a media session after a
+        // cold start. Keep checking, then resume once that session exists.
+        const deadline = Date.now() + 12000
+        let live = playbackRef.current
+        while (Date.now() < deadline) {
+          pollSuppressUntil.current = deadline
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+          pollSuppressUntil.current = 0
+          await refreshStatus()
+          await refreshPlayer(true)
+          live = playbackRef.current
+          if (live?.playing) break
+          if (live?.device?.active || statusRef.current?.localAvailable) break
+        }
+        pollSuppressUntil.current = 0
+        if (
+          resumeTrack &&
+          live?.track &&
+          !live.playing &&
+          (live.device?.active || statusRef.current?.localAvailable)
+        ) {
+          await action({ type: 'play' })
+        }
+        return true
+      } catch {
+        pollSuppressUntil.current = 0
+        return false
+      }
+    },
+    [action, refreshPlayer, refreshStatus]
+  )
+
   const togglePlay = useCallback(async () => {
     const current = playbackRef.current
-    if (!current) return
+    // OAuth can stay connected after the desktop app closes. A paused cache has
+    // no active device, so Play has to open Spotify instead of calling the API.
+    const deviceReady = Boolean(
+      statusRef.current?.localAvailable || current?.device?.active || current?.playing
+    )
+    if (!deviceReady) {
+      showToast('Spotify', current?.track ? 'Opening Spotify and starting the last track…' : 'Opening Spotify…')
+      const opened = await openSpotify(true)
+      if (!opened) showToast('Spotify', 'Could not open Spotify on this computer.', 'error')
+      return
+    }
+    if (!current?.track) return
     const optimistic: SpotifyPlayback = { ...current, playing: !current.playing }
     applyPlayback(optimistic)
-    await action({ type: optimistic.playing ? 'play' : 'pause' })
-  }, [action, applyPlayback])
+    try {
+      await action({ type: optimistic.playing ? 'play' : 'pause' })
+    } catch {
+      applyPlayback(current)
+    }
+  }, [action, applyPlayback, openSpotify, showToast])
+
+  const launchSpotify = useCallback(async () => openSpotify(false), [openSpotify])
 
   const connect = useCallback(async () => {
     setConnecting(true)
@@ -236,6 +353,7 @@ export function MediaProvider({ children }: { children: ReactNode }) {
     refreshQueue,
     action,
     togglePlay,
+    launchSpotify,
     connect,
     disconnect,
     progressMs,

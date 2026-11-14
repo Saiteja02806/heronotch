@@ -10,6 +10,7 @@ import {
   Keyboard,
   Loader2,
   LogOut,
+  Blocks,
   Music2,
   NotebookPen,
   Palette,
@@ -32,13 +33,17 @@ import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
 import { useVaultPicker } from '../hooks/useVaultPicker'
 import { ACCENTS } from '../lib/theme'
+import { OPTIONAL_SECTIONS } from '../lib/sections'
 import { formatTime } from '../lib/time'
+import { waterCount, waterFill } from '../lib/water'
+import { WaterPreview } from './WaterPage'
 
-type Section = 'appearance' | 'notch' | 'obsidian' | 'spotify' | 'about'
+type Section = 'appearance' | 'notch' | 'sections' | 'obsidian' | 'spotify' | 'about'
 
 const SECTIONS: { id: Section; label: string; icon: typeof Palette }[] = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'notch', label: 'Notch', icon: PanelTop },
+  { id: 'sections', label: 'Sections', icon: Blocks },
   { id: 'obsidian', label: 'Notes', icon: NotebookPen },
   { id: 'spotify', label: 'Spotify', icon: Music2 },
   { id: 'about', label: 'About', icon: Info }
@@ -96,7 +101,8 @@ export function SettingsPage() {
     setExpanded,
     setPage,
     settingsSection,
-    setSettingsSection
+    setSettingsSection,
+    setWaterEnabled
   } = useApp()
   const { status, connecting, connect, disconnect } = useMedia()
   const { chooseVault } = useVaultPicker()
@@ -115,7 +121,7 @@ export function SettingsPage() {
   const [draggingPlacement, setDraggingPlacement] = useState(false)
   const [focusMin, setFocusMin] = useState(String(state.timer.durations.focus))
   const [shortMin, setShortMin] = useState(String(state.timer.durations.short))
-  const [longMin, setLongMin] = useState(String(state.timer.durations.long))
+  const [longMin, setLongMin] = useState(String(state.timer.durations.long || 45))
   const [copied, setCopied] = useState(false)
   const [savingSpotify, setSavingSpotify] = useState(false)
   const [showSpotifyAdvanced, setShowSpotifyAdvanced] = useState(false)
@@ -228,7 +234,7 @@ export function SettingsPage() {
   const saveRhythm = (): void => {
     const focus = Math.min(180, Math.max(1, Number(focusMin) || 25))
     const short = Math.min(60, Math.max(1, Number(shortMin) || 5))
-    const long = Math.min(120, Math.max(1, Number(longMin) || 15))
+    const long = Math.min(180, Math.max(1, Number(longMin) || 45))
     const durations = { focus, short, long }
     setFocusMin(String(focus))
     setShortMin(String(short))
@@ -290,6 +296,7 @@ export function SettingsPage() {
             <h1>
               {section === 'appearance' && 'A little more you.'}
               {section === 'notch' && 'Tune the notch.'}
+              {section === 'sections' && 'Add a section.'}
               {section === 'obsidian' && 'Your notes, connected.'}
               {section === 'spotify' && 'Let the music in.'}
               {section === 'about' && 'Small app, big flow.'}
@@ -356,6 +363,71 @@ export function SettingsPage() {
                     </button>
                   </div>
                 </label>
+              </section>
+            </div>
+          )}
+
+          {section === 'sections' && (
+            <div className="settings-sections">
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Optional</h3>
+                  <p>Home, notes, music, plan, sessions and posture stay on the notch.</p>
+                </div>
+                <div className="section-shelf">
+                  {OPTIONAL_SECTIONS.map((item) => {
+                    const added = item.id === 'water' && Boolean(state.water?.enabled)
+                    const count = added ? waterCount(state.water) : 0
+                    const fill = added ? waterFill(count, state.water.goalGlasses) : 0.62
+                    return (
+                      <article key={item.id} className={`section-card ${added ? 'is-added' : ''}`}>
+                        <div className="section-card-glass">
+                          <WaterPreview fill={fill} />
+                        </div>
+                        <div className="section-card-copy">
+                          <span className="eyebrow">{added ? 'On your notch' : 'Available'}</span>
+                          <h3>{item.label}</h3>
+                          <p>{item.detail}</p>
+                          {added && (
+                            <p className="section-card-live">
+                              {count} of {state.water.goalGlasses} today · press {item.shortcut} to open
+                            </p>
+                          )}
+                        </div>
+                        <div className="section-card-actions">
+                          {added ? (
+                            <>
+                              <button type="button" className="primary-button" onClick={() => setPage('water')}>
+                                Open
+                              </button>
+                              <button
+                                type="button"
+                                className="soft-button"
+                                onClick={() => {
+                                  setWaterEnabled(false)
+                                  showToast('Water removed', 'The tab is gone. Today’s glasses stay saved.', 'success')
+                                }}
+                              >
+                                Remove section
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              className="primary-button"
+                              onClick={() => {
+                                setWaterEnabled(true)
+                                showToast('Water added', 'It now has a tab on the notch.', 'success')
+                              }}
+                            >
+                              Add section
+                            </button>
+                          )}
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
               </section>
             </div>
           )}
@@ -475,6 +547,12 @@ export function SettingsPage() {
                   label="Reminder notifications"
                   description="System alerts for tasks and completed focus sessions."
                 />
+                <Toggle
+                  checked={state.settings.timerNotifications ?? true}
+                  onChange={(value) => updateSettings({ timerNotifications: value })}
+                  label="Focus session alerts"
+                  description="Chime and notification when a focus session or break ends."
+                />
                 <div className="setting-row">
                   <span className="setting-copy">
                     <strong>Open with</strong>
@@ -535,12 +613,12 @@ export function SettingsPage() {
                     <input type="number" min={1} max={180} value={focusMin} onChange={(event) => setFocusMin(event.target.value)} />
                   </label>
                   <label>
-                    <span>Short break (min)</span>
+                    <span>Break (min)</span>
                     <input type="number" min={1} max={60} value={shortMin} onChange={(event) => setShortMin(event.target.value)} />
                   </label>
                   <label>
-                    <span>Long break (min)</span>
-                    <input type="number" min={1} max={120} value={longMin} onChange={(event) => setLongMin(event.target.value)} />
+                    <span>Long focus (min)</span>
+                    <input type="number" min={1} max={180} value={longMin} onChange={(event) => setLongMin(event.target.value)} />
                   </label>
                 </div>
                 <div className="button-row">
@@ -749,6 +827,7 @@ export function SettingsPage() {
                   <div><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Space</kbd></span><strong>Toggle notch</strong></div>
                   <div><span><kbd>Esc</kbd></span><strong>Collapse</strong></div>
                   <div><span><kbd>1</kbd>–<kbd>7</kbd></span><strong>Switch sections</strong></div>
+                  <div><span><kbd>8</kbd></span><strong>Water, once added</strong></div>
                   <div><span><kbd>Ctrl</kbd><kbd>K</kbd></span><strong>Search notes</strong></div>
                   <div><span><kbd>Ctrl</kbd><kbd>S</kbd></span><strong>Save note</strong></div>
                 </div>

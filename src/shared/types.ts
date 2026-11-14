@@ -25,10 +25,12 @@ export interface Settings {
   notchStyle: NotchStyle
   launchAtLogin: boolean
   notifications: boolean
+  timerNotifications: boolean
   spotifyClientId: string
   spotifyRedirectPort: number
   userName: string
   pinOnOpen: boolean
+  panelSize: 'full' | 'compact'
 }
 
 export interface TimerState {
@@ -86,6 +88,18 @@ export interface PostureState {
   lastAlertAt: number | null
 }
 
+export const WATER_GOAL_MIN = 1
+export const WATER_GOAL_MAX = 16
+export const WATER_GLASS_ML = 250
+
+export interface WaterState {
+  enabled: boolean
+  goalGlasses: number
+  glassMl: number
+  dayKey: string
+  pours: number[]
+}
+
 export interface FocusSession {
   at: number
   minutes: number
@@ -97,6 +111,7 @@ export interface AppState {
   tasks: Task[]
   notes: NotesState
   posture: PostureState
+  water: WaterState
   focusLog: FocusSession[]
 }
 
@@ -106,6 +121,7 @@ export interface AppStatePatch {
   tasks?: Task[]
   notes?: Partial<NotesState>
   posture?: Partial<PostureState>
+  water?: Partial<WaterState>
   focusLog?: FocusSession[]
 }
 
@@ -212,6 +228,7 @@ export interface SpotifyPlayback {
   fetchedAt: number
   source: 'api' | 'local' | 'none'
   queueAvailable: boolean
+  contextUri?: string | null
 }
 
 export interface SpotifyQueueItem {
@@ -243,7 +260,7 @@ export type SpotifyAction =
   | { type: 'pause' }
   | { type: 'next' }
   | { type: 'previous' }
-  | { type: 'play-track'; uri: string; queue?: string[]; deviceId?: string }
+  | { type: 'play-track'; uri: string; queue?: string[]; deviceId?: string; contextUri?: string }
   | { type: 'seek'; position: number }
   | { type: 'volume'; volume: number }
   | { type: 'shuffle'; state: boolean }
@@ -292,6 +309,7 @@ export interface NotchApi {
     player: () => Promise<SpotifyPlayback>
     queue: () => Promise<SpotifyQueueItem[]>
     action: (action: SpotifyAction) => Promise<SpotifyPlayback>
+    launch: (target?: string) => Promise<boolean>
   }
   sessions: {
     scan: () => Promise<SessionsSnapshot>

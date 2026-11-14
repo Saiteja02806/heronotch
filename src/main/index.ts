@@ -15,7 +15,7 @@ import {
   shell,
   Tray
 } from 'electron'
-import { execFile, execFileSync } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { AppState, AppStatePatch, NotchStyle } from '../shared/types'
@@ -887,10 +887,41 @@ function registerIpc(): void {
     return spotify.getQueue(settings.spotifyClientId)
   })
 
+async function startTrackOnDesktop(clientId: string, uri: string) {
+  if (!/^spotify:(track|episode):[A-Za-z0-9]+$/.test(uri)) return null
+  try {
+    await shell.openExternal(uri)
+  } catch {
+    return null
+  }
+  const targetId = uri.split(':').pop() || ''
+  const deadline = Date.now() + 8000
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const playback = await spotify.getPlayback(clientId).catch(() => null)
+    if (playback?.track?.id === targetId) {
+      return { ...playback, playing: true, fetchedAt: Date.now() }
+    }
+  }
+  return null
+}
+
   ipcMain.handle('spotify:action', (_event, action) => {
     const run = spotifyActionQueue.then(async () => {
       const settings = getState().settings
       const status = await spotify.getStatus(settings.spotifyRedirectPort)
+      if (action?.type === 'play-track') {
+        if (!status.connected) {
+          throw new Error('Connect your Spotify account to choose a track from the queue.')
+        }
+        try {
+          return await spotify.performAction(settings.spotifyClientId, action)
+        } catch (error) {
+          const recovered = await startTrackOnDesktop(settings.spotifyClientId, action.uri)
+          if (recovered) return recovered
+          throw error
+        }
+      }
       if (status.connected) {
         try {
           return await spotify.performAction(settings.spotifyClientId, action)
@@ -904,6 +935,36 @@ function registerIpc(): void {
     return run
   })
 
+  ipcMain.handle('spotify:launch', async (_event, target?: string) => {
+    const uri =
+      typeof target === 'string' &&
+      (target === 'spotify:' || /^spotify:track:[A-Za-z0-9]+$/.test(target))
+        ? target
+        : 'spotify:'
+    try {
+      await shell.openExternal(uri)
+      return true
+    } catch {
+      // Fall back to common install locations. Those only start the app.
+    }
+    const candidates = [
+      'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Roaming\\Spotify\\Spotify.exe',
+      'C:\\Program Files\\Spotify\\Spotify.exe',
+      'C:\\Program Files (x86)\\Spotify\\Spotify.exe'
+    ]
+    for (const candidate of candidates) {
+      try {
+        const fs = await import('node:fs')
+        if (fs.existsSync(candidate)) {
+          spawn(candidate, [], { detached: true, stdio: 'ignore' }).unref()
+          return true
+        }
+      } catch {
+        // try next
+      }
+    }
+    return false
+  })
   ipcMain.handle('sessions:scan', () => sessions.scanSessions())
   ipcMain.handle('sessions:open-project', (_event, directory: string) => {
     return sessions.openSessionProject(directory)
