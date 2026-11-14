@@ -19,7 +19,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { AppState, AppStatePatch, NotchMetrics } from '../shared/types'
-import { startForegroundWatch, stopForegroundWatch } from './foreground'
+import { pauseForegroundWatch, resumeForegroundWatch, startForegroundWatch, stopForegroundWatch } from './foreground'
 import { shouldAutoHide } from '../shared/presence'
 import { followWithSpotifyApi } from '../shared/mediaFollow'
 import { collapsedLayout } from '../shared/notchLayout'
@@ -55,6 +55,7 @@ let currentMetrics: NotchMetrics | null = null
 let closeFallback: NodeJS.Timeout | null = null
 let userHidden = false
 let autoHidden = false
+let sessionLocked = false
 let presenceApplied: boolean | null = null
 
 function applyPresence(): void {
@@ -67,6 +68,7 @@ function applyPresence(): void {
     mainWindow.setOpacity(0)
     mainWindow.setIgnoreMouseEvents(true, { forward: true })
     logLine(`notch hidden user=${userHidden} auto=${autoHidden}`)
+    mainWindow.webContents.send('notch:presence', { hidden: true })
     return
   }
   mainWindow.setOpacity(1)
@@ -74,6 +76,7 @@ function applyPresence(): void {
   applyWindowShape()
   mainWindow.showInactive()
   mainWindow.setSkipTaskbar(true)
+  mainWindow.webContents.send('notch:presence', { hidden: false })
   logLine('notch shown')
 }
 
@@ -563,8 +566,9 @@ function createWindow(): void {
   }
   topmostTimer = setInterval(() => {
     if (quitting || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return
+    if (userHidden || autoHidden || sessionLocked) return
     mainWindow.setAlwaysOnTop(true, 'screen-saver')
-  }, 4000)
+  }, 15000)
 
   mainWindow.on('close', (event) => {
     if (quitting) return
@@ -1249,8 +1253,9 @@ if (!gotLock) {
     })
     backdrop.scheduleBackdropRefresh()
     setInterval(() => {
-      if (!expanded) backdrop.refreshBackdrop()
-    }, 30_000)
+      if (expanded || userHidden || autoHidden || sessionLocked) return
+      backdrop.refreshBackdrop()
+    }, 60_000)
     refreshVaultWatcher(true)
     scheduleReminders()
     registerGlobalShortcuts()
@@ -1264,9 +1269,34 @@ if (!gotLock) {
     screen.on('display-metrics-changed', applyBounds)
     screen.on('display-added', applyBounds)
     screen.on('display-removed', applyBounds)
+    powerMonitor.on('suspend', () => {
+      sessionLocked = true
+      localMedia.pauseLocalMediaMonitor()
+      pauseForegroundWatch()
+      logLine('system suspend')
+    })
     powerMonitor.on('resume', () => {
+      sessionLocked = false
       scheduleReminders()
       applyBounds()
+      localMedia.resumeLocalMediaMonitor()
+      resumeForegroundWatch()
+      if (!expanded) backdrop.refreshBackdrop()
+      logLine('system resume')
+    })
+    powerMonitor.on('lock-screen', () => {
+      sessionLocked = true
+      logLine('session locked')
+    })
+    powerMonitor.on('unlock-screen', () => {
+      sessionLocked = false
+      applyBounds()
+      if (!expanded && !userHidden && !autoHidden) backdrop.refreshBackdrop()
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setAlwaysOnTop(true, 'screen-saver')
+        mainWindow.setSkipTaskbar(true)
+      }
+      logLine('session unlocked')
     })
 
     app.on('activate', () => {

@@ -49,8 +49,10 @@ while (\$true) {
 let child: ChildProcess | null = null
 let buffer = ''
 let stopped = false
+let listener: ((sample: ForegroundSample) => void) | null = null
 
 export function startForegroundWatch(onSample: (sample: ForegroundSample) => void): void {
+  listener = onSample
   if (process.platform !== 'win32' || child) return
   stopped = false
   try {
@@ -95,4 +97,16 @@ export function stopForegroundWatch(): void {
   stopped = true
   child?.kill()
   child = null
+}
+
+export function pauseForegroundWatch(): void {
+  stopped = true
+  child?.kill()
+  child = null
+}
+
+export function resumeForegroundWatch(): void {
+  if (!listener) return
+  stopped = false
+  startForegroundWatch(listener)
 }

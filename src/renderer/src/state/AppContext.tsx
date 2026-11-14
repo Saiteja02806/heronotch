@@ -228,11 +228,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const presenceHidden = useRef(false)
+
   useEffect(() => {
+    return window.notch.onPresence((event) => {
+      presenceHidden.current = event.hidden
+    })
+  }, [])
+
+  useEffect(() => {
+    let timer = 0
+    let alive = true
+    const schedule = (): void => {
+      const wait = presenceHidden.current ? 120_000 : expanded ? 15_000 : 60_000
+      timer = window.setTimeout(() => {
+        if (!alive) return
+        if (!presenceHidden.current) void refreshSessions()
+        schedule()
+      }, wait)
+    }
     void refreshSessions()
-    const interval = setInterval(() => void refreshSessions(), 15_000)
-    return () => clearInterval(interval)
-  }, [refreshSessions])
+    schedule()
+    return () => {
+      alive = false
+      window.clearTimeout(timer)
+    }
+  }, [expanded, refreshSessions])
 
   const update = useCallback((patch: AppStatePatch) => {
     setState((prev) => (prev ? mergeLocal(prev, patch) : prev))

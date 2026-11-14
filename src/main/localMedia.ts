@@ -109,6 +109,7 @@ function freshSessions(): MediaSessionInfo[] {
   return sessions
 }
 let stopping = false
+let paused = false
 let restartTimer: NodeJS.Timeout | null = null
 let actionQueue: Promise<unknown> = Promise.resolve()
 
@@ -121,7 +122,7 @@ function scheduleRestart(): void {
 }
 
 export function startLocalMediaMonitor(): void {
-  if (process.platform !== 'win32' || monitor || stopping) return
+  if (process.platform !== 'win32' || monitor || stopping || paused) return
   let child: ChildProcess
   try {
     child = spawn(
@@ -210,8 +211,23 @@ export function startLocalMediaMonitor(): void {
     if (monitor === child) monitor = null
     latest = null
     sessions = []
-    scheduleRestart()
+    if (!paused) scheduleRestart()
   })
+}
+
+export function pauseLocalMediaMonitor(): void {
+  paused = true
+  if (restartTimer) {
+    clearTimeout(restartTimer)
+    restartTimer = null
+  }
+  monitor?.kill()
+  monitor = null
+}
+
+export function resumeLocalMediaMonitor(): void {
+  paused = false
+  startLocalMediaMonitor()
 }
 
 export function stopLocalMediaMonitor(): void {
