@@ -36,6 +36,11 @@ export interface Settings {
   /** Blur and dim the desktop behind the open notch. On unless turned off. */
   focusMode: boolean
   /**
+   * Which Windows media session the notch follows.
+   * `auto` uses the session that is playing. Anything else is that app's id.
+   */
+  mediaSource?: string
+  /**
    * Which header sections are on the notch, and in what order.
    * Absent on older saves; filled in from the water switch on load.
    */
@@ -218,6 +223,8 @@ export interface SpotifyStatus {
   localAvailable: boolean
   localTitle?: string | null
   localArtist?: string | null
+  /** Apps currently publishing a Windows media session. */
+  mediaSources?: { id: string; label: string }[]
   /** The saved grant is missing a scope this version asks for, usually recently played. */
   needsConsent: boolean
   /** Screenshot-only hint. Absent in normal use. */

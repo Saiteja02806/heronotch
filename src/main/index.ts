@@ -19,6 +19,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { AppState, AppStatePatch, NotchMetrics } from '../shared/types'
+import { followWithSpotifyApi } from '../shared/mediaFollow'
 import { collapsedLayout } from '../shared/notchLayout'
 import * as backdrop from './backdrop'
 import * as localMedia from './localMedia'
@@ -942,7 +943,8 @@ function registerIpc(): void {
       ...status,
       localAvailable: local.available,
       localTitle: local.title,
-      localArtist: local.artist
+      localArtist: local.artist,
+      mediaSources: localMedia.listMediaSources()
     }
   })
 
@@ -962,15 +964,16 @@ function registerIpc(): void {
   ipcMain.handle('spotify:player', async () => {
     const settings = getState().settings
     const status = await spotify.getStatus(settings.spotifyRedirectPort)
-    if (status.connected) {
+    const sessionId = localMedia.currentMediaId(settings.mediaSource)
+    if (followWithSpotifyApi(settings.mediaSource, sessionId, status.connected)) {
       try {
         const playback = await spotify.getPlayback(settings.spotifyClientId)
-        if (playback.track || !localMedia.isLocalAvailable()) return playback
+        if (playback.track || !localMedia.isLocalAvailable(settings.mediaSource)) return playback
       } catch {
-        // Fall through to the local Windows media session.
+        // Fall through to the Windows media session.
       }
     }
-    return localMedia.getLocalPlayback()
+    return localMedia.getLocalPlayback(settings.mediaSource)
   })
 
   ipcMain.handle('spotify:queue', async () => {
@@ -1051,12 +1054,14 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
     const run = spotifyActionQueue.then(async () => {
       const settings = getState().settings
       const status = await spotify.getStatus(settings.spotifyRedirectPort)
+      const sessionId = localMedia.currentMediaId(settings.mediaSource)
+      const enhanced = followWithSpotifyApi(settings.mediaSource, sessionId, status.connected)
       const recoverable =
         action?.type === 'play' || action?.type === 'play-track' || action?.type === 'play-context'
       if ((action?.type === 'play-track' || action?.type === 'play-context') && !status.connected) {
         throw new Error('Connect your Spotify account to choose what plays. Opening the Spotify app still works.')
       }
-      if (status.connected && recoverable) {
+      if (enhanced && recoverable) {
         const memory = getState().spotifyMemory
         try {
           return await spotify.performAction(settings.spotifyClientId, action, memory)
@@ -1075,7 +1080,7 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
           throw new Error('No Spotify device yet. Open Spotify, then press play again.')
         }
       }
-      if (status.connected) {
+      if (enhanced) {
         try {
           return await spotify.performAction(settings.spotifyClientId, action, getState().spotifyMemory)
         } catch (error) {

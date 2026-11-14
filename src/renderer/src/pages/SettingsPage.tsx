@@ -794,12 +794,32 @@ export function SettingsPage() {
                   <h3>Connection</h3>
                   <p>
                     {status?.connected
-                      ? 'Full Spotify control is connected.'
+                      ? 'Full Spotify control is connected. Other players still use the Windows media session.'
                       : status?.localAvailable
-                        ? 'Spotify Desktop is detected — no setup needed for basic controls.'
-                        : 'Open Spotify on this computer to use the local session.'}
+                        ? 'A player on this PC is detected — no setup needed for basic controls.'
+                        : 'Start playback in any app to control it from the notch.'}
                   </p>
                 </div>
+                <label className="setting-field">
+                  <span>Follow</span>
+                  <select
+                    className="setting-select"
+                    value={state.settings.mediaSource || 'auto'}
+                    onChange={(event) => updateSettings({ mediaSource: event.target.value })}
+                  >
+                    <option value="auto">Automatic — whichever app is playing</option>
+                    {(status?.mediaSources || []).map((source) => (
+                      <option key={source.id} value={source.id}>
+                        {source.label}
+                      </option>
+                    ))}
+                    {state.settings.mediaSource &&
+                      state.settings.mediaSource !== 'auto' &&
+                      !(status?.mediaSources || []).some((source) => source.id === state.settings.mediaSource) && (
+                        <option value={state.settings.mediaSource}>{state.settings.mediaSource}</option>
+                      )}
+                  </select>
+                </label>
                 {status?.connected ? (
                   <>
                     <div className="spotify-connected">

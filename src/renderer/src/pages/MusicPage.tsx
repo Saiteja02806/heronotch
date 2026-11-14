@@ -251,7 +251,8 @@ export function MusicPage() {
         <header className="player-head">
           <div>
             <span className="eyebrow">
-              <span className="spotify-dot" /> Spotify ·{' '}
+              <span className="spotify-dot" />{' '}
+              {playback?.source === 'local' ? playback.device?.name || 'This PC' : 'Spotify'} ·{' '}
               {phase === 'opening'
                 ? 'Opening Spotify…'
                 : phase === 'no-device'

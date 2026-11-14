@@ -31,7 +31,8 @@ const DEFAULT_SETTINGS: Settings = {
   userName: '',
   pinOnOpen: false,
   panelSize: 'full',
-  focusMode: true
+  focusMode: true,
+  mediaSource: 'auto'
 }
 
 function localDayKey(date = new Date()): string {
