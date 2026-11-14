@@ -170,16 +170,12 @@ function normalizeDay(state: AppState): AppState {
       : state.settings
   const sections = normalizeSectionPrefs(settings.sections, Boolean(state.water?.enabled))
   if (!sectionsEqual(settings.sections, sections)) settings = { ...settings, sections }
-  const needsTimerFix = state.timer.durations.long === 15
-  const timer = needsTimerFix
-    ? { ...state.timer, durations: { ...state.timer.durations, long: 45 } }
-    : state.timer
+  const timer = state.timer
   const water = normalizeWater(state, today)
   if (
     state.timer.dayKey === today &&
     state.posture?.dayKey === today &&
     settings === state.settings &&
-    !needsTimerFix &&
     sameWater(state.water, water)
   ) {
     return state

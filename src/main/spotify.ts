@@ -949,10 +949,10 @@ export async function performAction(
 
   try {
     let playback = await getPlayback(clientId)
-    if (action.type === 'play' || action.type === 'pause') {
+    if (action.type === 'pause') {
       // Spotify can return the previous transport state for a moment after the
       // command. The command succeeded, so keep the accepted state.
-      return { ...playback, playing: action.type === 'play', fetchedAt: Date.now() }
+      return { ...playback, playing: false, fetchedAt: Date.now() }
     }
     if (waitForTrackChange) {
       const beforeId = before?.track?.id ?? null
@@ -968,7 +968,7 @@ export async function performAction(
   } catch {
     return {
       connected: true,
-      playing: action.type === 'play' || action.type === 'play-track',
+      playing: action.type !== 'pause',
       track: null,
       device: null,
       shuffle: false,

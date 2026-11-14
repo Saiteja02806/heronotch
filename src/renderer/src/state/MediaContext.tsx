@@ -170,9 +170,11 @@ export function MediaProvider({ children }: { children: ReactNode }) {
           applyPlayback(next)
         } else {
           const cached = cachedRef.current?.track ? cachedRef.current : playbackRef.current
-          if (cached?.track) {
+          const held = cached?.track
+          if (cached && held) {
             const frozen: SpotifyPlayback = {
               ...cached,
+              track: held,
               playing: false,
               device: next?.device?.active ? next.device : null,
               connected: Boolean(next?.connected),
@@ -180,7 +182,7 @@ export function MediaProvider({ children }: { children: ReactNode }) {
             }
             const visible = playbackRef.current
             const unchanged =
-              visible?.track?.id === frozen.track.id &&
+              visible?.track?.id === held.id &&
               visible.playing === false &&
               (visible.device?.id ?? null) === (frozen.device?.id ?? null)
             if (!unchanged) applyPlayback(frozen)

@@ -594,7 +594,10 @@ html.notch-opening .collapsed-bar {
   to { opacity: 1; filter: blur(30px) brightness(0.64) saturate(0.96); }
 }
 
-.app.is-focus-mode .panel {
+/* Only a panel that is not flying from the tab is centred. The spatial panel's
+   left is the tab-anchored position, and a translate here would slide it left
+   by half its width (a centred tab landed at a negative x). */
+.app.is-focus-mode .panel:not(.is-spatial) {
   left: 50%;
   top: 0;
   translate: -50% 0;
@@ -9172,14 +9175,26 @@ input[type='range']:focus::-webkit-slider-thumb {
 
   .sessions-page {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
     padding: 10px 12px;
-    gap: 0;
+    gap: 8px;
+    min-height: 0;
+    overflow: hidden;
   }
 
-  .sessions-apps-column,
   .sessions-head p,
   .scan-stamp {
     display: none;
+  }
+
+  .sessions-apps-column {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    overflow: hidden;
   }
 
   .sessions-apps-head,
@@ -9192,8 +9207,14 @@ input[type='range']:focus::-webkit-slider-thumb {
   }
 
   .sessions-apps-list {
+    display: flex;
+    flex-direction: row;
     align-items: center;
     gap: 6px;
+    width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
   }
 
   .agent-card-top {
@@ -9203,6 +9224,8 @@ input[type='range']:focus::-webkit-slider-thumb {
   .sessions-list-panel {
     padding: 8px 10px;
     border-radius: 14px;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .sessions-head h1 {
@@ -9212,6 +9235,7 @@ input[type='range']:focus::-webkit-slider-thumb {
   .agent-card {
     width: 34px;
     height: 34px;
+    flex: 0 0 34px;
     padding: 0;
     display: grid;
     place-items: center;
@@ -9346,6 +9370,9 @@ input[type='range']:focus::-webkit-slider-thumb {
 
   .settings-page {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    min-height: 0;
+    overflow: hidden;
   }
 
   .settings-rail {
@@ -9376,6 +9403,8 @@ input[type='range']:focus::-webkit-slider-thumb {
   }
 
   .settings-main {
+    min-height: 0;
+    overflow-y: auto;
     padding: 10px 12px;
   }
 

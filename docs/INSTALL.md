@@ -66,8 +66,10 @@ two spaces, then the file name.
 
 - The notch starts as a collapsed tab. Hover it and the workspace grows out of
   that tab, or press the shortcut shown in the app.
-- **Esc**, the **Collapse** button, or a click outside closes it again. **Pin**
-  only keeps it open when the pointer leaves.
+- **Esc** or the **Collapse** button closes it again. A click outside closes it
+  only while focus mode is on (the default). Turn focus mode off in
+  **Settings → Notch** and the blur stays off; clicks outside the panel reach
+  the desktop. **Pin** only keeps it open when the pointer leaves.
 - Everything runs locally. Notes are plain Markdown files in the vault folder
   you pick. Spotify tokens are stored on your PC.
 

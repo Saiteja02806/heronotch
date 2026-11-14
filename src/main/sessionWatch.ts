@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { CodingSession, SessionProvider, SessionReplyEvent } from '../shared/types'
+import { codexRolloutMatches } from './sessionDelivery'
 
 /**
  * After a message is handed to a local agent, watch that session until a new
@@ -384,7 +385,7 @@ async function codexRollouts(sessionsDir: string, rawId: string): Promise<string
     entries = []
   }
   const files = entries
-    .filter((entry) => entry.endsWith('.jsonl') && entry.includes(rawId))
+    .filter((entry) => codexRolloutMatches(entry, rawId))
     .map((entry) => path.join(sessionsDir, entry))
   rolloutFiles.set(`${sessionsDir}:${rawId}`, files)
   return files

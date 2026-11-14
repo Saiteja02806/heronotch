@@ -142,6 +142,7 @@ async function confirmAntiGravity(rawId: string, text: string): Promise<Delivery
       rawId,
       text,
       ['messages', 'message', 'conversation_messages', 'steps', 'conversation_summaries'],
+      true,
       true
     )
     if (report.check === 'confirmed') return report
@@ -161,7 +162,8 @@ async function confirmInSqlite(
   rawId: string,
   text: string,
   preferredTables: string[],
-  onlyPreferred: boolean
+  onlyPreferred: boolean,
+  requireUserRole = false
 ): Promise<DeliveryReport> {
   let db: DatabaseSync
   try {
@@ -203,7 +205,7 @@ async function confirmInSqlite(
       } catch {
         continue
       }
-      if (rows.some((row) => rowHasUserText(row, text))) return { check: 'confirmed' }
+      if (rows.some((row) => rowHasUserText(row, text, requireUserRole))) return { check: 'confirmed' }
     }
     if (!searched) {
       return { check: 'unavailable', reason: 'The session database has no readable message table.' }
@@ -223,9 +225,13 @@ async function confirmInSqlite(
   }
 }
 
-function rowHasUserText(row: Record<string, unknown>, text: string): boolean {
+function rowHasUserText(row: Record<string, unknown>, text: string, requireUserRole: boolean): boolean {
   for (const value of Object.values(row)) {
     if (typeof value !== 'string' || !value.includes(text)) continue
+    if (requireUserRole) {
+      if (valueHasUserRole(value, text)) return true
+      continue
+    }
     if (value.trim() === text) return true
     try {
       const parsed = JSON.parse(value) as { type?: string; role?: string; text?: string }
@@ -243,13 +249,53 @@ function rowHasUserText(row: Record<string, unknown>, text: string): boolean {
   return false
 }
 
+/** Anti Gravity stores plain columns that mention the text without it being the user's turn. */
+function valueHasUserRole(value: string, text: string, depth = 0): boolean {
+  if (depth > 8 || !value.includes(text)) return false
+  const trimmed = value.trim()
+  if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && trimmed.length < 2_000_000) {
+    try {
+      return jsonHasUserRole(JSON.parse(trimmed) as unknown, text, depth + 1)
+    } catch {
+      // Not JSON. A user role still has to be visible in the text.
+    }
+  }
+  return /"role"\s*:\s*"user"/i.test(value)
+}
+
+function jsonHasUserRole(value: unknown, text: string, depth: number): boolean {
+  if (depth > 8 || value == null) return false
+  if (typeof value === 'string') return valueHasUserRole(value, text, depth)
+  if (Array.isArray(value)) return value.some((item) => jsonHasUserRole(item, text, depth + 1))
+  if (typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  const role = String(record.role || record.author || record.sender || '').toLowerCase()
+  const isUser = role === 'user' || role === 'human'
+  if (isUser) {
+    for (const key of ['text', 'content', 'message', 'body', 'part']) {
+      const item = record[key]
+      if (typeof item === 'string' && item.includes(text)) return true
+      if (item && typeof item === 'object' && JSON.stringify(item).includes(text)) return true
+    }
+  }
+  return Object.values(record).some((item) => jsonHasUserRole(item, text, depth + 1))
+}
+
+/** The thread id is the rollout filename suffix, not a substring of a longer id. */
+export function codexRolloutMatches(fileName: string, rawId: string): boolean {
+  if (!rawId || !fileName.endsWith('.jsonl')) return false
+  const base = fileName.split(/[\\/]/).pop() || fileName
+  const stem = base.slice(0, -'.jsonl'.length)
+  return stem === rawId || stem.endsWith(`-${rawId}`) || stem.endsWith(`_${rawId}`)
+}
+
 async function codexRollouts(rawId: string): Promise<string[]> {
   const root = path.join(os.homedir(), '.codex', 'sessions')
   try {
     const entries = await fs.readdir(root, { recursive: true })
     return entries
       .map((entry) => String(entry))
-      .filter((entry) => entry.endsWith('.jsonl') && entry.includes(rawId))
+      .filter((entry) => codexRolloutMatches(entry, rawId))
       .map((entry) => path.join(root, entry))
   } catch {
     return []

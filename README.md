@@ -2,12 +2,12 @@
 
 A personal dashboard that lives at the top of your screen — built for Windows with Electron, React and TypeScript.
 
-Hover the collapsed tab and the workspace grows out of it: your notes folder, Spotify controls, a focus timer, live coding sessions, a private posture coach, tasks, calendar reminders, and the settings that make it yours. The notch always starts tucked away. Use the **Collapse** button at the top right (or `Esc`, or click the blurred backdrop) and it shrinks back into that tab.
+Hover the collapsed tab and the workspace grows out of it: your notes folder, Spotify controls, a focus timer, live coding sessions, a private posture coach, tasks, calendar reminders, and the settings that make it yours. The notch always starts tucked away. Use the **Collapse** button at the top right or press `Esc` and it shrinks back into that tab. With focus mode on, clicking the blurred backdrop closes it too.
 
 ## What it does
 
-- **Focus mode** — when the notch opens, the primary display is covered by a blurred, dimmed snapshot of your current desktop. The notch stays sharp on top. Click anywhere on the blurred area (or press `Esc`) to close it and return to the desktop.
-- **Notch-first interaction** — a plain black notch tab sits on the screen edge, empty like a hardware notch; a tiny play indicator appears only while music runs. Hover it, click it, or press `Ctrl Shift Space` and the workspace grows out of the tab. It starts collapsed and uses a full-screen focus layer while open. **Pin** keeps it open when the pointer leaves; Collapse, `Esc`, and clicking outside still close it. Place the tab anywhere on the screen from **Settings → Notch → Placement**. The open workspace stays along the top edge, lined up with the tab.
+- **Focus mode** — on by default. When the notch opens, the primary display is covered by a blurred, dimmed snapshot of your current desktop. The notch stays sharp on top. Click anywhere on the blurred area (or press `Esc`) to close it and return to the desktop. Turn it off in **Settings → Notch** and the blur stays off: the panel stands alone, and clicks outside it go to the window underneath instead of closing the notch.
+- **Notch-first interaction** — a plain black notch tab sits on the screen edge, empty like a hardware notch; a tiny play indicator appears only while music runs. Hover it, click it, or press `Ctrl Shift Space` and the workspace grows out of the tab. It starts collapsed. **Pin** keeps it open when the pointer leaves. Collapse and `Esc` always close it. Clicking outside closes it only while focus mode is on. Place the tab anywhere on the screen from **Settings → Notch → Placement**. The open workspace stays along the top edge, lined up with the tab.
 - **Obsidian, directly** — choose any local vault. Browse every folder and file, search by name or content, read, create, rename, rewrite, and move notes to the trash. Edits auto-save after 750ms, with a Markdown preview and one-click "open in Obsidian". No plugin, no sync account.
 - **Spotify, with no setup for the basics** — if Spotify Desktop is open, Notch controls it through the Windows media session: current track, play/pause, previous/next and seek work immediately. A full optional Spotify Web API connection adds **next track**, the queue, volume, shuffle and repeat. Uses PKCE, so no client secret is stored.
 - **Focus timer** — Focus / Short / Long presets with customizable lengths, a breathing coral timer disc, paused/running state that survives restarts, completed-session logging, and a system notification when a session ends.
@@ -117,13 +117,13 @@ break it.
 | Action | Shortcut |
 | --- | --- |
 | Toggle the notch | `Ctrl` + `Shift` + `Space` |
-| Collapse / close | `Esc`, the **Collapse** button, or click outside |
+| Collapse / close | `Esc` or the **Collapse** button. Click outside closes it only while focus mode is on |
 | Switch sections | `1` – `7` |
 | Open notes search | `Ctrl` + `K` inside Notes |
 | Save note now | `Ctrl` + `S` |
 | Bold / italic in the note editor | `Ctrl` + `B` / `Ctrl` + `I` |
 
-The notch always launches collapsed. By default it opens on hover after the delay set in **Settings → Notch** (140ms by default); switch **Open with** to **Click** if you would rather it only opens when you click the tab. Opening grows the workspace out of the tab; closing shrinks it back. While open, it covers the primary display with a blurred snapshot of the desktop so your attention lands on the notch. Click the blurred area, use the **Collapse** button in the header, or press `Esc` to close it. Pin only stops the pointer-leave close. `Esc` works even when the notch never took focus, which is the normal case for a hover-open. The notch background is refreshed while collapsed, so the blur reflects the desktop you were just using.
+The notch always launches collapsed. By default it opens on hover after the delay set in **Settings → Notch** (140ms by default); switch **Open with** to **Click** if you would rather it only opens when you click the tab. Opening grows the workspace out of the tab; closing shrinks it back. Focus mode is on by default: while open, the notch covers the primary display with a blurred snapshot of the desktop. Click the blurred area, use the **Collapse** button in the header, or press `Esc` to close it. Turn focus mode off and there is no blur; clicks outside the panel reach the desktop, and you close with **Collapse**, `Esc`, or by moving the pointer away. Pin only stops the pointer-leave close. `Esc` works even when the notch never took focus, which is the normal case for a hover-open. The snapshot is refreshed while collapsed, so the blur reflects the desktop you were just using when focus mode is on.
 
 Right-click the system tray icon for **Open**, **Collapse**, and **Quit**. Quit from Settings or the tray when you want to stop the app.
 
@@ -270,7 +270,7 @@ src/
 ## Known limits
 
 - The notch is a frameless always-on-top window, not a macOS hardware cutout. It docks to the primary display; multi-monitor blur overlays are not exposed yet.
-- The focus backdrop is a local screen snapshot taken while the notch is collapsed (via the built-in Windows screenshot API). If screen capture is unavailable or blocked by policy, the notch falls back to a dark translucent focus layer. The snapshot never leaves the machine.
+- Focus mode is on by default and can be turned off. While it is on, the backdrop is a local screen snapshot taken while the notch is collapsed (via the built-in Windows screenshot API). If screen capture is unavailable or blocked by policy, the notch falls back to a dark translucent layer. The snapshot never leaves the machine. While focus mode is off there is no blur, and clicks outside the panel reach the desktop.
 - Obsidian is accessed as plain Markdown files. Canvas files can be listed/renamed but not edited in the notch editor.
 - Text editing targets Markdown and `.txt`; attachments open externally.
 - Hover expansion depends on the window having a small visible surface at the top. Full-screen exclusive games may hide or fight with always-on-top windows.
@@ -279,7 +279,7 @@ src/
 - Sending a message starts the provider's own local CLI process. It does not bypass that provider's approval policy or sandbox. Anti Gravity messaging needs its language server running; Codex/OpenCode messaging needs their CLI/auth available.
 - Basic Spotify control needs Spotify Desktop open and uses the Windows media session. Queue / next track / volume / shuffle / repeat require the optional Web API connection; the local session does not expose the queue.
 - The posture model downloads on first enable, so that one action needs an internet connection. Detection afterwards is local. Camera quality, lighting and framing affect the score. The camera LED is hardware-controlled and cannot be turned off while streaming; the coach runs continuously while enabled, so turn it off to release the camera.
-- The focus backdrop is a snapshot of the primary display taken while the notch is collapsed. If desktop capture is unavailable, it falls back to a dark gradient; other monitors are not blurred.
+- Other monitors are not blurred. The snapshot, when focus mode is on, is only the primary display.
 
 ## License
 
