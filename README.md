@@ -13,7 +13,7 @@ Hover the top-center notch and it unfolds into a full workspace: your Obsidian v
 - **Focus timer** — Focus / Short / Long presets with customizable lengths, a breathing coral timer disc, paused/running state that survives restarts, completed-session logging, and a system notification when a session ends.
 - **Coding sessions, with a reply box** — reads the local session state of **Codex**, **OpenCode** and **Anti Gravity**, plus their running processes. See live turns, recent conversations, models/tokens, and open a session's project from the notch. Click **Message** on a session to send a follow-up without switching apps. Provider logos make each session instantly identifiable. The board has search, hides subagent noise by default, and the dashboard gets a live session card.
 - **Posture coach** — an always-on local webcam posture score from 0 to 100, adaptive seat setup, slouch alerts, daily good/bad posture totals, and a clear on/off switch. While enabled it keeps watching even when the notch is collapsed. Frames are processed on-device and never stored or uploaded.
-- **Tasks & calendar** — a day planner with month calendar, priorities, times, notes, and reminders (`at time`, `5/10/30/60 min before`). Reminders trigger real Windows notifications and keep the task state in sync.
+- **Tasks & calendar** — a day planner with month calendar, priorities, times, notes, and reminders (`at time`, `5/10/30/60 min before`). Reminders fire a Windows notification and unfold a notice card under the collapsed notch, so they are visible while you work in another app. Setting a reminder confirms itself with an in-app toast.
 - **Personalization** - five accent themes, a live notch preview, your name in the header, hover/click opening, hover delay, a drag-anywhere placement map for the collapsed notch, pin behavior, launch at login, notification control, and keyboard shortcuts.
 - **Fast** — everything is local: `json` state, local Markdown, local session databases, local posture inference, no backend.
 
@@ -212,7 +212,7 @@ The **Posture** tab turns the webcam into a private posture coach. It is **off b
 - Depth and proximity tracking are what catch a forward slouch toward the screen, where head and shoulder x/y position barely changes. Re-run **Test posture setup** once after updating so those signals are matched to your camera and chair.
 - The setup screen shows live coverage for head, shoulders and waist so you know exactly what the camera can see.
 - The slouch threshold, notification toggle and camera mode live in the same panel. A small live ring beside the threshold shows your current score against it.
-- Adjusting the threshold changes when Notch rings. Below the threshold, Notch plays a soft two-note chime and shows a toast; it never rings when nobody is detected in the frame, so an empty chair stays silent.
+- Adjusting the threshold changes when Notch rings. Below the threshold, Notch plays a soft two-note chime and unfolds a notice card under the collapsed notch; it never rings when nobody is detected in the frame, so an empty chair stays silent.
 - Alerts fire after four seconds below the threshold, with a 30-second cool-down.
 - Good vs. slouching time is tracked for the day and resets at midnight.
 - **Always watching while on:** the posture coach runs continuously whenever it is enabled, including while the notch is collapsed and while you use other apps. The camera and the Windows camera indicator stay on for that entire time. Turning the coach off releases the camera and its LED. Windows does not allow software to switch off the LED while the camera is streaming.
@@ -274,7 +274,7 @@ src/
 - Obsidian is accessed as plain Markdown files. Canvas files can be listed/renamed but not edited in the notch editor.
 - Text editing targets Markdown and `.txt`; attachments open externally.
 - Hover expansion depends on the window having a small visible surface at the top. Full-screen exclusive games may hide or fight with always-on-top windows.
-- Reminders require the app to be running and Windows notifications enabled.
+- Reminders require the app to be running and Windows notifications enabled. In the unsigned dev build Windows may suppress or mislabel the system toast, so the in-app notice under the notch is the dependable surface; the notification is still sent when allowed.
 - Coding-session discovery is Windows-focused and depends on the private local databases and CLIs of each tool. If a provider changes its schema or command shape, that provider simply shows no sessions or reports the send error until support is updated. Session lists still work if process detection is unavailable.
 - Sending a message starts the provider's own local CLI process. It does not bypass that provider's approval policy or sandbox. Anti Gravity messaging needs its language server running; Codex/OpenCode messaging needs their CLI/auth available.
 - Basic Spotify control needs Spotify Desktop open and uses the Windows media session. Queue / next track / volume / shuffle / repeat require the optional Web API connection; the local session does not expose the queue.

@@ -158,7 +158,11 @@ export function SettingsPage() {
           spotifyRedirectPort: cleanPort
         }
       })
-      showToast('Spotify settings saved', 'You can connect whenever you are ready.', 'success')
+      showToast(
+      'Spotify settings saved',
+      status?.connected ? 'App credentials are up to date.' : 'You can connect whenever you are ready.',
+      'success'
+    )
     } catch (error) {
       showToast('Could not save', error instanceof Error ? error.message : 'Try again.', 'error')
     } finally {

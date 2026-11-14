@@ -49,7 +49,7 @@ function TaskEditor({
   editor: EditorState | null
   onClose: () => void
 }) {
-  const { addTask, patchTask, deleteTask } = useApp()
+  const { addTask, patchTask, deleteTask, showToast } = useApp()
   const task = editor?.task
   const [title, setTitle] = useState(task?.title || '')
   const [notes, setNotes] = useState(task?.notes || '')
@@ -99,6 +99,14 @@ function TaskEditor({
         priority,
         remindAt
       })
+    }
+    if (remindAt && remindAt > Date.now()) {
+      const day = date === todayKey() ? 'Today' : formatDateShort(date)
+      showToast(
+        'Reminder set',
+        `${title.trim()} · ${day} at ${formatTime(remindAt)}`,
+        'success'
+      )
     }
     onClose()
   }

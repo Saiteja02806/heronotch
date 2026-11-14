@@ -3867,6 +3867,11 @@ input[type='range']:focus::-webkit-slider-thumb {
   padding-top: 2px;
 }
 
+.connect-step-ready .step-index {
+  padding-top: 0;
+  color: var(--spotify);
+}
+
 .connect-step > div {
   flex: 1;
   min-width: 0;
@@ -7624,4 +7629,104 @@ input[type='range']:focus::-webkit-slider-thumb {
 
 .live-mirror .lm-line:has(.lm-box.is-checked) {
   color: var(--muted);
+}
+
+/* ----------------------------------------------------------------
+   Collapsed notice (reminders / posture while the notch is closed)
+   ---------------------------------------------------------------- */
+
+.notch-notice {
+  position: absolute;
+  top: calc(var(--collapsed-bar-bottom, 30px) + 8px);
+  left: 50%;
+  z-index: 130;
+  width: min(360px, calc(100vw - 28px));
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 9px 8px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.025)),
+    rgba(11, 12, 13, 0.97);
+  /* The collapsed window is shaped to the tab + this card with a 4px margin.
+     A large blur would be clipped by that shape and show a hard square edge
+     around the rounded card, so the shadow stays inside the margin. */
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    0 1px 2px rgba(0, 0, 0, 0.35);
+  color: var(--ink);
+  cursor: pointer;
+  pointer-events: auto;
+  transform: translateX(-50%);
+  animation: notice-in 180ms ease-out;
+}
+
+.app.is-collapsed .notch-notice {
+  pointer-events: auto;
+}
+
+@keyframes notice-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+.notice-accent {
+  width: 3px;
+  align-self: stretch;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.notice-success .notice-accent {
+  background: var(--spotify);
+}
+
+.notice-error .notice-accent {
+  background: #ff6f61;
+}
+
+.notice-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.notice-copy strong,
+.notice-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notice-copy strong {
+  font-size: 9.5px;
+  font-weight: 560;
+  letter-spacing: -0.01em;
+}
+
+.notice-copy span {
+  font-size: 8px;
+  color: var(--muted-2);
+}
+
+.notice-close {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-2);
+  cursor: pointer;
+}
+
+.notice-close:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
 }

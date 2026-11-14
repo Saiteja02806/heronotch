@@ -16,7 +16,7 @@ import type {
   Task,
   TimerMode
 } from '../../../shared/types'
-import { todayKey, uid } from '../lib/time'
+import { formatDateShort, formatTime, timeToTimestamp, todayKey, uid } from '../lib/time'
 
 export type Page = 'home' | 'notes' | 'music' | 'planner' | 'sessions' | 'posture' | 'settings'
 export type SettingsSection = 'appearance' | 'notch' | 'obsidian' | 'spotify' | 'about'
@@ -133,15 +133,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const offBackdrop = window.notch.onBackdrop((event) => setBackdrop(event.image))
     const offState = window.notch.onStateUpdated((next) => setState(next))
     const offReminder = window.notch.onReminder((event) => {
+      const day = event.date === todayKey() ? 'Today' : formatDateShort(event.date)
+      const at = timeToTimestamp(event.date, event.time)
+      const id = uid()
       setToasts((current) => [
         ...current,
         {
-          id: uid(),
+          id,
           title: `Reminder · ${event.title}`,
-          message: event.time ? `${event.date} at ${event.time}` : event.date,
+          message: at ? `${day} at ${formatTime(at)}` : day,
           tone: 'default'
         }
       ])
+      // Reminders arrive while you are in another app, so the notice lingers
+      // longer than a normal toast before folding away.
+      setTimeout(() => {
+        setToasts((current) => current.filter((toast) => toast.id !== id))
+      }, 12000)
     })
     const offVault = window.notch.onVaultChanged(() => setVaultRevision((value) => value + 1))
     const offNavigate = window.notch.onNavigate((target) => {

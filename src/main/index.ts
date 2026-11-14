@@ -42,6 +42,13 @@ const COLLAPSED_SIZES: Record<NotchStyle, { width: number; height: number }> = {
 const EXPANDED_WIDTH = 1160
 const EXPANDED_HEIGHT = 632
 
+// The collapsed window keeps some extra room below the tab so a reminder or
+// posture notice can unfold without resizing the window (which would flicker
+// and re-run the layout). Everything outside the shaped region is click-through,
+// so this footprint is invisible and untouchable.
+const COLLAPSED_NOTICE_WIDTH = 460
+const COLLAPSED_NOTICE_HEIGHT = 132
+
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let expanded = false
@@ -105,8 +112,14 @@ function boundsFor(isExpanded: boolean): Electron.Rectangle {
   }
   const workArea = display.workArea
   const size = COLLAPSED_SIZES[state.settings.notchStyle] || COLLAPSED_SIZES.minimal
-  const width = Math.min(size.width, workArea.width)
-  const height = Math.min(size.height, workArea.height)
+  const width = Math.min(
+    Math.max(size.width, COLLAPSED_NOTICE_WIDTH),
+    workArea.width
+  )
+  const height = Math.min(
+    Math.max(size.height, COLLAPSED_NOTICE_HEIGHT),
+    workArea.height
+  )
   const saved = state.settings.notchPosition || { x: 0.5, y: 0 }
   const anchorX = Math.min(1, Math.max(0, Number(saved.x) || 0))
   const anchorY = Math.min(1, Math.max(0, Number(saved.y) || 0))

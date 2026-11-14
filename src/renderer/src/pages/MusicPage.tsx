@@ -117,39 +117,49 @@ function ConnectSpotify() {
       </div>
 
       <div className="connect-steps">
-        <div className="connect-step">
-          <span className="step-index">01</span>
-          <div>
-            <strong>Create a Spotify app</strong>
-            <p>Open the developer dashboard and create an app. Any name works.</p>
+        {hasClientId ? (
+          <div className="connect-step connect-step-ready">
+            <span className="step-index"><CheckCircle2 size={14} /></span>
+            <div>
+              <strong>Client ID saved</strong>
+              <p>
+                Everything is set. Press <em>Connect Spotify</em> above and approve the sign-in in
+                your browser — the notch keeps the session refreshed from then on.
+              </p>
+            </div>
           </div>
-        </div>
-        <div className="connect-step">
-          <span className="step-index">02</span>
-          <div>
-            <strong>Add this redirect URI</strong>
-            <button className="redirect-uri" onClick={copy}>
-              <code>{redirectUri}</code>
-              {copied ? <CheckCircle2 size={13} /> : <Copy size={13} />}
-            </button>
-            <p>Paste it into the app’s Redirect URIs, exactly as written, then save.</p>
-          </div>
-        </div>
-        <div className="connect-step">
-          <span className="step-index">03</span>
-          <div>
-            <strong>Paste the Client ID</strong>
-            <p>
-              Add it in Settings. Connect once, and the notch keeps the session refreshed.
-              {state.settings.spotifyClientId ? ' Client ID is set.' : ''}
-            </p>
-            {!hasClientId && (
-              <button className="link-button" onClick={() => openSettings('spotify')}>
-                Go to Spotify settings <ArrowUpRight size={11} />
-              </button>
-            )}
-          </div>
-        </div>
+        ) : (
+          <>
+            <div className="connect-step">
+              <span className="step-index">01</span>
+              <div>
+                <strong>Create a Spotify app</strong>
+                <p>Open the developer dashboard and create an app. Any name works.</p>
+              </div>
+            </div>
+            <div className="connect-step">
+              <span className="step-index">02</span>
+              <div>
+                <strong>Add this redirect URI</strong>
+                <button className="redirect-uri" onClick={copy}>
+                  <code>{redirectUri}</code>
+                  {copied ? <CheckCircle2 size={13} /> : <Copy size={13} />}
+                </button>
+                <p>Paste it into the app’s Redirect URIs, exactly as written, then save.</p>
+              </div>
+            </div>
+            <div className="connect-step">
+              <span className="step-index">03</span>
+              <div>
+                <strong>Paste the Client ID</strong>
+                <p>Add it in Settings, then come back here to connect.</p>
+                <button className="link-button" onClick={() => openSettings('spotify')}>
+                  Go to Spotify settings <ArrowUpRight size={11} />
+                </button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   )
@@ -320,18 +330,23 @@ export function MusicPage() {
         ) : (
           <div className="player-empty">
             <div className="player-empty-icon"><Music2 size={30} /></div>
-            <h2>Start something on Spotify.</h2>
+            <h2>{apiConnected ? 'Nothing playing right now.' : 'Start something on Spotify.'}</h2>
             <p>
-              Open Spotify on any device, press play, then come back. Notch will pick up the
-              session automatically.
+              {apiConnected
+                ? `Spotify is connected${
+                    status.profile?.name ? ` as ${status.profile.name}` : ''
+                  }. Press play on any device and the track will appear here.`
+                : 'Open Spotify on this computer and press play. Notch reads the Windows media session, so there is nothing to set up.'}
             </p>
             <div>
               <button className="primary-button" onClick={() => window.notch.openExternal('https://open.spotify.com')}>
                 <ExternalLink size={14} /> Open Spotify
               </button>
-              <button className="soft-button" onClick={() => openSettings('spotify')}>
-                <SlidersHorizontal size={13} /> Settings
-              </button>
+              {!apiConnected && (
+                <button className="soft-button" onClick={() => openSettings('spotify')}>
+                  <SlidersHorizontal size={13} /> Settings
+                </button>
+              )}
             </div>
             {playback === null && (
               <span className="player-hint">Waiting for playback data…</span>

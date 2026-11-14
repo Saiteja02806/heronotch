@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { useEffect, useRef, type CSSProperties } from 'react'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { CollapsedBar } from './components/CollapsedBar'
+import { CollapsedNotice } from './components/CollapsedNotice'
 import { Footer } from './components/Footer'
 import { Header } from './components/Header'
 import { Toasts } from './components/Toasts'
@@ -28,7 +29,7 @@ const PAGE_KEYS: Record<string, Page> = {
 }
 
 function Shell() {
-  const { state, expanded, backdrop, setExpanded, pinned, page, setPage } = useApp()
+  const { state, expanded, backdrop, setExpanded, pinned, page, setPage, toasts } = useApp()
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pointerInside = useRef(false)
@@ -103,26 +104,40 @@ function Shell() {
     const report = (): void => {
       const bar = document.querySelector('.collapsed-bar')
       if (!(bar instanceof HTMLElement)) return
-      const rect = bar.getBoundingClientRect()
-      const x = Math.max(0, Math.round(rect.x - 4))
-      const y = Math.max(0, Math.round(rect.y - 4))
+      const notice = document.querySelector('.notch-notice')
+      const rects = [bar, notice]
+        .filter((element): element is HTMLElement => element instanceof HTMLElement)
+        .map((element) => element.getBoundingClientRect())
+      const barRect = bar.getBoundingClientRect()
+      document.documentElement.style.setProperty(
+        '--collapsed-bar-bottom',
+        `${Math.round(barRect.bottom)}px`
+      )
+      const left = Math.min(...rects.map((rect) => rect.left))
+      const top = Math.min(...rects.map((rect) => rect.top))
+      const right = Math.max(...rects.map((rect) => rect.right))
+      const bottom = Math.max(...rects.map((rect) => rect.bottom))
+      const x = Math.max(0, Math.round(left - 4))
+      const y = Math.max(0, Math.round(top - 4))
       window.notch.setShape({
         x,
         y,
-        width: Math.max(1, Math.min(window.innerWidth, Math.round(rect.x + rect.width + 4)) - x),
-        height: Math.max(1, Math.round(rect.y + rect.height + 4) - y)
+        width: Math.max(1, Math.round(right + 4) - x),
+        height: Math.max(1, Math.round(bottom + 4) - y)
       })
     }
     report()
     const observer = new ResizeObserver(report)
     const bar = document.querySelector('.collapsed-bar')
+    const notice = document.querySelector('.notch-notice')
     if (bar) observer.observe(bar)
+    if (notice) observer.observe(notice)
     window.addEventListener('resize', report)
     return () => {
       observer.disconnect()
       window.removeEventListener('resize', report)
     }
-  }, [expanded, state.settings.notchStyle])
+  }, [expanded, state.settings.notchStyle, toasts])
 
   const armExpand = (): void => {
     if (state.settings.openTrigger === 'click') return
@@ -238,7 +253,7 @@ function Shell() {
       ) : (
         <CollapsedBar onOpen={openImmediately} />
       )}
-      <Toasts />
+      {expanded ? <Toasts /> : <CollapsedNotice onOpen={openImmediately} />}
     </div>
   )
 }

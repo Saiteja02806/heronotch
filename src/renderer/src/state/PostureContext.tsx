@@ -645,6 +645,11 @@ export function PostureProvider({ children }: { children: ReactNode }) {
                         lastAlertRef.current = Date.now()
                         badSinceRef.current = now
                         playPostureRing()
+                        showToast(
+                          'Posture check',
+                          displayMetrics.advice || 'Sit tall and relax your shoulders.',
+                          'default'
+                        )
                         window.notch.notify(
                           'Posture check',
                           displayMetrics.advice || 'Sit tall and relax your shoulders.',
