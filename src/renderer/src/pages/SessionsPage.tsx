@@ -21,7 +21,7 @@ const SENDABLE = new Set(['codex', 'opencode', 'antigravity'])
 type DeliveryPhase = 'idle' | 'sending' | 'delivered' | 'unconfirmed' | 'failed'
 
 export function SessionsPage() {
-  const { sessions, sessionsLoading, refreshSessions, showToast, now } = useApp()
+  const { sessions, sessionsLoading, refreshSessions, showToast, now, repliedSessionId } = useApp()
   const [query, setQuery] = useState('')
   const [showSubagents, setShowSubagents] = useState(false)
   const [composer, setComposer] = useState<CodingSession | null>(null)
@@ -302,6 +302,7 @@ export function SessionsPage() {
         phase={open ? phase : 'idle'}
         note={open ? sendNote : null}
         errorCode={open ? sendErrorCode : null}
+        replied={repliedSessionId === session.id}
         onMessage={() => openComposer(session)}
         onOpen={() => void openProject(session.directory)}
         onDraft={(value) => {
@@ -328,6 +329,7 @@ function SessionRow({
   phase,
   note,
   errorCode,
+  replied,
   onMessage,
   onOpen,
   onDraft,
@@ -342,6 +344,7 @@ function SessionRow({
   phase: DeliveryPhase
   note: string | null
   errorCode: string | null
+  replied: boolean
   onMessage: () => void
   onOpen: () => void
   onDraft: (value: string) => void
@@ -359,7 +362,11 @@ function SessionRow({
     inputRef.current?.closest('.session-row')?.scrollIntoView({ block: 'nearest' })
   }, [open])
   return (
-    <div className={`session-row ${session.active ? 'is-live' : ''} ${open ? 'is-composing' : ''}`}>
+    <div
+      className={`session-row ${session.active ? 'is-live' : ''} ${open ? 'is-composing' : ''} ${
+        replied ? 'is-replied' : ''
+      }`}
+    >
       <div className="session-row-main">
         <SessionBadge provider={session.provider} size={30} />
         <button className="session-row-copy" onClick={canSend ? onMessage : onOpen}>

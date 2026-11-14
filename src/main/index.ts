@@ -560,7 +560,7 @@ function createWindow(): void {
           .filter((value) => Number.isFinite(value) && value >= 0)
         const wantClose = process.env.NOTCH_CAPTURE_CLOSE === '1'
         const expandedShot = process.env.NOTCH_CAPTURE_EXPANDED !== '0'
-        if (expandedShot || frames.length > 0) await setExpanded(true)
+        if (expandedShot) await setExpanded(true)
         const writeShot = async (file: string): Promise<void> => {
           if (!mainWindow || mainWindow.isDestroyed()) return
           const image = await mainWindow.webContents.capturePage()
@@ -583,7 +583,8 @@ function createWindow(): void {
           if (process.env.NOTCH_CAPTURE_JS && mainWindow) {
             const jsResult = await mainWindow.webContents.executeJavaScript(process.env.NOTCH_CAPTURE_JS)
             if (jsResult !== undefined) console.log('CAPTURE_JS:', JSON.stringify(jsResult))
-            await new Promise((resolve) => setTimeout(resolve, 650))
+            const jsSettle = Number(process.env.NOTCH_CAPTURE_JS_SETTLE ?? 650)
+            if (jsSettle > 0) await new Promise((resolve) => setTimeout(resolve, jsSettle))
           }
           const closeOnly = process.env.NOTCH_CAPTURE_CLOSE_ONLY === '1'
           if (frames.length > 0 && !closeOnly) {
@@ -1133,6 +1134,9 @@ if (!gotLock) {
     logLine(`window created bounds=${JSON.stringify(mainWindow?.getBounds())} tray=${Boolean(tray)}`)
     sessions.sessionSendEvents.on('result', (result) => {
       mainWindow?.webContents.send('session:send-result', result)
+    })
+    sessions.sessionReplyEvents.on('reply', (event) => {
+      mainWindow?.webContents.send('session:reply', event)
     })
     backdrop.scheduleBackdropRefresh()
     setInterval(() => {

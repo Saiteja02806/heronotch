@@ -4,6 +4,7 @@ import type { NotchMetrics } from '../../shared/types'
 import { dockedPanelLeft, dockedPanelSize } from '../../shared/notchLayout'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { CollapsedBar } from './components/CollapsedBar'
+import { EdgeGlow } from './components/EdgeGlow'
 import { CollapsedNotice } from './components/CollapsedNotice'
 import { CompactSlotProvider } from './components/CompactSlot'
 import { Footer } from './components/Footer'
@@ -77,7 +78,8 @@ function flightBox(
 }
 
 function Shell() {
-  const { state, expanded, backdrop, viewport, setExpanded, pinned, page, setPage, toasts, openSettings } = useApp()
+  const { state, expanded, backdrop, viewport, setExpanded, pinned, page, setPage, toasts, openSettings, glowTick } =
+    useApp()
   const compact = state.settings.panelSize === 'compact'
   const focusMode = state.settings.focusMode !== false
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -490,6 +492,7 @@ function Shell() {
               <Footer />
             </CompactSlotProvider>
           </motion.div>
+          <EdgeGlow tick={glowTick} ready={settled && !closing} />
         </motion.div>
       ) : (
         <CollapsedBar onOpen={openImmediately} />

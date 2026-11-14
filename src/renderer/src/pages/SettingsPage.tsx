@@ -580,7 +580,7 @@ export function SettingsPage() {
                   checked={state.settings.notifications}
                   onChange={(value) => updateSettings({ notifications: value })}
                   label="Reminder notifications"
-                  description="System alerts for tasks and completed focus sessions."
+                  description="Notch notices for reminders, and Windows alerts for reminders, finished focus sessions, and posture nudges."
                 />
                 <Toggle
                   checked={state.settings.timerNotifications ?? true}

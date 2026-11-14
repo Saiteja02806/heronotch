@@ -171,6 +171,15 @@ export interface SessionSendResult {
   code?: string
 }
 
+export interface SessionReplyEvent {
+  sessionId: string
+  provider: SessionProvider
+  label: string
+  title: string
+  /** assistant: a new assistant turn was read. summary: Anti Gravity only reported the turn finished. */
+  evidence: 'assistant' | 'summary'
+}
+
 export interface VaultNode {
   name: string
   path: string
@@ -342,5 +351,6 @@ export interface NotchApi {
     ) => Promise<{ ok: boolean; pending?: boolean; error?: string; code?: string }>
     focusCodex: () => Promise<boolean>
     onSendResult: (callback: (result: SessionSendResult) => void) => () => void
+    onReply: (callback: (event: SessionReplyEvent) => void) => () => void
   }
 }

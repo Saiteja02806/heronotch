@@ -15,6 +15,7 @@ import type {
   SessionsSnapshot
 } from '../shared/types'
 import { confirmDeliveredMessage } from './sessionDelivery'
+import { armReplyWatch, discardReplyWatch, noteReplyCliExited, prepareReplyWatch } from './sessionWatch'
 
 const PROVIDER_LABELS: Record<SessionProvider, string> = {
   codex: 'Codex',
@@ -32,6 +33,7 @@ let lastDirectories = new Set<string>()
 let lastSessions = new Map<string, CodingSession>()
 const runningSends = new Map<string, ChildProcess>()
 export const sessionSendEvents = new EventEmitter()
+export { sessionReplyEvents } from './sessionWatch'
 
 interface ProcessInfo {
   Id: number
@@ -682,6 +684,7 @@ export async function sendSessionMessage(
   }
 
   let child: ChildProcess
+  prepareReplyWatch(session)
   try {
     child = spawn(command, args, {
       cwd: session.directory || os.homedir(),
@@ -690,11 +693,13 @@ export async function sendSessionMessage(
       stdio: ['ignore', 'pipe', 'pipe']
     })
   } catch (error) {
+    discardReplyWatch(session.id)
     return {
       ok: false,
       error: error instanceof Error ? error.message : 'Could not start the agent command.'
     }
   }
+  armReplyWatch(session)
 
   runningSends.set(sessionId, child)
   let output = ''
@@ -724,8 +729,12 @@ export async function sendSessionMessage(
   child.stderr?.on('data', (chunk: Buffer) => {
     output = `${output}${chunk.toString('utf8')}`.slice(-3000)
   })
-  child.on('error', (error) => finish('failed', error.message))
+  child.on('error', (error) => {
+    noteReplyCliExited(sessionId, 1)
+    finish('failed', error.message)
+  })
   child.on('exit', (code) => {
+    noteReplyCliExited(sessionId, code)
     if (code === 0) {
       void confirmDeliveredMessage(session.provider, session.rawId, message).then((report) => {
         if (report.check === 'confirmed') {

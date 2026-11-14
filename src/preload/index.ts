@@ -5,6 +5,7 @@ import type {
   NotchMetrics,
   NoteSearchResult,
   ReminderEvent,
+  SessionReplyEvent,
   SessionSendResult,
   SessionsSnapshot,
   SpotifyAction,
@@ -91,7 +92,8 @@ const api: NotchApi = {
         code?: string
       }>,
     focusCodex: () => ipcRenderer.invoke('sessions:focus-codex') as Promise<boolean>,
-    onSendResult: (callback) => subscribe<SessionSendResult>('session:send-result', callback)
+    onSendResult: (callback) => subscribe<SessionSendResult>('session:send-result', callback),
+    onReply: (callback) => subscribe<SessionReplyEvent>('session:reply', callback)
   }
 }
 

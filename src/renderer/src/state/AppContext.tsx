@@ -81,6 +81,8 @@ interface AppContextValue {
   sessions: SessionsSnapshot | null
   sessionsLoading: boolean
   refreshSessions: () => Promise<void>
+  glowTick: number
+  repliedSessionId: string | null
 }
 
 const AppContext = createContext<AppContextValue | null>(null)
@@ -109,6 +111,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [plannerDate, setPlannerDate] = useState<string>(todayKey())
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance')
   const [toasts, setToasts] = useState<ToastItem[]>([])
+  const [glowTick, setGlowTick] = useState(0)
+  const [repliedSessionId, setRepliedSessionId] = useState<string | null>(null)
+  const notificationsOn = useRef(true)
+  notificationsOn.current = !state || state.settings.notifications !== false
   const [now, setNow] = useState(Date.now())
   const [vaultRevision, setVaultRevision] = useState(0)
   const [sessions, setSessions] = useState<SessionsSnapshot | null>(null)
@@ -148,9 +154,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const offBackdrop = window.notch.onBackdrop((event) => setBackdrop(event.image))
     const offState = window.notch.onStateUpdated((next) => setState(next))
     const offReminder = window.notch.onReminder((event) => {
+      if (!notificationsOn.current) return
       const day = event.date === todayKey() ? 'Today' : formatDateShort(event.date)
       const at = timeToTimestamp(event.date, event.time)
       const id = uid()
+      setGlowTick((value) => value + 1)
       setToasts((current) => [
         ...current,
         {
@@ -262,6 +270,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const showToast = useCallback(
     (title: string, message?: string, tone: ToastItem['tone'] = 'default') => {
       const id = uid()
+      setGlowTick((value) => value + 1)
       setToasts((current) => [...current.slice(-2), { id, title, message, tone }])
       setTimeout(() => {
         setToasts((current) => current.filter((toast) => toast.id !== id))
@@ -273,6 +282,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const dismissToast = useCallback((id: string) => {
     setToasts((current) => current.filter((toast) => toast.id !== id))
   }, [])
+
+  useEffect(() => {
+    return window.notch.sessions.onReply((event) => {
+      showToast(`${event.label} replied: ${event.title}`)
+      setRepliedSessionId(event.sessionId)
+      window.setTimeout(() => {
+        setRepliedSessionId((current) => (current === event.sessionId ? null : current))
+      }, 22000)
+    })
+  }, [showToast])
 
   useEffect(() => {
     return window.notch.sessions.onSendResult((result) => {
@@ -428,7 +447,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const completed = current.mode === 'focus'
     const label = current.mode === 'focus' ? 'Focus session complete' : 'Break is over'
     if (state.settings?.timerNotifications !== false) {
-      window.notch.notify(label, completed ? `${minutes} minutes of focus logged.` : 'Ready for another round?')
+      window.notch.notify(
+        label,
+        completed ? `${minutes} minutes of focus logged.` : 'Ready for another round?',
+        true
+      )
       showToast(label, completed ? `${minutes} focused minutes logged.` : 'Time to stretch.', 'success')
       playChime()
     }
@@ -585,7 +608,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     vaultRevision,
     sessions,
     sessionsLoading,
-    refreshSessions
+    refreshSessions,
+    glowTick,
+    repliedSessionId
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>
