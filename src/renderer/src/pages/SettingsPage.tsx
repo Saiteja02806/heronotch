@@ -29,6 +29,7 @@ import {
   type PointerEvent as ReactPointerEvent
 } from 'react'
 import type { Accent, NotchPosition, NotchStyle } from '../../../shared/types'
+import { placementPreview } from '../../../shared/notchLayout'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
 import { useVaultPicker } from '../hooks/useVaultPicker'
@@ -119,6 +120,8 @@ export function SettingsPage() {
     state.settings.notchPosition || { x: 0.5, y: 0 }
   )
   const [draggingPlacement, setDraggingPlacement] = useState(false)
+  const preview = placementPreview(state.settings.notchStyle)
+  const previewCenter = `calc(${position.x} * (100% - ${preview.width}px) + ${preview.width / 2}px)`
   const [focusMin, setFocusMin] = useState(String(state.timer.durations.focus))
   const [shortMin, setShortMin] = useState(String(state.timer.durations.short))
   const [longMin, setLongMin] = useState(String(state.timer.durations.long || 45))
@@ -196,7 +199,7 @@ export function SettingsPage() {
     updateSettings({ notchPosition: next })
     showToast(
       'Notch position saved',
-      `It will open at the ${positionLabel(next).toLowerCase()} of the screen.`,
+      `The tab sits at the ${positionLabel(next).toLowerCase()}. The workspace opens along the top.`,
       'success'
     )
   }
@@ -493,10 +496,18 @@ export function SettingsPage() {
                 >
                   <span className="placement-map-grid" aria-hidden="true" />
                   <span
+                    className="placement-panel-hint"
+                    style={{ left: previewCenter }}
+                    aria-hidden="true"
+                  />
+                  <span
                     className="placement-preview"
                     style={{
-                      left: `calc(${position.x} * (100% - 58px))`,
-                      top: `calc(${position.y} * (100% - 20px))`
+                      left: `calc(${position.x} * (100% - ${preview.width}px))`,
+                      top: `calc(${position.y} * (100% - ${preview.height}px))`,
+                      width: preview.width,
+                      height: preview.height,
+                      borderRadius: preview.radius
                     }}
                   >
                     <i />
@@ -506,7 +517,7 @@ export function SettingsPage() {
                   <span className="placement-map-caption">{positionLabel(position)}</span>
                 </div>
                 <div className="placement-footer">
-                  <span>Saved automatically. The notch reopens in this spot.</span>
+                  <span>The tab sits on this spot. The workspace opens along the top, lined up with the tab.</span>
                   <div className="placement-buttons">
                     <button
                       className="soft-button compact"
@@ -533,7 +544,7 @@ export function SettingsPage() {
                   checked={state.settings.pinOnOpen}
                   onChange={setPinned}
                   label="Keep the notch pinned"
-                  description="Stop it collapsing when the pointer leaves."
+                  description="Stays open when the pointer leaves. Collapse, Esc, and clicking outside still close it."
                 />
                 <Toggle
                   checked={state.settings.launchAtLogin}

@@ -40,6 +40,7 @@ interface AppContextValue {
   dismissToast: (id: string) => void
   expanded: boolean
   backdrop: string | null
+  viewport: { width: number; height: number }
   setExpanded: (value: boolean) => void
   pinned: boolean
   setPinned: (value: boolean) => void
@@ -100,6 +101,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState | null>(null)
   const [expanded, setExpandedState] = useState(false)
   const [backdrop, setBackdrop] = useState<string | null>(null)
+  const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight })
+  const viewportHold = useRef(0)
   const [pinned, setPinnedState] = useState(false)
   const [page, setPage] = useState<Page>('home')
   const [pendingNote, setPendingNote] = useState<string | null>(null)
@@ -123,6 +126,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     let receivedExpandedEvent = false
     const offExpanded = window.notch.onExpanded((event) => {
       receivedExpandedEvent = true
+      if (event.viewport) {
+        viewportHold.current = Date.now()
+        setViewport(event.viewport)
+      }
       setExpandedState(event.expanded)
       if (!event.expanded) {
         setBackdrop(null)
@@ -160,6 +167,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }, 12000)
     })
     const offVault = window.notch.onVaultChanged(() => setVaultRevision((value) => value + 1))
+    const onResize = (): void => {
+      // Ignore the collapsed window, and the resize that races the open event.
+      if (Date.now() - viewportHold.current < 700) return
+      if (window.innerWidth < 640 || window.innerHeight < 400) return
+      setViewport({ width: window.innerWidth, height: window.innerHeight })
+    }
+    window.addEventListener('resize', onResize)
+
     const offNavigate = window.notch.onNavigate((target) => {
       setPage(target as Page)
       setExpandedState(true)
@@ -173,6 +188,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       offReminder()
       offVault()
       offNavigate()
+      window.removeEventListener('resize', onResize)
     }
   }, [])
 
@@ -260,28 +276,34 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     return window.notch.sessions.onSendResult((result) => {
-      if (result.ok) {
-        showToast(
-          `${result.label} finished the message`,
-          'The agent completed this turn. Open its app to see the full response.',
-          'success'
-        )
-      } else {
-        showToast(
-          'Agent message failed',
-          `${result.label}: ${result.error || 'The agent command exited with an error.'}`,
-          'error'
-        )
+      if (result.status === 'delivered') {
+        showToast(`Delivered to ${result.label}`, 'The message is in that session.', 'success')
+        return
       }
+      if (result.status === 'unconfirmed') {
+        showToast(
+          `${result.label} did not confirm delivery`,
+          result.error || 'The command finished, but the message was not found in that session.',
+          'default'
+        )
+        return
+      }
+      showToast(
+        `${result.label} did not deliver`,
+        result.error || 'The agent command failed.',
+        'error'
+      )
     })
   }, [showToast])
 
   const setExpanded = useCallback((value: boolean) => {
     if (!value) {
-      setExpandedState(false)
-      setBackdrop(null)
+      // The shell plays the shrink, then tells the main process to resize.
+      // Clearing expanded here would unmount the panel before it can move.
+      window.dispatchEvent(new Event('notch-request-close'))
+      return
     }
-    void window.notch.setExpanded(value)
+    void window.notch.setExpanded(true)
   }, [])
 
   const setPinned = useCallback(
@@ -530,6 +552,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dismissToast,
     expanded,
     backdrop,
+    viewport,
     setExpanded,
     pinned,
     setPinned,

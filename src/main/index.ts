@@ -18,7 +18,8 @@ import {
 import { execFile, execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { AppState, AppStatePatch, NotchStyle } from '../shared/types'
+import type { AppState, AppStatePatch, NotchMetrics } from '../shared/types'
+import { collapsedLayout } from '../shared/notchLayout'
 import * as backdrop from './backdrop'
 import * as localMedia from './localMedia'
 import * as obsidian from './obsidian'
@@ -29,25 +30,6 @@ import { flushState, getState, initState, setState, stateEvents, updateTask } fr
 if (process.env.NOTCH_CAPTURE) {
   app.disableHardwareAcceleration()
 }
-
-const COLLAPSED_SIZES: Record<NotchStyle, { width: number; height: number }> = {
-  full: { width: 412, height: 44 },
-  compact: { width: 332, height: 38 },
-  minimal: { width: 212, height: 34 },
-  pill: { width: 332, height: 42 },
-  'pill-tiny': { width: 132, height: 32 },
-  'notch-wide': { width: 252, height: 36 },
-  'notch-micro': { width: 122, height: 26 }
-}
-const EXPANDED_WIDTH = 1160
-const EXPANDED_HEIGHT = 632
-
-// The collapsed window keeps some extra room below the tab so a reminder or
-// posture notice can unfold without resizing the window (which would flicker
-// and re-run the layout). Everything outside the shaped region is click-through,
-// so this footprint is invisible and untouchable.
-const COLLAPSED_NOTICE_WIDTH = 460
-const COLLAPSED_NOTICE_HEIGHT = 132
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -65,6 +47,8 @@ let revealTimer: NodeJS.Timeout | null = null
 let topmostTimer: NodeJS.Timeout | null = null
 let rendererRecoveries = 0
 let failureDialogOpen = false
+let currentMetrics: NotchMetrics | null = null
+let closeFallback: NodeJS.Timeout | null = null
 
 function logLine(message: string): void {
   try {
@@ -95,45 +79,43 @@ function notifyRaw(title: string, body: string): void {
   }
 }
 
-function screenWorkArea(): Electron.Rectangle {
-  return screen.getPrimaryDisplay().workArea
-}
-
-function boundsFor(isExpanded: boolean): Electron.Rectangle {
-  const state = getState()
+function refreshCollapsedLayout(): Electron.Rectangle {
   const display = screen.getPrimaryDisplay()
-  if (isExpanded) {
-    return {
-      x: display.bounds.x,
-      y: display.bounds.y,
-      width: display.bounds.width,
-      height: display.bounds.height
-    }
-  }
-  const workArea = display.workArea
-  const size = COLLAPSED_SIZES[state.settings.notchStyle] || COLLAPSED_SIZES.minimal
-  const width = Math.min(
-    Math.max(size.width, COLLAPSED_NOTICE_WIDTH),
-    workArea.width
-  )
-  const height = Math.min(
-    Math.max(size.height, COLLAPSED_NOTICE_HEIGHT),
-    workArea.height
-  )
-  const saved = state.settings.notchPosition || { x: 0.5, y: 0 }
-  const anchorX = Math.min(1, Math.max(0, Number(saved.x) || 0))
-  const anchorY = Math.min(1, Math.max(0, Number(saved.y) || 0))
-  return {
-    x: Math.round(workArea.x + anchorX * Math.max(0, workArea.width - width)),
-    y: Math.round(workArea.y + anchorY * Math.max(0, workArea.height - height)),
-    width,
-    height
-  }
+  const settings = getState().settings
+  const layout = collapsedLayout(settings.notchPosition, display.workArea, settings.notchStyle)
+  currentMetrics = layout.metrics
+  const win = mainWindow
+  if (win && !win.isDestroyed()) win.webContents.send('notch:metrics', currentMetrics)
+  return layout.window
 }
 
 function applyBounds(): void {
   if (!mainWindow) return
-  mainWindow.setBounds(boundsFor(expanded), false)
+  const collapsed = refreshCollapsedLayout()
+  if (expanded) {
+    const display = screen.getPrimaryDisplay()
+    mainWindow.setBounds(display.bounds, false)
+    return
+  }
+  mainWindow.setBounds(collapsed, false)
+}
+
+function clearCloseFallback(): void {
+  if (!closeFallback) return
+  clearTimeout(closeFallback)
+  closeFallback = null
+}
+
+// Ask the renderer to shrink the panel back into the tab, then actually resize.
+// A fallback covers a renderer that never finishes the animation.
+function requestAnimatedClose(): void {
+  if (!mainWindow || !expanded) return
+  mainWindow.webContents.send('notch:request-close')
+  clearCloseFallback()
+  closeFallback = setTimeout(() => {
+    closeFallback = null
+    if (expanded) void setExpanded(false)
+  }, 980)
 }
 
 async function setExpanded(next: boolean, notify = true): Promise<boolean> {
@@ -148,12 +130,23 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     // meant a failed or slow capture left the notch stuck shut.
     expanded = true
     backdrop.suspendBackdropCapture()
+    if (notify) {
+      // Hide the collapsed tab before the window jumps, so it cannot flash
+      // at the wrong place for a frame inside the full-screen window.
+      mainWindow.webContents.send('notch:prepare-open')
+      await new Promise((resolve) => setTimeout(resolve, 36))
+      if (!mainWindow || mainWindow.isDestroyed() || token !== expandToken || !expanded) return false
+    }
+    const display = screen.getPrimaryDisplay()
     applyBounds()
     applyWindowShape()
     mainWindow.setAlwaysOnTop(true, 'screen-saver')
     if (notify) {
       if (cached) mainWindow.webContents.send('notch:backdrop', { image: cached })
-      mainWindow.webContents.send('notch:expanded', { expanded: true })
+      mainWindow.webContents.send('notch:expanded', {
+        expanded: true,
+        viewport: { width: display.bounds.width, height: display.bounds.height }
+      })
     }
     mainWindow.showInactive()
     // The expanded panel is a screen-edge widget, not an app window: it must
@@ -175,6 +168,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     return true
   }
 
+  clearCloseFallback()
   expandToken += 1
   expanding = null
   expanded = false
@@ -295,13 +289,13 @@ function syncEscapeShortcut(): void {
     if (want && !registered) {
       globalShortcut.register('Escape', () => {
         logLine('global escape: collapsing notch')
-        void setExpanded(false)
+        requestAnimatedClose()
       })
     } else if (!want && registered) {
       globalShortcut.unregister('Escape')
     }
   } catch {
-    // If another app owns Esc, the collapse arrow still works.
+    // If another app owns Esc, the Collapse button still works.
   }
 }
 
@@ -397,7 +391,7 @@ function showRendererFailure(details: Electron.RenderProcessGoneDetails): void {
 }
 
 function createWindow(): void {
-  const initial = boundsFor(false)
+  const initial = refreshCollapsedLayout()
   windowShown = false
   rendererRecoveries = 0
   if (revealTimer) {
@@ -511,7 +505,7 @@ function createWindow(): void {
   mainWindow.on('close', (event) => {
     if (quitting) return
     event.preventDefault()
-    void setExpanded(false)
+    requestAnimatedClose()
     mainWindow?.showInactive()
     mainWindow?.setSkipTaskbar(true)
   })
@@ -529,9 +523,6 @@ function createWindow(): void {
   })
   mainWindow.on('blur', () => {
     syncEscapeShortcut()
-    if (expanded && !getState().settings.pinOnOpen) {
-      mainWindow?.webContents.send('notch:blur')
-    }
   })
 
   mainWindow.on('focus', () => {
@@ -550,23 +541,57 @@ function createWindow(): void {
       setTimeout(async () => {
         const page = process.env.NOTCH_CAPTURE_PAGE
         if (page) mainWindow?.webContents.send('navigate', page)
-        if (process.env.NOTCH_CAPTURE_EXPANDED !== '0') await setExpanded(true)
-        setTimeout(async () => {
-          try {
-            if (!mainWindow) return
-            if (process.env.NOTCH_CAPTURE_JS) {
-              const jsResult = await mainWindow.webContents.executeJavaScript(process.env.NOTCH_CAPTURE_JS)
-              if (jsResult !== undefined) console.log('CAPTURE_JS:', JSON.stringify(jsResult))
-              await new Promise((resolve) => setTimeout(resolve, 650))
-            }
-            const image = await mainWindow.webContents.capturePage()
-            await fs.writeFile(capturePath, image.toPNG())
-          } catch (error) {
-            console.error('Capture failed', error)
-          } finally {
-            app.quit()
+        const frames = (process.env.NOTCH_CAPTURE_FRAMES || '')
+          .split(',')
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0)
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value >= 0)
+        const wantClose = process.env.NOTCH_CAPTURE_CLOSE === '1'
+        const expandedShot = process.env.NOTCH_CAPTURE_EXPANDED !== '0'
+        if (expandedShot || frames.length > 0) await setExpanded(true)
+        const writeShot = async (file: string): Promise<void> => {
+          if (!mainWindow || mainWindow.isDestroyed()) return
+          const image = await mainWindow.webContents.capturePage()
+          await fs.writeFile(file, image.toPNG())
+        }
+        const stamp = (suffix: string): string => {
+          const ext = path.extname(capturePath)
+          const base = ext ? capturePath.slice(0, -ext.length) : capturePath
+          return `${base}${suffix}${ext || '.png'}`
+        }
+        const grabSequence = async (suffix: (at: number) => string): Promise<void> => {
+          const started = Date.now()
+          for (const at of frames) {
+            const wait = at - (Date.now() - started)
+            if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+            await writeShot(suffix(at))
           }
-        }, 1400)
+        }
+        try {
+          if (process.env.NOTCH_CAPTURE_JS && mainWindow) {
+            const jsResult = await mainWindow.webContents.executeJavaScript(process.env.NOTCH_CAPTURE_JS)
+            if (jsResult !== undefined) console.log('CAPTURE_JS:', JSON.stringify(jsResult))
+            await new Promise((resolve) => setTimeout(resolve, 650))
+          }
+          const closeOnly = process.env.NOTCH_CAPTURE_CLOSE_ONLY === '1'
+          if (frames.length > 0 && !closeOnly) {
+            await grabSequence((at) => stamp(`-${at}`))
+          }
+          if (wantClose && frames.length > 0) {
+            const settle = Number(process.env.NOTCH_CAPTURE_SETTLE || 0)
+            if (settle > 0) await new Promise((resolve) => setTimeout(resolve, settle))
+            requestAnimatedClose()
+            await grabSequence((at) => stamp(`-close-${at}`))
+          } else if (frames.length === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 1400))
+            await writeShot(capturePath)
+          }
+        } catch (error) {
+          console.error('Capture failed', error)
+        } finally {
+          app.quit()
+        }
       }, 500)
     })
   }
@@ -586,7 +611,7 @@ function createTray(): void {
           void setExpanded(true)
         }
       },
-      { label: 'Collapse Notch', click: () => void setExpanded(false) },
+      { label: 'Collapse Notch', click: () => requestAnimatedClose() },
       {
         label: 'Open log file',
         click: () => {
@@ -607,7 +632,8 @@ function createTray(): void {
     tray.on('click', () => {
       if (!mainWindow) createWindow()
       revealWindow('tray')
-      void setExpanded(!expanded)
+      if (expanded) requestAnimatedClose()
+      else void setExpanded(true)
     })
   } catch {
     tray = null
@@ -735,6 +761,7 @@ function registerIpc(): void {
 
   ipcMain.handle('notch:set-expanded', (_event, value: boolean) => setExpanded(Boolean(value)))
   ipcMain.handle('notch:get-expanded', () => expanded)
+  ipcMain.handle('notch:get-metrics', () => currentMetrics)
   ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())
   ipcMain.on('notch:shape', (_event, rect: Electron.Rectangle | null) => {
     if (rect && rect.width > 0 && rect.height > 0) collapsedShape = rect
@@ -989,9 +1016,11 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
 function registerGlobalShortcuts(): void {
   try {
     globalShortcut.register('CommandOrControl+Shift+Space', () => {
-      void setExpanded(!expanded).then((value) => {
-        if (value) mainWindow?.focus()
-      })
+      if (expanded) {
+        requestAnimatedClose()
+        return
+      }
+      void setExpanded(true).then(() => mainWindow?.focus())
     })
   } catch {
     // Another app may already own the shortcut; the notch is still hoverable.

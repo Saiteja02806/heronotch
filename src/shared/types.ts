@@ -162,7 +162,9 @@ export interface SessionSendResult {
   sessionId: string
   provider: SessionProvider
   label: string
+  /** True only when the message was found afterwards in that session. */
   ok: boolean
+  status: 'delivered' | 'unconfirmed' | 'failed'
   error?: string
   code?: string
 }
@@ -242,6 +244,15 @@ export interface SpotifyQueueItem {
 
 export interface NotchToggleEvent {
   expanded: boolean
+  /** Display size the window was just resized to. Present when opening. */
+  viewport?: { width: number; height: number }
+}
+
+/** Where the collapsed tab sits, in window pixels and on screen. */
+export interface NotchMetrics {
+  tab: { x: number; y: number; width: number; height: number; radius: number }
+  tabScreen: { x: number; y: number; width: number; height: number }
+  noticeAbove: boolean
 }
 
 export interface BackdropEvent {
@@ -286,7 +297,10 @@ export interface NotchApi {
   onReminder: (callback: (event: ReminderEvent) => void) => () => void
   onVaultChanged: (callback: (path: string | null) => void) => () => void
   onNavigate: (callback: (page: string) => void) => () => void
-  onBlur: (callback: () => void) => () => void
+  getMetrics: () => Promise<NotchMetrics | null>
+  onMetrics: (callback: (metrics: NotchMetrics) => void) => () => void
+  onRequestClose: (callback: () => void) => () => void
+  onPrepareOpen: (callback: () => void) => () => void
   obsidian: {
     chooseVault: () => Promise<string | null>
     tree: (vaultPath: string) => Promise<VaultNode[]>
@@ -314,7 +328,10 @@ export interface NotchApi {
   sessions: {
     scan: () => Promise<SessionsSnapshot>
     openProject: (directory: string) => Promise<void>
-    send: (sessionId: string, message: string) => Promise<{ ok: boolean; error?: string; code?: string }>
+    send: (
+      sessionId: string,
+      message: string
+    ) => Promise<{ ok: boolean; pending?: boolean; error?: string; code?: string }>
     focusCodex: () => Promise<boolean>
     onSendResult: (callback: (result: SessionSendResult) => void) => () => void
   }

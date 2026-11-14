@@ -12,13 +12,13 @@ import {
   ShieldCheck,
   TerminalSquare
 } from 'lucide-react'
-import { useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { CodingSession } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
 import { SESSION_META, SessionBadge, sessionAge } from '../components/SessionBits'
-import { Modal } from '../components/Modal'
-
 const SENDABLE = new Set(['codex', 'opencode', 'antigravity'])
+
+type DeliveryPhase = 'idle' | 'sending' | 'delivered' | 'unconfirmed' | 'failed'
 
 export function SessionsPage() {
   const { sessions, sessionsLoading, refreshSessions, showToast, now } = useApp()
@@ -26,9 +26,12 @@ export function SessionsPage() {
   const [showSubagents, setShowSubagents] = useState(false)
   const [composer, setComposer] = useState<CodingSession | null>(null)
   const [message, setMessage] = useState('')
-  const [sending, setSending] = useState(false)
-  const [sendError, setSendError] = useState<string | null>(null)
+  const [phase, setPhase] = useState<DeliveryPhase>('idle')
+  const [sendNote, setSendNote] = useState<string | null>(null)
   const [sendErrorCode, setSendErrorCode] = useState<string | null>(null)
+  const composerRef = useRef<CodingSession | null>(null)
+  composerRef.current = composer
+  const sending = phase === 'sending'
 
   const all = sessions?.sessions || []
   const subagentCount = all.filter((session) => session.subagent).length
@@ -62,9 +65,11 @@ export function SessionsPage() {
   }
 
   const openComposer = (session: CodingSession): void => {
+    if (sending) return
     setComposer(session)
     setMessage('')
-    setSendError(null)
+    setPhase('idle')
+    setSendNote(null)
     setSendErrorCode(null)
   }
 
@@ -72,35 +77,47 @@ export function SessionsPage() {
     if (sending) return
     setComposer(null)
     setMessage('')
-    setSendError(null)
+    setPhase('idle')
+    setSendNote(null)
     setSendErrorCode(null)
   }
 
-  const send = async (): Promise<void> => {
-    if (!composer || !message.trim()) return
-    setSending(true)
-    setSendError(null)
-    try {
-      const result = await window.notch.sessions.send(composer.id, message)
-      if (!result.ok) {
-        setSendError(result.error || 'The agent command could not be started.')
-        setSendErrorCode(result.code || null)
+  useEffect(() => {
+    return window.notch.sessions.onSendResult((result) => {
+      const current = composerRef.current
+      if (!current || current.id !== result.sessionId) return
+      if (result.status === 'delivered') {
+        setPhase('delivered')
+        setSendNote(`Delivered to this ${result.label} session.`)
+        setSendErrorCode(null)
+        setMessage('')
         return
       }
-      setSendErrorCode(null)
-      showToast(
-        `Sending to ${SESSION_META[composer.provider].label}`,
-        composer.project
-          ? `The agent is picking this up in ${composer.project}.`
-          : 'The agent is picking this up in its own app.',
-        'default'
-      )
-      setComposer(null)
-      setMessage('')
+      if (result.status === 'unconfirmed') {
+        setPhase('unconfirmed')
+        setSendNote(result.error || 'The command finished, but that message was not found in this session.')
+        return
+      }
+      setPhase('failed')
+      setSendNote(result.error || 'The agent command failed.')
+    })
+  }, [])
+
+  const send = async (): Promise<void> => {
+    if (!composer || !message.trim() || sending) return
+    const text = message
+    setPhase('sending')
+    setSendNote(null)
+    setSendErrorCode(null)
+    try {
+      const result = await window.notch.sessions.send(composer.id, text)
+      if (result.pending) return
+      setPhase('failed')
+      setSendNote(result.error || 'The agent command could not be started.')
+      setSendErrorCode(result.code || null)
     } catch (error) {
-      setSendError(error instanceof Error ? error.message : 'Could not send the message.')
-    } finally {
-      setSending(false)
+      setPhase('failed')
+      setSendNote(error instanceof Error ? error.message : 'Could not send the message.')
     }
   }
 
@@ -113,10 +130,9 @@ export function SessionsPage() {
       focused ? 'Paste it into ChatGPT and press Enter.' : 'Open ChatGPT, then paste the message.',
       focused ? 'success' : 'default'
     )
-    setComposer(null)
-    setMessage('')
-    setSendError(null)
-    setSendErrorCode(null)
+    setPhase('failed')
+    setSendNote(focused ? 'Copied. Paste it into ChatGPT and press Enter.' : 'Copied. Open ChatGPT, then paste the message.')
+    setSendErrorCode('codex-open')
   }
 
   return (
@@ -223,30 +239,14 @@ export function SessionsPage() {
               <span className="session-group-label">
                 <span className="live-dot is-live" /> Working now · {grouped.active.length}
               </span>
-              {grouped.active.map((session) => (
-                <SessionRow
-                  key={session.id}
-                  session={session}
-                  now={now}
-                  onMessage={() => openComposer(session)}
-                  onOpen={() => void openProject(session.directory)}
-                />
-              ))}
+              {grouped.active.map(renderRow)}
             </div>
           )}
 
           {grouped.recent.length > 0 && (
             <div className="session-group">
               <span className="session-group-label">Recent · {grouped.recent.length}</span>
-              {grouped.recent.map((session) => (
-                <SessionRow
-                  key={session.id}
-                  session={session}
-                  now={now}
-                  onMessage={() => openComposer(session)}
-                  onOpen={() => void openProject(session.directory)}
-                />
-              ))}
+              {grouped.recent.map(renderRow)}
             </div>
           )}
 
@@ -287,135 +287,166 @@ export function SessionsPage() {
         </div>
       </section>
 
-      <Modal
-        open={Boolean(composer)}
-        onClose={closeComposer}
-        title={composer ? `Message ${SESSION_META[composer.provider].label}` : 'Message agent'}
-        eyebrow={composer?.project || 'Local session'}
-        width={540}
-      >
-        {composer && (
-          <div className="session-compose">
-            <div className="session-compose-target">
-              <SessionBadge provider={composer.provider} size={34} />
-              <div>
-                <strong>{composer.title}</strong>
-                <span>
-                  {SESSION_META[composer.provider].label}
-                  {composer.model ? ` · ${composer.model}` : ''}
-                  {composer.active ? ' · working now' : ` · last active ${sessionAge(composer.updatedAt, now)}`}
-                </span>
-              </div>
-            </div>
-            <textarea
-              className="session-compose-input"
-              value={message}
-              onChange={(event) => {
-                setMessage(event.target.value)
-                if (sendError) setSendError(null)
-                if (sendErrorCode) setSendErrorCode(null)
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-                  event.preventDefault()
-                  void send()
-                }
-              }}
-              autoFocus
-              placeholder="Send a follow-up to this session…"
-              rows={5}
-              maxLength={12000}
-            />
-            <div className="session-compose-meta">
-              <span>{message.length.toLocaleString()} / 12,000</span>
-              <span>Ctrl Enter to send</span>
-            </div>
-            <p className="session-compose-note">
-              The message goes to the existing local {SESSION_META[composer.provider].label} session.
-              Tool approvals still happen in that app. This can take a while to respond.
-            </p>
-            {sendError && <div className="session-compose-error">{sendError}</div>}
-            <div className="modal-actions">
-              <button className="soft-button" onClick={closeComposer} disabled={sending}>Cancel</button>
-              {sendErrorCode === 'codex-open' && (
-                <button className="soft-button" onClick={() => void copyAndOpenChatGpt()}>
-                  <Copy size={13} /> Copy &amp; open ChatGPT
-                </button>
-              )}
-              <button
-                className="primary-button"
-                onClick={() => void send()}
-                disabled={!message.trim() || sending}
-              >
-                {sending ? <Loader2 size={13} className="spin" /> : <MessageSquare size={13} />}
-                {sending ? 'Sending…' : 'Send to agent'}
-              </button>
-            </div>
-          </div>
-        )}
-      </Modal>
     </div>
   )
+
+  function renderRow(session: CodingSession) {
+    const open = composer?.id === session.id
+    return (
+      <SessionRow
+        key={session.id}
+        session={session}
+        now={now}
+        open={open}
+        message={open ? message : ''}
+        phase={open ? phase : 'idle'}
+        note={open ? sendNote : null}
+        errorCode={open ? sendErrorCode : null}
+        onMessage={() => openComposer(session)}
+        onOpen={() => void openProject(session.directory)}
+        onDraft={(value) => {
+          setMessage(value)
+          if (phase === 'failed' || phase === 'unconfirmed' || phase === 'delivered') {
+            setPhase('idle')
+            setSendNote(null)
+            setSendErrorCode(null)
+          }
+        }}
+        onSend={() => void send()}
+        onCancel={closeComposer}
+        onCopy={() => void copyAndOpenChatGpt()}
+      />
+    )
+  }
 }
 
 function SessionRow({
   session,
   now,
+  open,
+  message,
+  phase,
+  note,
+  errorCode,
   onMessage,
-  onOpen
+  onOpen,
+  onDraft,
+  onSend,
+  onCancel,
+  onCopy
 }: {
   session: CodingSession
   now: number
+  open: boolean
+  message: string
+  phase: DeliveryPhase
+  note: string | null
+  errorCode: string | null
   onMessage: () => void
   onOpen: () => void
+  onDraft: (value: string) => void
+  onSend: () => void
+  onCancel: () => void
+  onCopy: () => void
 }) {
   const meta = SESSION_META[session.provider]
   const canSend = SENDABLE.has(session.provider) && !session.subagent
+  const sending = phase === 'sending'
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (!open) return
+    inputRef.current?.focus({ preventScroll: true })
+    inputRef.current?.closest('.session-row')?.scrollIntoView({ block: 'nearest' })
+  }, [open])
   return (
-    <div className={`session-row ${session.active ? 'is-live' : ''}`}>
-      <SessionBadge provider={session.provider} size={30} />
-      <button className="session-row-copy" onClick={canSend ? onMessage : onOpen}>
-        <span className="session-row-title">
-          <strong>{session.title}</strong>
-          {session.subagent && <span className="session-tag">subagent</span>}
-          {session.origin && !session.subagent && <span className="session-tag muted">{session.origin}</span>}
-        </span>
-        <span className="session-row-detail">
-          <span className="session-provider" style={{ color: meta.color }}>{meta.label}</span>
-          {session.model && <span className="session-model">{session.model}</span>}
-          {session.detail && <span>{session.detail}</span>}
-          {session.project && (
-            <span className="session-project">
-              <FolderOpen size={9} /> {session.project}
-            </span>
-          )}
-        </span>
-      </button>
-      <div className="session-row-side">
-        {session.active ? (
-          <span className="session-live"><i /> live</span>
-        ) : (
-          <span className="session-row-time">{sessionAge(session.updatedAt, now)}</span>
-        )}
-        {canSend && (
-          <button
-            className="session-send"
-            onClick={onMessage}
-            title={`Send a message to ${meta.label}`}
-          >
-            <MessageSquare size={12} />
-            <span>Message</span>
-          </button>
-        )}
-        <button
-          className="icon-button subtle"
-          onClick={onOpen}
-          disabled={!session.directory}
-          title="Open project folder"
-        >
-          <FolderOpen size={12} />
+    <div className={`session-row ${session.active ? 'is-live' : ''} ${open ? 'is-composing' : ''}`}>
+      <div className="session-row-main">
+        <SessionBadge provider={session.provider} size={30} />
+        <button className="session-row-copy" onClick={canSend ? onMessage : onOpen}>
+          <span className="session-row-title">
+            <strong>{session.title}</strong>
+            {session.subagent && <span className="session-tag">subagent</span>}
+            {session.origin && !session.subagent && <span className="session-tag muted">{session.origin}</span>}
+          </span>
+          <span className="session-row-detail">
+            <span className="session-provider">{meta.label}</span>
+            {session.model && <span className="session-model">{session.model}</span>}
+            {session.detail && <span>{session.detail}</span>}
+            {session.project && (
+              <span className="session-project">
+                <FolderOpen size={9} /> {session.project}
+              </span>
+            )}
+          </span>
         </button>
+        <div className="session-row-side">
+          {session.active ? (
+            <span className="session-live"><i /> live</span>
+          ) : (
+            <span className="session-row-time">{sessionAge(session.updatedAt, now)}</span>
+          )}
+          {canSend && (
+            <button
+              className={`session-send ${open ? 'is-on' : ''}`}
+              onClick={onMessage}
+              title={`Send a message to ${meta.label}`}
+            >
+              <MessageSquare size={12} />
+              <span>Message</span>
+            </button>
+          )}
+          <button
+            className="icon-button subtle"
+            onClick={onOpen}
+            disabled={!session.directory}
+            title="Open project folder"
+          >
+            <FolderOpen size={12} />
+          </button>
+        </div>
       </div>
+      {open && (
+        <form
+          className="session-inline"
+          onSubmit={(event) => {
+            event.preventDefault()
+            onSend()
+          }}
+        >
+          <div className="session-inline-line">
+            <input
+              ref={inputRef}
+              className="session-inline-input"
+              value={message}
+              onChange={(event) => onDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.stopPropagation()
+                  event.preventDefault()
+                  onCancel()
+                }
+              }}
+              placeholder={`Message this ${meta.label} session`}
+              maxLength={12000}
+              disabled={sending}
+              aria-label={`Message this ${meta.label} session`}
+            />
+            <button type="button" className="soft-button compact session-inline-cancel" onClick={onCancel} disabled={sending}>
+              Cancel
+            </button>
+            <button type="submit" className="primary-button compact session-inline-send" disabled={!message.trim() || sending}>
+              {sending ? <Loader2 size={12} className="spin" /> : <MessageSquare size={12} />}
+              {sending ? 'Sending' : 'Send'}
+            </button>
+          </div>
+          {note && <p className={`session-inline-status is-${phase}`}>{note}</p>}
+          {errorCode === 'codex-open' && (
+            <button type="button" className="soft-button session-inline-copy" onClick={onCopy}>
+              <Copy size={12} /> Copy &amp; open ChatGPT
+            </button>
+          )}
+        </form>
+      )}
     </div>
   )
 }

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppState,
   NotchApi,
+  NotchMetrics,
   NoteSearchResult,
   ReminderEvent,
   SessionSendResult,
@@ -38,7 +39,10 @@ const api: NotchApi = {
   onReminder: (callback) => subscribe('reminder:fired', callback),
   onVaultChanged: (callback) => subscribe('vault:changed', callback),
   onNavigate: (callback) => subscribe('navigate', callback),
-  onBlur: (callback) => subscribe('notch:blur', () => callback()),
+  getMetrics: () => ipcRenderer.invoke('notch:get-metrics') as Promise<NotchMetrics | null>,
+  onMetrics: (callback) => subscribe<NotchMetrics>('notch:metrics', callback),
+  onRequestClose: (callback) => subscribe<void>('notch:request-close', () => callback()),
+  onPrepareOpen: (callback) => subscribe<void>('notch:prepare-open', () => callback()),
   obsidian: {
     chooseVault: () => ipcRenderer.invoke('obsidian:choose-vault') as Promise<string | null>,
     tree: (vaultPath) => ipcRenderer.invoke('obsidian:tree', vaultPath) as Promise<VaultNode[]>,

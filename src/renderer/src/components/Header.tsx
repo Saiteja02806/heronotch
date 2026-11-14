@@ -1,6 +1,7 @@
 import {
   Bot,
   CalendarDays,
+  ChevronUp,
   Droplet,
   LayoutGrid,
   Maximize2,
@@ -91,7 +92,7 @@ export function SectionNav() {
 }
 
 export function Header() {
-  const { page, setPage, pinned, setPinned, state, openSettings, updateSettings } = useApp()
+  const { page, setPage, pinned, setPinned, state, openSettings, updateSettings, setExpanded } = useApp()
   const compact = state.settings.panelSize === 'compact'
   const clock = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
   const vaultName = state.settings.vaultPath?.split(/[\\/]/).filter(Boolean).pop()
@@ -120,15 +121,19 @@ export function Header() {
           <strong>{clock}</strong>
         </div>
         <button
-          className={`icon-button compact-hide ${pinned ? 'is-on' : ''}`}
+          className={`icon-button ${pinned ? 'is-on' : ''}`}
           onClick={() => setPinned(!pinned)}
-          title={pinned ? 'Unpin the notch' : 'Keep the notch open'}
+          title={
+            pinned
+              ? 'Pinned — stays open when the pointer leaves'
+              : 'Pin — stay open when the pointer leaves'
+          }
           aria-pressed={pinned}
         >
           {pinned ? <PinOff size={14} /> : <Pin size={14} />}
         </button>
         <button
-          className={`icon-button compact-hide ${page === 'settings' ? 'is-on' : ''}`}
+          className={`icon-button ${page === 'settings' ? 'is-on' : ''}`}
           onClick={() => (page === 'settings' ? setPage('home') : openSettings())}
           title="Settings"
           aria-pressed={page === 'settings'}
@@ -143,6 +148,15 @@ export function Header() {
         >
           {compact ? <Maximize2 size={15} /> : <Minimize2 size={13} />}
           <span>{compact ? 'Enlarge' : 'Compact'}</span>
+        </button>
+        <button
+          className="close-notch is-collapse"
+          onClick={() => setExpanded(false)}
+          title="Collapse the notch"
+          aria-label="Collapse the notch"
+        >
+          <ChevronUp size={14} />
+          <span>Collapse</span>
         </button>
       </div>
     </header>
