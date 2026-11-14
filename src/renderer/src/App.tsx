@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, MotionConfig, motion } from 'framer-motion'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import type { NotchMetrics } from '../../shared/types'
 import { dockedPanelLeft, dockedPanelSize } from '../../shared/notchLayout'
@@ -339,7 +339,7 @@ function Shell() {
     setExpanded(true)
   }
 
-  const reduce = prefersReducedMotion()
+  const reduce = state.settings.reduceMotion === true || prefersReducedMotion()
   const tabWidth = metrics?.tabScreen.width ?? 200
   const tabHeight = metrics?.tabScreen.height ?? 28
   const tabLeft = metrics ? metrics.tab.x : Math.round((viewport.width - tabWidth) / 2)
@@ -418,6 +418,11 @@ function Shell() {
     dockedSize.height
   ])
 
+  useLayoutEffect(() => {
+    const system = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    document.documentElement.classList.toggle('reduce-motion', state.settings.reduceMotion === true || system)
+  }, [state.settings.reduceMotion])
+
   useEffect(() => {
     const flying = ((expanded && !settled) || closing) && !reduce
     setClockPaused(flying)
@@ -435,6 +440,7 @@ function Shell() {
   }, [expanded, closing, reduce])
 
   return (
+    <MotionConfig reducedMotion={reduce ? 'always' : 'user'}>
     <div
       className={`app ${expanded ? 'is-expanded' : 'is-collapsed'}${
         expanded && focusMode ? ' is-focus-mode' : ''
@@ -521,6 +527,7 @@ function Shell() {
       </div>
       {expanded && <Toasts />}
     </div>
+    </MotionConfig>
   )
 }
 

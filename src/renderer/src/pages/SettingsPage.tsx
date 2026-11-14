@@ -663,6 +663,12 @@ export function SettingsPage() {
                   description="Have the notch waiting after you sign in."
                 />
                 <Toggle
+                  checked={state.settings.reduceMotion === true}
+                  onChange={(value) => updateSettings({ reduceMotion: value })}
+                  label="Reduce motion"
+                  description="Opens and closes in place, and turns off the other animations in the notch."
+                />
+                <Toggle
                   checked={state.settings.notifications}
                   onChange={(value) => updateSettings({ notifications: value })}
                   label="Reminder notifications"

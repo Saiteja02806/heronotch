@@ -44,6 +44,8 @@ export interface Settings {
   autoHideFullscreen?: boolean
   /** Process names the tab must never sit on top of, with or without .exe. */
   neverOver?: string[]
+  /** Turn off motion in the notch, in addition to the system setting. */
+  reduceMotion?: boolean
   /**
    * Which header sections are on the notch, and in what order.
    * Absent on older saves; filled in from the water switch on load.

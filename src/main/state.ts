@@ -34,7 +34,8 @@ const DEFAULT_SETTINGS: Settings = {
   focusMode: true,
   mediaSource: 'auto',
   autoHideFullscreen: true,
-  neverOver: []
+  neverOver: [],
+  reduceMotion: false
 }
 
 function localDayKey(date = new Date()): string {
