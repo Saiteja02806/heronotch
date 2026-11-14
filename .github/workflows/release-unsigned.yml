@@ -81,6 +81,24 @@ jobs:
           $lines | Set-Content (Join-Path $release 'SHA256SUMS.txt') -Encoding ascii
           Get-Content (Join-Path $release 'SHA256SUMS.txt')
 
+      - name: Add stable download names
+        shell: pwsh
+        run: |
+          # The website links to /releases/latest/download/Notch-Setup.exe.
+          # GitHub only serves that path when the asset name is identical in
+          # every release, so publish a copy with the version stripped out.
+          # The copies are byte-identical to the versioned files above, so the
+          # checksums in SHA256SUMS.txt still apply.
+          $release = Join-Path $env:GITHUB_WORKSPACE 'release'
+          $setup = Get-ChildItem $release -File -Filter 'Notch-Setup-*.exe' | Select-Object -First 1
+          $portable = Get-ChildItem $release -File -Filter 'Notch-Portable-*.exe' | Select-Object -First 1
+          if (-not $setup -or -not $portable) {
+            throw 'Expected both Notch-Setup-<version>.exe and Notch-Portable-<version>.exe.'
+          }
+          Copy-Item $setup.FullName (Join-Path $release 'Notch-Setup.exe') -Force
+          Copy-Item $portable.FullName (Join-Path $release 'Notch-Portable.exe') -Force
+          Get-ChildItem $release -File | Select-Object Name, Length
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -100,6 +118,8 @@ jobs:
           files: |
             release/Notch-Setup-*.exe
             release/Notch-Portable-*.exe
+            release/Notch-Setup.exe
+            release/Notch-Portable.exe
             release/SHA256SUMS.txt
 
       - name: Upload workflow artifacts
@@ -109,6 +129,8 @@ jobs:
           path: |
             release/Notch-Setup-*.exe
             release/Notch-Portable-*.exe
+            release/Notch-Setup.exe
+            release/Notch-Portable.exe
             release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
