@@ -45,6 +45,7 @@ const api: NotchApi = {
   onMetrics: (callback) => subscribe<NotchMetrics>('notch:metrics', callback),
   onRequestClose: (callback) => subscribe<void>('notch:request-close', () => callback()),
   onPrepareOpen: (callback) => subscribe<void>('notch:prepare-open', () => callback()),
+  reportTiming: (mark, ms) => ipcRenderer.send('notch:timing', mark, ms),
   obsidian: {
     chooseVault: () => ipcRenderer.invoke('obsidian:choose-vault') as Promise<string | null>,
     tree: (vaultPath) => ipcRenderer.invoke('obsidian:tree', vaultPath) as Promise<VaultNode[]>,

@@ -26,6 +26,7 @@ import {
   todayKey
 } from '../lib/time'
 import { useApp } from '../state/AppContext'
+import { useNow } from '../state/clock'
 
 interface EditorState {
   task?: Task
@@ -201,9 +202,9 @@ export function PlannerPage() {
     setPlannerDate,
     toggleTask,
     deleteTask,
-    addTask,
-    now
+    addTask
   } = useApp()
+  const now = useNow()
   const selected = parseDateKey(plannerDate)
   const [view, setView] = useState({ year: selected.getFullYear(), month: selected.getMonth() })
   const [editor, setEditor] = useState<EditorState | null>(null)

@@ -15,13 +15,15 @@ import {
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { CodingSession } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
+import { useNow } from '../state/clock'
 import { SESSION_META, SessionBadge, sessionAge } from '../components/SessionBits'
 const SENDABLE = new Set(['codex', 'opencode', 'antigravity'])
 
 type DeliveryPhase = 'idle' | 'sending' | 'delivered' | 'unconfirmed' | 'failed'
 
 export function SessionsPage() {
-  const { sessions, sessionsLoading, refreshSessions, showToast, now, repliedSessionId } = useApp()
+  const { sessions, sessionsLoading, refreshSessions, showToast, repliedSessionId } = useApp()
+  const now = useNow()
   const [query, setQuery] = useState('')
   const [showSubagents, setShowSubagents] = useState(false)
   const [composer, setComposer] = useState<CodingSession | null>(null)

@@ -365,6 +365,7 @@ export interface NotchApi {
   onMetrics: (callback: (metrics: NotchMetrics) => void) => () => void
   onRequestClose: (callback: () => void) => () => void
   onPrepareOpen: (callback: () => void) => () => void
+  reportTiming: (mark: string, ms: number) => void
   obsidian: {
     chooseVault: () => Promise<string | null>
     tree: (vaultPath: string) => Promise<VaultNode[]>

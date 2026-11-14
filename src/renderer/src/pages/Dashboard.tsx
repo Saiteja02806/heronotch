@@ -38,7 +38,8 @@ import {
   timeToTimestamp,
   todayKey
 } from '../lib/time'
-import { useApp } from '../state/AppContext'
+import { useApp, useTimerClock } from '../state/AppContext'
+import { useNow } from '../state/clock'
 import { useMedia } from '../state/MediaContext'
 import { playPostureRing as playChime } from '../lib/alertSound'
 import { SessionBadge, relativeSessionTime } from '../components/SessionBits'
@@ -85,14 +86,13 @@ function Artwork({
 function TimerCard() {
   const {
     state,
-    timerRemaining,
-    timerProgress,
     startTimer,
     pauseTimer,
     resetTimer,
     setTimerMode,
     update
   } = useApp()
+  const { remaining: timerRemaining, progress: timerProgress } = useTimerClock()
   const timer = state.timer
   const total = timer.durations[timer.mode] * 60
   const label = timer.mode === 'focus' ? 'Focus' : timer.mode === 'short' ? 'Break' : 'Long'
@@ -475,7 +475,8 @@ function ObsidianCard() {
 }
 
 function SessionsCard() {
-  const { sessions, sessionsLoading, refreshSessions, setPage, now } = useApp()
+  const { sessions, sessionsLoading, refreshSessions, setPage } = useApp()
+  const now = useNow()
   const active = sessions?.sessions.filter((session) => session.active && !session.subagent) || []
   const recent = sessions?.sessions.filter((session) => !session.active && !session.subagent) || []
   const subagents = sessions?.sessions.filter((session) => session.subagent) || []

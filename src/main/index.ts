@@ -80,25 +80,58 @@ function notifyRaw(title: string, body: string): void {
   }
 }
 
+function tabHit(metrics: NotchMetrics): Electron.Rectangle {
+  return {
+    x: Math.max(0, Math.round(metrics.tab.x - 6)),
+    y: Math.max(0, Math.round(metrics.tab.y - 6)),
+    width: Math.round(metrics.tab.width + 12),
+    height: Math.round(metrics.tab.height + 14)
+  }
+}
+
+// The window stays the size of the display. Opening only changes the click
+// shape and a CSS transform. Resizing a transparent window on Windows
+// reallocates the DWM surface and is what made the notch feel late.
 function refreshCollapsedLayout(): Electron.Rectangle {
   const display = screen.getPrimaryDisplay()
   const settings = getState().settings
   const layout = collapsedLayout(settings.notchPosition, display.workArea, settings.notchStyle)
-  currentMetrics = layout.metrics
+  const tab = layout.metrics.tabScreen
+  currentMetrics = {
+    tab: {
+      x: tab.x - display.bounds.x,
+      y: tab.y - display.bounds.y,
+      width: tab.width,
+      height: tab.height,
+      radius: layout.metrics.tab.radius
+    },
+    tabScreen: layout.metrics.tabScreen,
+    noticeAbove: layout.metrics.noticeAbove
+  }
   const win = mainWindow
   if (win && !win.isDestroyed()) win.webContents.send('notch:metrics', currentMetrics)
-  return layout.window
+  if (!expanded) collapsedShape = tabHit(currentMetrics)
+  return {
+    x: display.bounds.x,
+    y: display.bounds.y,
+    width: display.bounds.width,
+    height: display.bounds.height
+  }
 }
 
 function applyBounds(): void {
-  if (!mainWindow) return
-  const collapsed = refreshCollapsedLayout()
-  if (expanded) {
-    const display = screen.getPrimaryDisplay()
-    mainWindow.setBounds(display.bounds, false)
-    return
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const next = refreshCollapsedLayout()
+  const current = mainWindow.getBounds()
+  if (
+    current.x !== next.x ||
+    current.y !== next.y ||
+    current.width !== next.width ||
+    current.height !== next.height
+  ) {
+    mainWindow.setBounds(next, false)
   }
-  mainWindow.setBounds(collapsed, false)
+  applyWindowShape()
 }
 
 function clearCloseFallback(): void {
@@ -126,23 +159,16 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     if (expanded) return true
     if (expanding) return expanding
     const token = ++expandToken
+    const started = performance.now()
     const cached = backdrop.getCachedBackdrop()
-    // Open now. The blurred snapshot is only decoration, and waiting for it
-    // meant a failed or slow capture left the notch stuck shut.
+    // The window is already display-sized. Do not resize, and do not wait
+    // for a snapshot or a "hide the tab" frame.
     expanded = true
     expandedShape = null
     backdrop.suspendBackdropCapture()
-    if (notify) {
-      // Hide the collapsed tab before the window jumps, so it cannot flash
-      // at the wrong place for a frame inside the full-screen window.
-      mainWindow.webContents.send('notch:prepare-open')
-      await new Promise((resolve) => setTimeout(resolve, 36))
-      if (!mainWindow || mainWindow.isDestroyed() || token !== expandToken || !expanded) return false
-    }
-    const display = screen.getPrimaryDisplay()
-    applyBounds()
     applyWindowShape()
     mainWindow.setAlwaysOnTop(true, 'screen-saver')
+    const display = screen.getPrimaryDisplay()
     const focusMode = getState().settings.focusMode !== false
     if (notify) {
       if (focusMode && cached) mainWindow.webContents.send('notch:backdrop', { image: cached })
@@ -152,11 +178,10 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
       })
     }
     mainWindow.showInactive()
-    // The expanded panel is a screen-edge widget, not an app window: it must
-    // never own a taskbar button (Windows would show it as "Electron").
     mainWindow.setSkipTaskbar(true)
     syncEscapeShortcut()
     expanding = null
+    logLine(`open dispatched in ${(performance.now() - started).toFixed(1)}ms`)
 
     if (notify && focusMode && !cached) {
       const target = mainWindow
@@ -172,21 +197,23 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
   }
 
   clearCloseFallback()
+  const started = performance.now()
   expandToken += 1
   expanding = null
   expanded = false
   expandedShape = null
   syncEscapeShortcut()
   backdrop.resumeBackdropCapture()
-  applyBounds()
+  if (currentMetrics) collapsedShape = tabHit(currentMetrics)
   applyWindowShape()
   if (notify && mainWindow) {
     mainWindow.webContents.send('notch:expanded', { expanded: false })
   }
+  logLine(`close dispatched in ${(performance.now() - started).toFixed(1)}ms`)
   setTimeout(() => {
     if (!expanded) backdrop.refreshBackdrop()
-  }, 550)
-  setTimeout(() => nudgePointerHover(), 160)
+  }, 400)
+  setTimeout(() => nudgePointerHover(), 40)
   return false
 }
 
@@ -772,6 +799,10 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('notch:set-expanded', (_event, value: boolean) => setExpanded(Boolean(value)))
+  ipcMain.on('notch:timing', (_event, mark: string, ms: number) => {
+    if (typeof mark !== 'string' || !Number.isFinite(ms)) return
+    logLine(`timing ${mark} ${ms.toFixed(1)}ms`)
+  })
   ipcMain.handle('notch:get-expanded', () => expanded)
   ipcMain.handle('notch:get-metrics', () => currentMetrics)
   ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())

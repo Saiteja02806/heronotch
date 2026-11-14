@@ -1,4 +1,4 @@
-import { AnimatePresence, motion, type TargetAndTransition } from 'framer-motion'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import type { NotchMetrics } from '../../shared/types'
 import { dockedPanelLeft, dockedPanelSize } from '../../shared/notchLayout'
@@ -21,10 +21,11 @@ import { SettingsPage } from './pages/SettingsPage'
 import { WaterPage } from './pages/WaterPage'
 import { sectionPrefs, visibleSections, type SectionId } from './lib/sections'
 import { AppProvider, useApp } from './state/AppContext'
+import { setClockPaused } from './state/clock'
 import { MediaProvider } from './state/MediaContext'
 import { PostureProvider } from './state/PostureContext'
 
-const FLIGHT_MS = 420
+const OPEN_MS = 280
 
 function pageForKey(key: string, visible: SectionId[]): SectionId | null {
   const index = Number(key) - 1
@@ -46,29 +47,39 @@ function applyTabMetrics(next: NotchMetrics): void {
   root.classList.add('tab-ready')
 }
 
-function flightBox(
-  left: number,
-  top: number,
-  width: number,
-  height: number,
-  topRadius: number,
-  bottomRadius: number
-): TargetAndTransition {
-  return {
-    left,
-    top,
-    width,
-    height,
-    borderTopLeftRadius: topRadius,
-    borderTopRightRadius: topRadius,
-    borderBottomRightRadius: bottomRadius,
-    borderBottomLeftRadius: bottomRadius
-  }
+function usePreparedBackdrop(source: string | null): string | null {
+  const [prepared, setPrepared] = useState<string | null>(null)
+  useEffect(() => {
+    if (!source) {
+      setPrepared(null)
+      return
+    }
+    let cancelled = false
+    const image = new Image()
+    image.onload = () => {
+      const width = 480
+      const height = Math.max(1, Math.round((width * image.height) / Math.max(1, image.width)))
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const context = canvas.getContext('2d')
+      if (!context) return
+      context.filter = 'blur(16px)'
+      context.drawImage(image, -24, -24, width + 48, height + 48)
+      if (!cancelled) setPrepared(canvas.toDataURL('image/jpeg', 0.72))
+    }
+    image.src = source
+    return () => {
+      cancelled = true
+    }
+  }, [source])
+  return prepared
 }
 
 function Shell() {
   const { state, expanded, backdrop, viewport, setExpanded, pinned, page, setPage, toasts, openSettings, glowTick } =
     useApp()
+  const preparedBackdrop = usePreparedBackdrop(backdrop)
   const compact = state.settings.panelSize === 'compact'
   const focusMode = state.settings.focusMode !== false
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -88,7 +99,7 @@ function Shell() {
   const accent = ACCENTS[state.settings.accent]
   expandedRef.current = expanded
   const sawExpanded = useRef(expanded)
-  if (expanded && !sawExpanded.current) ignoreLeaveUntil.current = Date.now() + FLIGHT_MS + 80
+  if (expanded && !sawExpanded.current) ignoreLeaveUntil.current = Date.now() + OPEN_MS + 40
   sawExpanded.current = expanded
 
   const publishMetrics = useCallback((next: NotchMetrics | null) => {
@@ -129,7 +140,7 @@ function Shell() {
     closeSent.current = false
     closeStartedAt.current = Date.now()
     setClosing(true)
-    window.setTimeout(() => finishClose(generation), FLIGHT_MS + 90)
+    window.setTimeout(() => finishClose(generation), OPEN_MS + 40)
   }, [finishClose])
 
   useEffect(() => {
@@ -140,7 +151,7 @@ function Shell() {
       document.documentElement.classList.add('notch-opening')
       window.setTimeout(() => {
         if (!expandedRef.current) document.documentElement.classList.remove('notch-opening')
-      }, 500)
+      }, 320)
     })
     return () => {
       off()
@@ -265,44 +276,16 @@ function Shell() {
     }
   }, [expanded, metrics, state.settings.notchStyle, toasts])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!expanded) return
-    if (focusMode) {
-      window.notch.setShape({ focusOff: true, rects: null })
-      return
-    }
-    // No backdrop, so the window must not cover the desktop. Shape input and
-    // drawing to the panel and any toast; everything else falls through.
-    let frame = 0
-    let last = ''
-    const report = (): void => {
-      const nodes: Element[] = [
-        ...document.querySelectorAll('.panel'),
-        ...document.querySelectorAll('.toast')
-      ]
-      const rects = nodes.flatMap((node) => {
-        if (!(node instanceof HTMLElement)) return []
-        const rect = node.getBoundingClientRect()
-        if (rect.width < 2 || rect.height < 2) return []
-        return [
-          {
-            x: Math.max(0, Math.floor(rect.left) - 2),
-            y: Math.max(0, Math.floor(rect.top) - 2),
-            width: Math.ceil(rect.width) + 6,
-            height: Math.ceil(rect.height) + 6
-          }
-        ]
-      })
-      const key = JSON.stringify(rects)
-      if (rects.length > 0 && key !== last) {
-        last = key
-        window.notch.setShape({ focusOff: true, rects })
-      }
-      frame = window.requestAnimationFrame(report)
-    }
-    frame = window.requestAnimationFrame(report)
+    const marks = performance.getEntriesByName('notch-open-request')
+    const started = marks.length > 0 ? marks[marks.length - 1].startTime : performance.now()
+    const frame = window.requestAnimationFrame(() => {
+      window.notch.reportTiming('open-first-frame', performance.now() - started)
+      performance.clearMarks('notch-open-request')
+    })
     return () => window.cancelAnimationFrame(frame)
-  }, [expanded, focusMode, compact, page, toasts, settled, closing])
+  }, [expanded])
 
   const armExpand = (): void => {
     if (state.settings.openTrigger === 'click') return
@@ -359,37 +342,97 @@ function Shell() {
   const reduce = prefersReducedMotion()
   const tabWidth = metrics?.tabScreen.width ?? 200
   const tabHeight = metrics?.tabScreen.height ?? 28
-  const tabRadius = metrics?.tab.radius ?? 12
-  const pill = tabRadius >= 400
-  const tabLeft = metrics ? metrics.tabScreen.x - window.screenX : Math.round((viewport.width - tabWidth) / 2)
-  const tabTop = metrics ? metrics.tabScreen.y - window.screenY : 0
-  const tabShape = flightBox(
-    tabLeft,
-    tabTop,
-    tabWidth,
-    tabHeight,
-    pill ? tabHeight / 2 : 0,
-    pill ? tabHeight / 2 : Math.min(tabRadius, tabHeight / 2)
-  )
+  const tabLeft = metrics ? metrics.tab.x : Math.round((viewport.width - tabWidth) / 2)
+  const tabTop = metrics ? metrics.tab.y : 0
   const dockedSize = dockedPanelSize(viewport.width, viewport.height, compact)
-  const docked = flightBox(
-    dockedPanelLeft(tabLeft + tabWidth / 2, dockedSize.width, viewport.width),
-    0,
-    dockedSize.width,
-    dockedSize.height,
-    0,
-    compact ? 22 : 30
-  )
-  const from = reduce ? docked : tabShape
-  const to = closing ? tabShape : docked
+  const dockedLeft = dockedPanelLeft(tabLeft + tabWidth / 2, dockedSize.width, viewport.width)
+  const atTab = (!expanded || closing) && !reduce
+  const scaleX = dockedSize.width > 0 ? tabWidth / dockedSize.width : 1
+  const scaleY = dockedSize.height > 0 ? tabHeight / dockedSize.height : 1
   const appStyle = {
     '--accent': accent.color,
     '--accent-soft': accent.soft,
     '--accent-deep': accent.deep,
     '--panel-h': `${dockedSize.height}px`,
     '--panel-w': `${dockedSize.width}px`,
-    '--panel-left': `${typeof docked.left === 'number' ? docked.left : 0}px`
+    '--panel-left': `${dockedLeft}px`,
+    '--flight-x': `${tabLeft - dockedLeft}px`,
+    '--flight-y': `${tabTop}px`,
+    '--flight-sx': String(scaleX),
+    '--flight-sy': String(scaleY)
   } as CSSProperties
+
+  useEffect(() => {
+    if (!expanded) return
+    if (focusMode) {
+      window.notch.setShape({ focusOff: true, rects: null })
+      return
+    }
+    // One shape for the whole flight: the tab and the settled panel. Measuring
+    // the transformed box every frame would call setShape on each tick, which
+    // is a Win32 region update and drops frames.
+    const flight = !settled || closing
+    const rects = [
+      flight
+        ? {
+            x: Math.max(0, Math.floor(Math.min(tabLeft, dockedLeft)) - 4),
+            y: 0,
+            width:
+              Math.ceil(Math.max(tabLeft + tabWidth, dockedLeft + dockedSize.width) - Math.min(tabLeft, dockedLeft)) +
+              8,
+            height: Math.ceil(Math.max(tabTop + tabHeight, dockedSize.height)) + 8
+          }
+        : {
+            x: Math.max(0, Math.floor(dockedLeft) - 2),
+            y: 0,
+            width: Math.ceil(dockedSize.width) + 6,
+            height: Math.ceil(dockedSize.height) + 6
+          }
+    ]
+    for (const node of document.querySelectorAll('.toast')) {
+      if (!(node instanceof HTMLElement)) continue
+      const rect = node.getBoundingClientRect()
+      if (rect.width < 2 || rect.height < 2) continue
+      rects.push({
+        x: Math.max(0, Math.floor(rect.left) - 2),
+        y: Math.max(0, Math.floor(rect.top) - 2),
+        width: Math.ceil(rect.width) + 6,
+        height: Math.ceil(rect.height) + 6
+      })
+    }
+    window.notch.setShape({ focusOff: true, rects })
+  }, [
+    expanded,
+    focusMode,
+    compact,
+    page,
+    toasts,
+    settled,
+    closing,
+    tabLeft,
+    tabTop,
+    tabWidth,
+    tabHeight,
+    dockedLeft,
+    dockedSize.width,
+    dockedSize.height
+  ])
+
+  useEffect(() => {
+    const flying = ((expanded && !settled) || closing) && !reduce
+    setClockPaused(flying)
+    return () => setClockPaused(false)
+  }, [expanded, settled, closing, reduce])
+
+  useEffect(() => {
+    if (!expanded || closing) return
+    if (reduce) {
+      setSettled(true)
+      return
+    }
+    const timer = window.setTimeout(() => setSettled(true), OPEN_MS + 50)
+    return () => window.clearTimeout(timer)
+  }, [expanded, closing, reduce])
 
   return (
     <div
@@ -406,10 +449,10 @@ function Shell() {
           className={`focus-backdrop${closing ? ' is-closing' : ''}`}
           onClick={() => setExpanded(false)}
         >
-          {backdrop && (
+          {preparedBackdrop && (
             <div
-              className="focus-backdrop-image"
-              style={{ backgroundImage: `url("${backdrop}")` }}
+              className="focus-backdrop-image is-prepared"
+              style={{ backgroundImage: `url("${preparedBackdrop}")` }}
             />
           )}
           <div className="focus-backdrop-tint" />
@@ -429,59 +472,54 @@ function Shell() {
           )}
         </div>
       )}
-      {expanded ? (
-        <motion.div
-          className={`panel is-spatial${!settled || closing ? ' is-flying' : ''}${closing ? ' is-closing' : ''}`}
-          initial={from}
-          animate={to}
-          transition={{ duration: reduce ? 0 : FLIGHT_MS / 1000, ease: [0.22, 1, 0.36, 1] }}
-          onAnimationComplete={() => {
-            if (closingRef.current) {
-              if (!prefersReducedMotion() && Date.now() - closeStartedAt.current < FLIGHT_MS - 40) return
-              finishClose(closeGen.current)
-              return
-            }
-            setSettled(true)
-          }}
-        >
-          <motion.div
-            className="panel-body"
-            initial={{ opacity: reduce ? 1 : 0 }}
-            animate={{ opacity: closing ? 0 : 1 }}
-            transition={{ duration: reduce ? 0 : 0.2, delay: closing || reduce ? 0 : 0.12 }}
-          >
-            <CompactSlotProvider>
-              <Header />
-              <main className="page-host">
-                <AnimatePresence mode="wait" initial={false}>
-                  <motion.div
-                    key={page}
-                    className="page-frame"
-                    initial={{ opacity: 0, y: 9 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -5 }}
-                    transition={{ duration: 0.17, ease: [0.22, 1, 0.36, 1] }}
-                  >
-                    {page === 'home' && <Dashboard />}
-                    {page === 'notes' && <NotesPage />}
-                    {page === 'music' && <MusicPage />}
-                    {page === 'planner' && <PlannerPage />}
-                    {page === 'sessions' && <SessionsPage />}
-                    {page === 'posture' && <PosturePage />}
-                    {page === 'water' && <WaterPage />}
-                    {page === 'settings' && <SettingsPage />}
-                  </motion.div>
-                </AnimatePresence>
-              </main>
-              <Footer />
-            </CompactSlotProvider>
-          </motion.div>
-          <EdgeGlow tick={glowTick} ready={settled && !closing} />
-        </motion.div>
-      ) : (
+      <div
+        className={`panel is-spatial ${atTab ? 'is-from-tab' : 'is-open'}${!expanded ? ' is-parked' : ''}${
+          closing ? ' is-closing' : ''
+        }${reduce ? ' is-instant' : ''}`}
+        style={{ left: dockedLeft, top: 0, width: dockedSize.width, height: dockedSize.height }}
+        onTransitionEnd={(event) => {
+          if (event.propertyName !== 'transform' || event.target !== event.currentTarget) return
+          if (closingRef.current) {
+            finishClose(closeGen.current)
+            return
+          }
+          if (expandedRef.current) setSettled(true)
+        }}
+      >
+        <div className="panel-body">
+          <CompactSlotProvider>
+            <Header />
+            <main className="page-host">
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.div
+                  key={page}
+                  className="page-frame"
+                  initial={{ opacity: 0, y: 9 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -5 }}
+                  transition={{ duration: 0.17, ease: [0.22, 1, 0.36, 1] }}
+                >
+                  {page === 'home' && <Dashboard />}
+                  {page === 'notes' && <NotesPage />}
+                  {page === 'music' && <MusicPage />}
+                  {page === 'planner' && <PlannerPage />}
+                  {page === 'sessions' && <SessionsPage />}
+                  {page === 'posture' && <PosturePage />}
+                  {page === 'water' && <WaterPage />}
+                  {page === 'settings' && <SettingsPage />}
+                </motion.div>
+              </AnimatePresence>
+            </main>
+            <Footer />
+          </CompactSlotProvider>
+        </div>
+        <EdgeGlow tick={glowTick} ready={settled && !closing && expanded} />
+      </div>
+      <div className={`collapsed-layer${expanded ? ' is-hidden' : ''}`}>
         <CollapsedBar onOpen={openImmediately} />
-      )}
-      {expanded ? <Toasts /> : <CollapsedNotice onOpen={openImmediately} />}
+        {!expanded && <CollapsedNotice onOpen={openImmediately} />}
+      </div>
+      {expanded && <Toasts />}
     </div>
   )
 }

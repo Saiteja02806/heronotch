@@ -17,6 +17,7 @@ import type {
   SpotifyStatus
 } from '../../../shared/types'
 import { useApp } from './AppContext'
+import { useNow } from './clock'
 
 export type PlaybackPhase = 'idle' | 'opening' | 'no-device' | 'premium'
 
@@ -93,7 +94,8 @@ function spotifyTrackTarget(trackId: string | undefined): string | undefined {
 }
 
 export function MediaProvider({ children }: { children: ReactNode }) {
-  const { showToast, now, state, update } = useApp()
+  const { showToast, state, update } = useApp()
+  const now = useNow()
   const [status, setStatus] = useState<SpotifyStatus | null>(null)
   const [playback, setPlayback] = useState<SpotifyPlayback | null>(
     () => readCachedPlayback() ?? playbackFromMemory(state.spotifyMemory)

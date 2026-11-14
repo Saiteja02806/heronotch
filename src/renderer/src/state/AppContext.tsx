@@ -1,9 +1,9 @@
+import { subscribeClock, useNow } from './clock'
 import {
   createContext,
   useCallback,
   useContext,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ReactNode
@@ -55,9 +55,6 @@ interface AppContextValue {
   settingsSection: SettingsSection
   setSettingsSection: (section: SettingsSection) => void
   openSettings: (section?: SettingsSection) => void
-  now: number
-  timerRemaining: number
-  timerProgress: number
   startTimer: () => void
   pauseTimer: () => void
   resetTimer: () => void
@@ -114,7 +111,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [repliedSessionId, setRepliedSessionId] = useState<string | null>(null)
   const notificationsOn = useRef(true)
   notificationsOn.current = !state || state.settings.notifications !== false
-  const [now, setNow] = useState(Date.now())
   const [vaultRevision, setVaultRevision] = useState(0)
   const [sessions, setSessions] = useState<SessionsSnapshot | null>(null)
   const [sessionsLoading, setSessionsLoading] = useState(false)
@@ -200,29 +196,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    const interval = setInterval(() => setNow(Date.now()), 500)
-    const onFocus = (): void => setNow(Date.now())
-    window.addEventListener('focus', onFocus)
-    return () => {
-      clearInterval(interval)
-      window.removeEventListener('focus', onFocus)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!state) return
-    const day = todayKey()
-    const stale =
-      state.timer.dayKey !== day ||
-      state.posture.dayKey !== day ||
-      state.water.dayKey !== day
-    if (!stale) return
-    const seq = writeSeq.current
-    void window.notch.getState().then((remote) => {
-      if (writeSeq.current !== seq) return
-      setState(remote)
+    return subscribeClock(() => {
+      if (!state) return
+      const day = todayKey()
+      const stale =
+        state.timer.dayKey !== day ||
+        state.posture.dayKey !== day ||
+        state.water.dayKey !== day
+      if (!stale) return
+      const seq = writeSeq.current
+      void window.notch.getState().then((remote) => {
+        if (writeSeq.current !== seq) return
+        setState(remote)
+      })
     })
-  }, [now, state])
+  }, [state])
 
   const refreshSessions = useCallback(async () => {
     setSessionsLoading(true)
@@ -316,11 +304,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const setExpanded = useCallback((value: boolean) => {
     if (!value) {
-      // The shell plays the shrink, then tells the main process to resize.
-      // Clearing expanded here would unmount the panel before it can move.
+      // The shell plays the shrink, then tells the main process to drop the
+      // click shape back to the tab. Clearing expanded here would hide the
+      // panel before it can move.
       window.dispatchEvent(new Event('notch-request-close'))
       return
     }
+    performance.mark('notch-open-request')
     void window.notch.setExpanded(true)
   }, [])
 
@@ -353,28 +343,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     void window.notch.setExpanded(true)
   }, [])
 
-  const timer = state?.timer
-  const timerRemaining = useMemo(() => {
-    if (!timer) return 0
-    if (timer.running && timer.endsAt) return Math.max(0, Math.ceil((timer.endsAt - now) / 1000))
-    return timer.remaining
-  }, [timer, now])
-
-  const timerProgress = useMemo(() => {
-    if (!timer) return 0
-    const total = timer.durations[timer.mode] * 60
-    if (total <= 0) return 0
-    return Math.max(0, Math.min(1, 1 - timerRemaining / total))
-  }, [timer, timerRemaining])
-
   const startTimer = useCallback(() => {
     if (!state) return
     const current = state.timer
-    const remaining = current.running
-      ? timerRemaining
-      : current.remaining > 0
-        ? current.remaining
-        : current.durations[current.mode] * 60
+    const remaining =
+      current.running && current.endsAt
+        ? Math.max(0, Math.ceil((current.endsAt - Date.now()) / 1000))
+        : current.remaining > 0
+          ? current.remaining
+          : current.durations[current.mode] * 60
     timerGuard.current = null
     update({
       timer: {
@@ -384,7 +361,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         endsAt: Date.now() + remaining * 1000
       }
     })
-  }, [state, timerRemaining, update])
+  }, [state, update])
 
   const pauseTimer = useCallback(() => {
     if (!state) return
@@ -435,39 +412,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => {
-    if (!state) return
-    const current = state.timer
-    if (!current.running || !current.endsAt) return
-    if (Date.now() < current.endsAt) return
-    if (timerGuard.current === current.endsAt) return
-    timerGuard.current = current.endsAt
+    if (!state?.timer.running || !state.timer.endsAt) return
+    return subscribeClock(() => {
+      const current = state.timer
+      if (!current.running || !current.endsAt) return
+      if (Date.now() < current.endsAt) return
+      if (timerGuard.current === current.endsAt) return
+      timerGuard.current = current.endsAt
 
-    const minutes = current.durations[current.mode]
-    const completed = current.mode === 'focus'
-    const label = current.mode === 'focus' ? 'Focus session complete' : 'Break is over'
-    if (state.settings?.timerNotifications !== false) {
-      window.notch.notify(
-        label,
-        completed ? `${minutes} minutes of focus logged.` : 'Ready for another round?',
-        true
-      )
-      showToast(label, completed ? `${minutes} focused minutes logged.` : 'Time to stretch.', 'success')
-      playChime()
-    }
-    update({
-      timer: {
-        ...current,
-        running: false,
-        endsAt: null,
-        remaining: minutes * 60,
-        sessionsToday: current.sessionsToday + 1,
-        completedToday: current.completedToday + 1
-      },
-      focusLog: completed
-        ? [...state.focusLog, { at: Date.now(), minutes }].slice(-250)
-        : state.focusLog
+      const minutes = current.durations[current.mode]
+      const completed = current.mode === 'focus'
+      const label = current.mode === 'focus' ? 'Focus session complete' : 'Break is over'
+      if (state.settings?.timerNotifications !== false) {
+        window.notch.notify(
+          label,
+          completed ? `${minutes} minutes of focus logged.` : 'Ready for another round?',
+          true
+        )
+        showToast(label, completed ? `${minutes} focused minutes logged.` : 'Time to stretch.', 'success')
+        playChime()
+      }
+      update({
+        timer: {
+          ...current,
+          running: false,
+          endsAt: null,
+          remaining: minutes * 60,
+          sessionsToday: current.sessionsToday + 1,
+          completedToday: current.completedToday + 1
+        },
+        focusLog: completed
+          ? [...state.focusLog, { at: Date.now(), minutes }].slice(-250)
+          : state.focusLog
+      })
     })
-  }, [now, state, update, showToast])
+  }, [state, update, showToast])
 
   const addTask = useCallback<AppContextValue['addTask']>(
     (input) => {
@@ -582,9 +561,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     settingsSection,
     setSettingsSection,
     openSettings,
-    now,
-    timerRemaining,
-    timerProgress,
     startTimer,
     pauseTimer,
     resetTimer,
@@ -611,4 +587,18 @@ export function useApp(): AppContextValue {
   const value = useContext(AppContext)
   if (!value) throw new Error('useApp must be used inside AppProvider')
   return value
+}
+
+/** Remaining seconds for the focus timer. Only this hook re-renders each second. */
+export function useTimerClock(): { remaining: number; progress: number } {
+  const { state } = useApp()
+  const now = useNow()
+  const timer = state.timer
+  const remaining =
+    timer.running && timer.endsAt
+      ? Math.max(0, Math.ceil((timer.endsAt - now) / 1000))
+      : timer.remaining
+  const total = timer.durations[timer.mode] * 60
+  const progress = total <= 0 ? 0 : Math.max(0, Math.min(1, 1 - remaining / total))
+  return { remaining, progress }
 }
