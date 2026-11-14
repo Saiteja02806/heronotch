@@ -77,8 +77,9 @@ function flightBox(
 }
 
 function Shell() {
-  const { state, expanded, backdrop, viewport, setExpanded, pinned, page, setPage, toasts } = useApp()
+  const { state, expanded, backdrop, viewport, setExpanded, pinned, page, setPage, toasts, openSettings } = useApp()
   const compact = state.settings.panelSize === 'compact'
+  const focusMode = state.settings.focusMode !== false
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pointerInside = useRef(false)
@@ -278,6 +279,45 @@ function Shell() {
     }
   }, [expanded, metrics, state.settings.notchStyle, toasts])
 
+  useEffect(() => {
+    if (!expanded) return
+    if (focusMode) {
+      window.notch.setShape({ focusOff: true, rects: null })
+      return
+    }
+    // No backdrop, so the window must not cover the desktop. Shape input and
+    // drawing to the panel and any toast; everything else falls through.
+    let frame = 0
+    let last = ''
+    const report = (): void => {
+      const nodes: Element[] = [
+        ...document.querySelectorAll('.panel'),
+        ...document.querySelectorAll('.toast')
+      ]
+      const rects = nodes.flatMap((node) => {
+        if (!(node instanceof HTMLElement)) return []
+        const rect = node.getBoundingClientRect()
+        if (rect.width < 2 || rect.height < 2) return []
+        return [
+          {
+            x: Math.max(0, Math.floor(rect.left) - 2),
+            y: Math.max(0, Math.floor(rect.top) - 2),
+            width: Math.ceil(rect.width) + 6,
+            height: Math.ceil(rect.height) + 6
+          }
+        ]
+      })
+      const key = JSON.stringify(rects)
+      if (rects.length > 0 && key !== last) {
+        last = key
+        window.notch.setShape({ focusOff: true, rects })
+      }
+      frame = window.requestAnimationFrame(report)
+    }
+    frame = window.requestAnimationFrame(report)
+    return () => window.cancelAnimationFrame(frame)
+  }, [expanded, focusMode, compact, page, toasts, settled, closing])
+
   const armExpand = (): void => {
     if (state.settings.openTrigger === 'click') return
     if (expanded || expandTimer.current) return
@@ -330,12 +370,6 @@ function Shell() {
     setExpanded(true)
   }
 
-  const appStyle = {
-    '--accent': accent.color,
-    '--accent-soft': accent.soft,
-    '--accent-deep': accent.deep
-  } as CSSProperties
-
   const reduce = prefersReducedMotion()
   const tabWidth = metrics?.tabScreen.width ?? 200
   const tabHeight = metrics?.tabScreen.height ?? 28
@@ -358,26 +392,33 @@ function Shell() {
     dockedSize.width,
     dockedSize.height,
     0,
-    compact ? 20 : 30
+    compact ? 22 : 30
   )
   const from = reduce ? docked : tabShape
   const to = closing ? tabShape : docked
+  const appStyle = {
+    '--accent': accent.color,
+    '--accent-soft': accent.soft,
+    '--accent-deep': accent.deep,
+    '--panel-h': `${dockedSize.height}px`,
+    '--panel-w': `${dockedSize.width}px`,
+    '--panel-left': `${typeof docked.left === 'number' ? docked.left : 0}px`
+  } as CSSProperties
 
   return (
     <div
-      className={`app ${expanded ? 'is-expanded is-focus-mode' : 'is-collapsed'}${
-        compact ? ' is-panel-compact' : ''
-      }${metrics?.noticeAbove ? ' is-notice-above' : ''}`}
+      className={`app ${expanded ? 'is-expanded' : 'is-collapsed'}${
+        expanded && focusMode ? ' is-focus-mode' : ''
+      }${compact ? ' is-panel-compact' : ''}${metrics?.noticeAbove ? ' is-notice-above' : ''}`}
       style={appStyle}
       onPointerEnter={onPointerEnter}
       onPointerMove={onPointerMove}
       onPointerLeave={onPointerLeave}
     >
-      {expanded && (
+      {expanded && focusMode && (
         <div
           className={`focus-backdrop${closing ? ' is-closing' : ''}`}
           onClick={() => setExpanded(false)}
-          aria-hidden="true"
         >
           {backdrop && (
             <div
@@ -386,7 +427,20 @@ function Shell() {
             />
           )}
           <div className="focus-backdrop-tint" />
-          <span className="focus-hint">Focused · click outside to close</span>
+          {settled && !closing && (
+            <span className="focus-hint">
+              Focused · click outside to close · turn off focus mode in{' '}
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  openSettings('notch')
+                }}
+              >
+                Settings
+              </button>
+            </span>
+          )}
         </div>
       )}
       {expanded ? (

@@ -37,6 +37,7 @@ let expanded = false
 let expandToken = 0
 let expanding: Promise<boolean> | null = null
 let collapsedShape: Electron.Rectangle | null = null
+let expandedShape: Electron.Rectangle[] | null = null
 let lastWatchedVault: string | null = null
 let reminderTimers = new Map<string, NodeJS.Timeout>()
 let reminderReschedule: NodeJS.Timeout | null = null
@@ -129,6 +130,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     // Open now. The blurred snapshot is only decoration, and waiting for it
     // meant a failed or slow capture left the notch stuck shut.
     expanded = true
+    expandedShape = null
     backdrop.suspendBackdropCapture()
     if (notify) {
       // Hide the collapsed tab before the window jumps, so it cannot flash
@@ -141,8 +143,9 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     applyBounds()
     applyWindowShape()
     mainWindow.setAlwaysOnTop(true, 'screen-saver')
+    const focusMode = getState().settings.focusMode !== false
     if (notify) {
-      if (cached) mainWindow.webContents.send('notch:backdrop', { image: cached })
+      if (focusMode && cached) mainWindow.webContents.send('notch:backdrop', { image: cached })
       mainWindow.webContents.send('notch:expanded', {
         expanded: true,
         viewport: { width: display.bounds.width, height: display.bounds.height }
@@ -155,7 +158,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     syncEscapeShortcut()
     expanding = null
 
-    if (notify && !cached) {
+    if (notify && focusMode && !cached) {
       const target = mainWindow
       void backdrop
         .captureDesktopBackdrop(true)
@@ -172,6 +175,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
   expandToken += 1
   expanding = null
   expanded = false
+  expandedShape = null
   syncEscapeShortcut()
   backdrop.resumeBackdropCapture()
   applyBounds()
@@ -222,7 +226,14 @@ function applyWindowShape(): void {
   try {
     const bounds = mainWindow.getBounds()
     const full = { x: 0, y: 0, width: bounds.width + 2, height: bounds.height + 2 }
-    if (expanded || !collapsedShape) {
+    if (expanded) {
+      // Focus mode owns the whole screen so the backdrop can take a click.
+      // With focus mode off, the renderer sends only the panel (and any
+      // toast) so the rest of the desktop keeps the mouse.
+      mainWindow.setShape(expandedShape && expandedShape.length > 0 ? expandedShape : [full])
+      return
+    }
+    if (!collapsedShape) {
       mainWindow.setShape([full])
       return
     }
@@ -763,10 +774,33 @@ function registerIpc(): void {
   ipcMain.handle('notch:get-expanded', () => expanded)
   ipcMain.handle('notch:get-metrics', () => currentMetrics)
   ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())
-  ipcMain.on('notch:shape', (_event, rect: Electron.Rectangle | null) => {
-    if (rect && rect.width > 0 && rect.height > 0) collapsedShape = rect
-    if (!expanded) applyWindowShape()
-  })
+  ipcMain.on(
+    'notch:shape',
+    (
+      _event,
+      payload:
+        | Electron.Rectangle
+        | Electron.Rectangle[]
+        | { focusOff: true; rects: Electron.Rectangle[] | null }
+        | null
+    ) => {
+      if (payload && typeof payload === 'object' && 'focusOff' in payload) {
+        // Only the open, focus-off panel may clip the full-screen window.
+        // A collapsed-tab report that arrives during the open animation must
+        // not shrink that window down to the tab.
+        if (!expanded) return
+        const list = Array.isArray(payload.rects) ? payload.rects : []
+        const usable = list.filter((item) => item && item.width > 0 && item.height > 0)
+        expandedShape = usable.length > 0 ? usable : null
+        applyWindowShape()
+        return
+      }
+      if (expanded) return
+      const rect = Array.isArray(payload) ? payload[0] : payload
+      if (rect && rect.width > 0 && rect.height > 0) collapsedShape = rect
+      applyWindowShape()
+    }
+  )
   ipcMain.handle('notch:reposition', () => {
     applyBounds()
     return true

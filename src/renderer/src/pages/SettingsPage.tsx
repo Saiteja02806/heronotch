@@ -287,6 +287,22 @@ export function SettingsPage() {
       </aside>
 
       <main className="settings-main">
+        {state.settings.panelSize === 'compact' && (
+          <div className="settings-compact-nav" role="tablist" aria-label="Settings sections">
+            {SECTIONS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                className={section === item.id ? 'is-active' : ''}
+                aria-selected={section === item.id}
+                onClick={() => setSection(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        )}
         <motion.div
           key={section}
           initial={{ opacity: 0, y: 7 }}
@@ -438,6 +454,14 @@ export function SettingsPage() {
           {section === 'notch' && (
             <div className="settings-sections">
               <section className="setting-group">
+                <Toggle
+                  checked={state.settings.focusMode !== false}
+                  onChange={(value) => updateSettings({ focusMode: value })}
+                  label="Focus mode"
+                  description="Blur the screen behind the notch. When this is off, the panel stands alone and clicks outside it reach the desktop."
+                />
+              </section>
+              <section className="setting-group">
                 <div className="setting-group-head">
                   <h3>Style</h3>
                   <p>Pick how the collapsed notch looks.</p>
@@ -544,7 +568,7 @@ export function SettingsPage() {
                   checked={state.settings.pinOnOpen}
                   onChange={setPinned}
                   label="Keep the notch pinned"
-                  description="Stays open when the pointer leaves. Collapse, Esc, and clicking outside still close it."
+                  description="Stays open when the pointer leaves. Collapse and Esc still close it."
                 />
                 <Toggle
                   checked={state.settings.launchAtLogin}

@@ -167,7 +167,7 @@ function ConnectSpotify() {
 
 export function MusicPage() {
   const { openSettings, state } = useApp()
-  const artSize = state.settings.panelSize === 'compact' ? 108 : 226
+  const artSize = state.settings.panelSize === 'compact' ? 84 : 226
   const {
     status,
     playback,

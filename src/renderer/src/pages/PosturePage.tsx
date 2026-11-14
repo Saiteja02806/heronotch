@@ -248,6 +248,15 @@ export function PosturePage() {
         )}
       </section>
 
+      {compact && posture.enabled && (
+        <div className="posture-compact-actions">
+          <span>{posture.metrics?.advice || (posture.status === 'no-pose' ? 'Move into frame' : 'Camera on')}</span>
+          <button type="button" className="soft-button compact" onClick={posture.disable}>
+            <CameraOff size={13} /> Turn off
+          </button>
+        </div>
+      )}
+
       <aside className="posture-panel">
         <div className="posture-panel-head">
           <span className="eyebrow"><PersonStanding size={12} /> Posture</span>

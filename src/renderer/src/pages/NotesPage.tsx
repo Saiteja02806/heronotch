@@ -43,7 +43,6 @@ import {
 import type { NoteSearchResult, VaultNode } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
 import { useVaultPicker } from '../hooks/useVaultPicker'
-import { CompactSlotPortal } from '../components/CompactSlot'
 import { Modal } from '../components/Modal'
 import { formatDateShort } from '../lib/time'
 
@@ -62,6 +61,20 @@ function flattenFolders(nodes: VaultNode[], output: string[] = []): string[] {
     }
   }
   return output
+}
+
+function flattenNoteFiles(nodes: VaultNode[]): { path: string; name: string }[] {
+  const notes: { path: string; name: string }[] = []
+  const walk = (list: VaultNode[]): void => {
+    for (const node of list) {
+      if (node.type === 'folder') walk(node.children || [])
+      else if (node.ext === '.md' || node.ext === '.markdown') {
+        notes.push({ path: node.path, name: node.name.replace(/\.md$/i, '') })
+      }
+    }
+  }
+  walk(nodes)
+  return notes
 }
 
 function countNotes(nodes: VaultNode[]): number {
@@ -514,6 +527,7 @@ export function NotesPage() {
 
   const folders = useMemo(() => flattenFolders(tree), [tree])
   const noteCount = useMemo(() => countNotes(tree), [tree])
+  const noteFiles = useMemo(() => flattenNoteFiles(tree), [tree])
   const visibleResults = useMemo(() => {
     const query = search.trim().toLowerCase()
     if (query && searchResults.length) return searchResults
@@ -1247,32 +1261,30 @@ export function NotesPage() {
         </div>
       </aside>
 
-      {compact && (
-        <CompactSlotPortal>
-          <div className="notes-compact-bar">
-            <div className="sidebar-vault">
-              <span className="vault-avatar">{vaultPath.split(/[\\/]/).filter(Boolean).pop()?.slice(0, 1).toUpperCase()}</span>
-              <div>
-                <span className="eyebrow">Folder</span>
-                <strong>{vaultPath.split(/[\\/]/).filter(Boolean).pop()}</strong>
-              </div>
-            </div>
-            <div className="sidebar-actions">
-              <button className="icon-button subtle" onClick={() => void loadTree()} title="Refresh folder">
-                <RefreshCw size={13} className={loadingTree ? 'spin' : ''} />
-              </button>
-              <button className="icon-button subtle" onClick={() => void createNoteNow()} title="New note">
-                <FilePlus2 size={14} />
-              </button>
-              <button className="icon-button subtle" onClick={() => setEntryDialog({ mode: 'folder', parent: currentFolder })} title="New folder">
-                <FolderPlus size={14} />
-              </button>
-            </div>
-          </div>
-        </CompactSlotPortal>
-      )}
-
       <main className="note-workspace">
+        {compact && (
+          <div className="note-switcher">
+            <select
+              aria-label="Choose a note"
+              value={selectedPath || ''}
+              onChange={(event) => {
+                const next = event.target.value
+                if (next) void selectFile(next)
+              }}
+            >
+              <option value="">{noteFiles.length === 0 ? 'No notes yet' : 'Choose a note'}</option>
+              {noteFiles.map((note) => (
+                <option key={note.path} value={note.path}>
+                  {note.name}
+                </option>
+              ))}
+            </select>
+            <button className="icon-button" onClick={() => void createNoteNow()} title="New note">
+              <FilePlus2 size={14} />
+            </button>
+          </div>
+        )}
+
         {!selectedPath ? (
           <div className="note-welcome">
             <div className="note-welcome-icon"><FileText size={26} /></div>

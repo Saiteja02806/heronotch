@@ -31,6 +31,8 @@ export interface Settings {
   userName: string
   pinOnOpen: boolean
   panelSize: 'full' | 'compact'
+  /** Blur and dim the desktop behind the open notch. On unless turned off. */
+  focusMode: boolean
 }
 
 export interface TimerState {
@@ -283,7 +285,13 @@ export interface NotchApi {
   getVersion: () => Promise<string>
   setState: (patch: AppStatePatch) => Promise<AppState>
   setExpanded: (expanded: boolean) => Promise<boolean>
-  setShape: (rect: { x: number; y: number; width: number; height: number } | null) => void
+  setShape: (
+    rect:
+      | { x: number; y: number; width: number; height: number }
+      | { x: number; y: number; width: number; height: number }[]
+      | { focusOff: true; rects: { x: number; y: number; width: number; height: number }[] | null }
+      | null
+  ) => void
   getExpanded: () => Promise<boolean>
   getBackdrop: () => Promise<string | null>
   quit: () => void

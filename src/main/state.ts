@@ -29,7 +29,8 @@ const DEFAULT_SETTINGS: Settings = {
   spotifyRedirectPort: 43821,
   userName: '',
   pinOnOpen: false,
-  panelSize: 'full'
+  panelSize: 'full',
+  focusMode: true
 }
 
 function localDayKey(date = new Date()): string {

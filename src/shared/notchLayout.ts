@@ -148,9 +148,11 @@ export function dockedPanelSize(
   compact: boolean
 ): { width: number; height: number } {
   if (compact) {
+    // A short single-column card. Keep this in step with the compact panel
+    // rule in styles.css — the flight lands on these numbers.
     return {
-      width: Math.round(Math.min(520, viewportWidth - 28)),
-      height: Math.round(Math.min(318, viewportHeight * 0.44))
+      width: Math.round(Math.min(440, viewportWidth - 32)),
+      height: Math.round(Math.min(360, Math.max(300, viewportHeight * 0.42)))
     }
   }
   return {
