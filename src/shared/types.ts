@@ -40,6 +40,10 @@ export interface Settings {
    * `auto` uses the session that is playing. Anything else is that app's id.
    */
   mediaSource?: string
+  /** Hide the tab while another app covers the primary display. On unless turned off. */
+  autoHideFullscreen?: boolean
+  /** Process names the tab must never sit on top of, with or without .exe. */
+  neverOver?: string[]
   /**
    * Which header sections are on the notch, and in what order.
    * Absent on older saves; filled in from the water switch on load.

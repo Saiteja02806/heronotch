@@ -32,7 +32,9 @@ const DEFAULT_SETTINGS: Settings = {
   pinOnOpen: false,
   panelSize: 'full',
   focusMode: true,
-  mediaSource: 'auto'
+  mediaSource: 'auto',
+  autoHideFullscreen: true,
+  neverOver: []
 }
 
 function localDayKey(date = new Date()): string {

@@ -74,6 +74,29 @@ const NOTCH_STYLES: { id: NotchStyle; label: string; description: string }[] = [
   { id: 'notch-micro', label: 'Notch micro', description: 'Bare, extra tiny.' }
 ]
 
+function NeverOverField() {
+  const { state, updateSettings } = useApp()
+  const [text, setText] = useState((state.settings.neverOver || []).join(', '))
+  return (
+    <label className="setting-field">
+      <span>Never show over</span>
+      <input
+        value={text}
+        placeholder="obs64, League of Legends"
+        onChange={(event) => setText(event.target.value)}
+        onBlur={() => {
+          const names = text
+            .split(',')
+            .map((name) => name.trim())
+            .filter((name) => name.length > 0)
+          updateSettings({ neverOver: names })
+        }}
+      />
+      <small>Process names, separated by commas. The tab stays hidden while one of these is in front.</small>
+    </label>
+  )
+}
+
 function SectionManager() {
   const { state, updateSettings, showToast } = useApp()
   const prefs = sectionPrefs(state)
@@ -699,6 +722,23 @@ export function SettingsPage() {
                   <span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Space</kbd></span>
                   <strong>Toggle the notch</strong>
                 </div>
+                <div className="shortcut-card">
+                  <span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>Space</kbd></span>
+                  <strong>Hide or show the tab</strong>
+                </div>
+              </section>
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Get out of the way</h3>
+                  <p>The tab steps aside for fullscreen apps, and for any app you name.</p>
+                </div>
+                <Toggle
+                  checked={state.settings.autoHideFullscreen !== false}
+                  onChange={(value) => updateSettings({ autoHideFullscreen: value })}
+                  label="Hide over fullscreen apps"
+                  description="When another window covers the primary display, the tab disappears until you come back."
+                />
+                <NeverOverField />
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">

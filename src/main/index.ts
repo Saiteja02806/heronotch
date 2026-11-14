@@ -19,6 +19,8 @@ import { execFile, execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { AppState, AppStatePatch, NotchMetrics } from '../shared/types'
+import { startForegroundWatch, stopForegroundWatch } from './foreground'
+import { shouldAutoHide } from '../shared/presence'
 import { followWithSpotifyApi } from '../shared/mediaFollow'
 import { collapsedLayout } from '../shared/notchLayout'
 import * as backdrop from './backdrop'
@@ -51,6 +53,29 @@ let rendererRecoveries = 0
 let failureDialogOpen = false
 let currentMetrics: NotchMetrics | null = null
 let closeFallback: NodeJS.Timeout | null = null
+let userHidden = false
+let autoHidden = false
+let presenceApplied: boolean | null = null
+
+function applyPresence(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const hidden = userHidden || autoHidden
+  if (presenceApplied === hidden) return
+  presenceApplied = hidden
+  if (hidden) {
+    if (expanded) void setExpanded(false)
+    mainWindow.setOpacity(0)
+    mainWindow.setIgnoreMouseEvents(true, { forward: true })
+    logLine(`notch hidden user=${userHidden} auto=${autoHidden}`)
+    return
+  }
+  mainWindow.setOpacity(1)
+  mainWindow.setIgnoreMouseEvents(false)
+  applyWindowShape()
+  mainWindow.showInactive()
+  mainWindow.setSkipTaskbar(true)
+  logLine('notch shown')
+}
 
 function logLine(message: string): void {
   try {
@@ -1121,11 +1146,19 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
 function registerGlobalShortcuts(): void {
   try {
     globalShortcut.register('CommandOrControl+Shift+Space', () => {
+      if (userHidden || autoHidden) {
+        userHidden = false
+        applyPresence()
+      }
       if (expanded) {
         requestAnimatedClose()
         return
       }
       void setExpanded(true).then(() => mainWindow?.focus())
+    })
+    globalShortcut.register('CommandOrControl+Alt+Space', () => {
+      userHidden = !userHidden
+      applyPresence()
     })
   } catch {
     // Another app may already own the shortcut; the notch is still hoverable.
@@ -1199,6 +1232,12 @@ if (!gotLock) {
     }
     registerIpc()
     localMedia.startLocalMediaMonitor()
+    startForegroundWatch((sample) => {
+      const next = shouldAutoHide(sample, getState().settings)
+      if (next === autoHidden) return
+      autoHidden = next
+      applyPresence()
+    })
     createWindow()
     createTray()
     logLine(`window created bounds=${JSON.stringify(mainWindow?.getBounds())} tray=${Boolean(tray)}`)
@@ -1245,6 +1284,7 @@ if (!gotLock) {
     logLine('quitting')
     flushState()
     localMedia.stopLocalMediaMonitor()
+    stopForegroundWatch()
     obsidian.closeVaultWatcher()
     clearReminderTimers()
     globalShortcut.unregisterAll()
