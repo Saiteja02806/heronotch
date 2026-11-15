@@ -76,12 +76,19 @@ function phaseFromError(message: string): PlaybackPhase {
 
 const MediaContext = createContext<MediaContextValue | null>(null)
 
+/** Real Spotify track ids are base62-ish. Locally detected sessions use `local-…`. */
+function isSpotifyTrackId(trackId: string | undefined): boolean {
+  return Boolean(trackId && /^[A-Za-z0-9]{10,}$/.test(trackId))
+}
+
 function readCachedPlayback(): SpotifyPlayback | null {
   try {
     const raw = window.localStorage.getItem('notch:spotify:playback')
     if (!raw) return null
     const parsed = JSON.parse(raw) as SpotifyPlayback
-    if (!parsed?.track?.id || !/^[A-Za-z0-9]{10,}$/.test(parsed.track.id)) return null
+    // Keep any remembered track, including tracks read from the Windows media
+    // session while Spotify was closed.
+    if (!parsed?.track?.id || !parsed.track.name) return null
     return { ...parsed, playing: false, device: null }
   } catch {
     return null
@@ -89,7 +96,7 @@ function readCachedPlayback(): SpotifyPlayback | null {
 }
 
 function spotifyTrackTarget(trackId: string | undefined): string | undefined {
-  if (!trackId || !/^[A-Za-z0-9]{10,}$/.test(trackId)) return undefined
+  if (!isSpotifyTrackId(trackId)) return undefined
   return `spotify:track:${trackId}`
 }
 
@@ -124,12 +131,15 @@ export function MediaProvider({ children }: { children: ReactNode }) {
     if (!next?.track) return
     cachedRef.current = next
     const trackId = next.track.id
-    if (!trackId || !/^[A-Za-z0-9]{10,}$/.test(trackId)) return
+    if (!trackId) return
     try {
       window.localStorage.setItem('notch:spotify:playback', JSON.stringify(next))
     } catch {
       // ignore
     }
+    // Only real Spotify tracks can be resumed through the Web API, so a
+    // locally detected track never replaces the remembered one.
+    if (!isSpotifyTrackId(trackId)) return
     const contextUri = next.contextUri || null
     const previous = memoryRef.current
     if (previous?.track.id === trackId && (previous.contextUri || null) === contextUri) return
@@ -392,6 +402,16 @@ export function MediaProvider({ children }: { children: ReactNode }) {
       return
     }
     if (apiConnected && (!current?.playing || !deviceReady)) {
+      // A cached track read from the Windows media session has no Spotify id,
+      // so the Web API cannot resume it. Open the desktop app instead.
+      if (!deviceReady && current?.track && !isSpotifyTrackId(current.track.id)) {
+        setPhase('opening')
+        showToast('Spotify', 'Opening Spotify and starting the last track…')
+        const opened = await openSpotify(true)
+        setPhase(opened ? 'idle' : 'no-device')
+        if (!opened) showToast('Spotify', 'Could not open Spotify on this computer.', 'error')
+        return
+      }
       await action({ type: 'play' })
       return
     }
