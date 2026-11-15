@@ -29,7 +29,7 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent
 } from 'react'
-import type { Accent, NotchPosition, NotchStyle } from '../../../shared/types'
+import type { Accent, NotchDisplay, NotchPosition, NotchStyle } from '../../../shared/types'
 import { placementPreview } from '../../../shared/notchLayout'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
@@ -255,7 +255,9 @@ export function SettingsPage() {
     state.settings.notchPosition || { x: 0.5, y: 0 }
   )
   const [draggingPlacement, setDraggingPlacement] = useState(false)
-  const preview = placementPreview(state.settings.notchStyle)
+  const [displays, setDisplays] = useState<NotchDisplay[]>([])
+  const [effectiveStyle, setEffectiveStyle] = useState<NotchStyle | undefined>(undefined)
+  const preview = placementPreview(effectiveStyle || state.settings.notchStyle)
   const previewCenter = `calc(${position.x} * (100% - ${preview.width}px) + ${preview.width / 2}px)`
   const [focusMin, setFocusMin] = useState(String(state.timer.durations.focus))
   const [shortMin, setShortMin] = useState(String(state.timer.durations.short))
@@ -263,6 +265,27 @@ export function SettingsPage() {
   const [copied, setCopied] = useState(false)
   const [savingSpotify, setSavingSpotify] = useState(false)
   const [showSpotifyAdvanced, setShowSpotifyAdvanced] = useState(false)
+
+  // Refresh the monitor list whenever the notch section is opened, so a screen
+  // plugged in while Settings was closed still appears.
+  useEffect(() => {
+    if (section !== 'notch') return
+    let alive = true
+    void window.notch.displays().then((list) => {
+      if (alive) setDisplays(list)
+    })
+    void window.notch.getMetrics().then((metrics) => {
+      if (alive) setEffectiveStyle(metrics?.style)
+    })
+    return () => {
+      alive = false
+    }
+  }, [section])
+
+  const savedDisplay = state.settings.notchDisplay || 'primary'
+  const primaryDisplay = displays.find((display) => display.primary)
+  const savedDisplayMissing =
+    savedDisplay !== 'primary' && !displays.some((display) => display.id === savedDisplay)
 
   // Keep the form in sync if state is recovered or updated from another view.
   useEffect(() => {
@@ -592,6 +615,58 @@ export function SettingsPage() {
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">
+                  <h3>Display</h3>
+                  <p>Which monitor the notch sits on.</p>
+                </div>
+                <div className="setting-row">
+                  <span className="setting-copy">
+                    <strong>Show on</strong>
+                    <small>
+                      {displays.length > 1
+                        ? 'An unplugged monitor falls back to the primary screen and comes back when reconnected.'
+                        : 'Connect a second monitor to move the notch there.'}
+                    </small>
+                  </span>
+                  <select
+                    className="setting-select"
+                    value={savedDisplay}
+                    onChange={(event) => {
+                      const next = event.target.value
+                      updateSettings({ notchDisplay: next })
+                      const target = displays.find((display) => display.id === next)
+                      showToast(
+                        'Display saved',
+                        target
+                          ? `The notch will sit on ${target.label} (${target.width}×${target.height}).`
+                          : 'The notch will sit on the primary display.',
+                        'success'
+                      )
+                    }}
+                  >
+                    <option value="primary">
+                      Primary display{primaryDisplay ? ` · ${primaryDisplay.width}×${primaryDisplay.height}` : ''}
+                    </option>
+                    {displays
+                      .filter((display) => !display.primary)
+                      .map((display) => (
+                        <option key={display.id} value={display.id}>
+                          {display.label} · {display.width}×{display.height}
+                        </option>
+                      ))}
+                    {savedDisplayMissing && (
+                      <option value={savedDisplay}>Last screen (unplugged)</option>
+                    )}
+                  </select>
+                </div>
+                <Toggle
+                  checked={state.settings.pillOnOtherDisplays !== false}
+                  onChange={(value) => updateSettings({ pillOnOtherDisplays: value })}
+                  label="Small pill on other displays"
+                  description="On a monitor without a physical notch, the tab shrinks to a small pill. Turn this off to keep your chosen style everywhere."
+                />
+              </section>
+              <section className="setting-group">
+                <div className="setting-group-head">
                   <h3>Placement</h3>
                   <p>Drag the notch anywhere on the screen map.</p>
                 </div>
@@ -742,7 +817,7 @@ export function SettingsPage() {
                   checked={state.settings.autoHideFullscreen !== false}
                   onChange={(value) => updateSettings({ autoHideFullscreen: value })}
                   label="Hide over fullscreen apps"
-                  description="When another window covers the primary display, the tab disappears until you come back."
+                  description="When another window covers the display the notch is on, the tab disappears until you come back."
                 />
                 <NeverOverField />
               </section>

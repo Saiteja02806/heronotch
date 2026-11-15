@@ -40,8 +40,12 @@ export interface Settings {
    * `auto` uses the session that is playing. Anything else is that app's id.
    */
   mediaSource?: string
-  /** Hide the tab while another app covers the primary display. On unless turned off. */
+  /** Hide the tab while another app covers the display the notch is on. On unless turned off. */
   autoHideFullscreen?: boolean
+  /** Display the notch lives on: `primary`, or the id of a connected display. */
+  notchDisplay?: string
+  /** On a display other than the primary one, shrink the tab to a small pill. */
+  pillOnOtherDisplays?: boolean
   /** Process names the tab must never sit on top of, with or without .exe. */
   neverOver?: string[]
   /** Turn off motion in the notch, in addition to the system setting. */
@@ -51,6 +55,14 @@ export interface Settings {
    * Absent on older saves; filled in from the water switch on load.
    */
   sections?: SectionPrefs
+}
+
+export interface NotchDisplay {
+  id: string
+  label: string
+  width: number
+  height: number
+  primary: boolean
 }
 
 export interface TimerState {
@@ -323,6 +335,8 @@ export interface NotchMetrics {
   tab: { x: number; y: number; width: number; height: number; radius: number }
   tabScreen: { x: number; y: number; width: number; height: number }
   noticeAbove: boolean
+  /** Style actually drawn. Differs from the setting on a secondary display. */
+  style?: NotchStyle
 }
 
 export interface BackdropEvent {
@@ -376,6 +390,7 @@ export interface NotchApi {
   onNavigate: (callback: (page: string) => void) => () => void
   getMetrics: () => Promise<NotchMetrics | null>
   onMetrics: (callback: (metrics: NotchMetrics) => void) => () => void
+  displays: () => Promise<NotchDisplay[]>
   onRequestClose: (callback: () => void) => () => void
   onPrepareOpen: (callback: () => void) => () => void
   onPresence: (callback: (event: { hidden: boolean }) => void) => () => void

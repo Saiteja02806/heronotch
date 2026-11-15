@@ -19,10 +19,11 @@ import { execFile, execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { AppState, AppStatePatch, NotchMetrics } from '../shared/types'
-import { pauseForegroundWatch, resumeForegroundWatch, startForegroundWatch, stopForegroundWatch } from './foreground'
+import { pauseForegroundWatch, resumeForegroundWatch, setForegroundTarget, startForegroundWatch, stopForegroundWatch } from './foreground'
 import { shouldAutoHide } from '../shared/presence'
 import { followWithSpotifyApi } from '../shared/mediaFollow'
 import { collapsedLayout } from '../shared/notchLayout'
+import { displayPhysicalSize, effectiveNotchStyle, listDisplays, notchDisplay } from './notchDisplay'
 import * as backdrop from './backdrop'
 import * as localMedia from './localMedia'
 import * as obsidian from './obsidian'
@@ -122,9 +123,10 @@ function tabHit(metrics: NotchMetrics): Electron.Rectangle {
 // shape and a CSS transform. Resizing a transparent window on Windows
 // reallocates the DWM surface and is what made the notch feel late.
 function refreshCollapsedLayout(): Electron.Rectangle {
-  const display = screen.getPrimaryDisplay()
+  const display = notchDisplay()
   const settings = getState().settings
-  const layout = collapsedLayout(settings.notchPosition, display.workArea, settings.notchStyle)
+  const style = effectiveNotchStyle(display)
+  const layout = collapsedLayout(settings.notchPosition, display.workArea, style)
   const tab = layout.metrics.tabScreen
   currentMetrics = {
     tab: {
@@ -135,7 +137,8 @@ function refreshCollapsedLayout(): Electron.Rectangle {
       radius: layout.metrics.tab.radius
     },
     tabScreen: layout.metrics.tabScreen,
-    noticeAbove: layout.metrics.noticeAbove
+    noticeAbove: layout.metrics.noticeAbove,
+    style
   }
   const win = mainWindow
   if (win && !win.isDestroyed()) win.webContents.send('notch:metrics', currentMetrics)
@@ -197,7 +200,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     backdrop.suspendBackdropCapture()
     applyWindowShape()
     mainWindow.setAlwaysOnTop(true, 'screen-saver')
-    const display = screen.getPrimaryDisplay()
+    const display = notchDisplay()
     const focusMode = getState().settings.focusMode !== false
     if (notify) {
       if (focusMode && cached) mainWindow.webContents.send('notch:backdrop', { image: cached })
@@ -820,8 +823,14 @@ function registerIpc(): void {
       })
     }
 
-    if (patch.settings?.notchPosition !== undefined || patch.settings?.notchStyle !== undefined) {
+    if (
+      patch.settings?.notchPosition !== undefined ||
+      patch.settings?.notchStyle !== undefined ||
+      patch.settings?.notchDisplay !== undefined ||
+      patch.settings?.pillOnOtherDisplays !== undefined
+    ) {
       applyBounds()
+      setForegroundTarget(displayPhysicalSize(notchDisplay()))
     }
     if (patch.tasks) scheduleRemindersSoon()
     refreshVaultWatcher()
@@ -835,6 +844,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('notch:get-expanded', () => expanded)
   ipcMain.handle('notch:get-metrics', () => currentMetrics)
+  ipcMain.handle('notch:displays', () => listDisplays())
   ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())
   ipcMain.on(
     'notch:shape',
@@ -1236,12 +1246,15 @@ if (!gotLock) {
     }
     registerIpc()
     localMedia.startLocalMediaMonitor()
-    startForegroundWatch((sample) => {
-      const next = shouldAutoHide(sample, getState().settings)
-      if (next === autoHidden) return
-      autoHidden = next
-      applyPresence()
-    })
+    startForegroundWatch(
+      (sample) => {
+        const next = shouldAutoHide(sample, getState().settings)
+        if (next === autoHidden) return
+        autoHidden = next
+        applyPresence()
+      },
+      displayPhysicalSize(notchDisplay())
+    )
     createWindow()
     createTray()
     logLine(`window created bounds=${JSON.stringify(mainWindow?.getBounds())} tray=${Boolean(tray)}`)
@@ -1266,9 +1279,22 @@ if (!gotLock) {
       refreshVaultWatcher()
     })
 
-    screen.on('display-metrics-changed', applyBounds)
-    screen.on('display-added', applyBounds)
-    screen.on('display-removed', applyBounds)
+    const handleDisplayChange = (): void => {
+      applyBounds()
+      setForegroundTarget(displayPhysicalSize(notchDisplay()))
+      // A monitor that went away can leave the panel parked off-screen.
+      if (expanded) {
+        const display = notchDisplay()
+        mainWindow?.webContents.send('notch:expanded', {
+          expanded: true,
+          viewport: { width: display.bounds.width, height: display.bounds.height }
+        })
+      }
+      logLine(`display change bounds=${JSON.stringify(notchDisplay().bounds)}`)
+    }
+    screen.on('display-metrics-changed', handleDisplayChange)
+    screen.on('display-added', handleDisplayChange)
+    screen.on('display-removed', handleDisplayChange)
     powerMonitor.on('suspend', () => {
       sessionLocked = true
       localMedia.pauseLocalMediaMonitor()

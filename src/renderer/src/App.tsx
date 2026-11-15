@@ -522,7 +522,7 @@ function Shell() {
         <EdgeGlow tick={glowTick} ready={settled && !closing && expanded} />
       </div>
       <div className={`collapsed-layer${expanded ? ' is-hidden' : ''}`}>
-        <CollapsedBar onOpen={openImmediately} />
+        <CollapsedBar onOpen={openImmediately} style={metrics?.style} />
         {!expanded && <CollapsedNotice onOpen={openImmediately} />}
       </div>
       {expanded && <Toasts />}

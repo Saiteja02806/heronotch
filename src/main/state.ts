@@ -34,6 +34,8 @@ const DEFAULT_SETTINGS: Settings = {
   focusMode: true,
   mediaSource: 'auto',
   autoHideFullscreen: true,
+  notchDisplay: 'primary',
+  pillOnOtherDisplays: true,
   neverOver: [],
   reduceMotion: false
 }

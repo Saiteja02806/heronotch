@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppState,
   NotchApi,
+  NotchDisplay,
   NotchMetrics,
   NoteSearchResult,
   ReminderEvent,
@@ -42,6 +43,7 @@ const api: NotchApi = {
   onVaultChanged: (callback) => subscribe('vault:changed', callback),
   onNavigate: (callback) => subscribe('navigate', callback),
   getMetrics: () => ipcRenderer.invoke('notch:get-metrics') as Promise<NotchMetrics | null>,
+  displays: () => ipcRenderer.invoke('notch:displays') as Promise<NotchDisplay[]>,
   onMetrics: (callback) => subscribe<NotchMetrics>('notch:metrics', callback),
   onRequestClose: (callback) => subscribe<void>('notch:request-close', () => callback()),
   onPrepareOpen: (callback) => subscribe<void>('notch:prepare-open', () => callback()),

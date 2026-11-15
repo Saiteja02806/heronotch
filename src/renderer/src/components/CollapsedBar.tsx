@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { useApp, useTimerClock } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
 import { formatTimer, todayKey } from '../lib/time'
+import type { NotchStyle } from '../../../shared/types'
 import { EdgeGlow } from './EdgeGlow'
 import { Logo } from './Logo'
 
@@ -16,11 +17,11 @@ function Equalizer({ playing }: { playing: boolean }) {
   )
 }
 
-export function CollapsedBar({ onOpen }: { onOpen: () => void }) {
+export function CollapsedBar({ onOpen, style: styleProp }: { onOpen: () => void; style?: NotchStyle }) {
   const { state, sessions, glowTick } = useApp()
   const { remaining: timerRemaining } = useTimerClock()
   const { playback, progressMs } = useMedia()
-  const style = state.settings.notchStyle || 'minimal'
+  const style = styleProp || state.settings.notchStyle || 'minimal'
   const detailed = style === 'full' || style === 'compact' || style === 'pill'
   const track = playback?.track
   const progress = track && track.duration ? Math.min(1, progressMs / track.duration) : 0

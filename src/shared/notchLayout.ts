@@ -37,6 +37,8 @@ export interface NotchMetrics {
   /** Tab origin on screen. The open animation flies back to this point. */
   tabScreen: { x: number; y: number; width: number; height: number }
   noticeAbove: boolean
+  /** Style actually drawn. Differs from the setting on a secondary display. */
+  style?: NotchStyle
 }
 
 interface TabSpec {

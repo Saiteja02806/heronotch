@@ -1,4 +1,5 @@
-import { app, desktopCapturer, screen } from 'electron'
+import { app, desktopCapturer } from 'electron'
+import { notchDisplay } from './notchDisplay'
 
 let cachedBackdrop: string | null = null
 let cachedAt = 0
@@ -19,7 +20,7 @@ export function getCachedAt(): number {
 // (or cancel) opening the notch and stall mouse input while it ran.
 async function capture(force: boolean): Promise<string | null> {
   try {
-    const display = screen.getPrimaryDisplay()
+    const display = notchDisplay()
     const scale = display.scaleFactor || 1
     const sourceWidth = display.size.width * scale
     const sourceHeight = display.size.height * scale
