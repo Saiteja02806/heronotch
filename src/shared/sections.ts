@@ -1,5 +1,5 @@
 /** Header sections, in the order a new notch shows them. Settings is not one of these. */
-export const SECTION_IDS = ['home', 'notes', 'music', 'planner', 'sessions', 'posture', 'water'] as const
+export const SECTION_IDS = ['home', 'notes', 'music', 'planner', 'sessions', 'posture', 'water', 'phone'] as const
 
 export type SectionId = (typeof SECTION_IDS)[number]
 

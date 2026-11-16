@@ -6,6 +6,7 @@ import {
   Music2,
   NotebookPen,
   PersonStanding,
+  Smartphone,
   type LucideIcon
 } from 'lucide-react'
 import {
@@ -69,6 +70,12 @@ export const SECTION_META: Record<SectionId, SectionMeta & { icon: LucideIcon }>
     label: 'Water',
     icon: Droplet,
     kept: 'Today’s glasses and your goal stay saved.'
+  },
+  phone: {
+    id: 'phone',
+    label: 'Phone',
+    icon: Smartphone,
+    kept: 'Saved text stays in the draft, and transfers keep expiring on schedule.'
   }
 }
 
