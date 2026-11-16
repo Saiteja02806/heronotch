@@ -5299,6 +5299,108 @@ input[type='range']:focus::-webkit-slider-thumb {
   padding: 12px 13px;
 }
 
+/* The Google Calendar agenda reuses the shared calendar.css rules; this tail
+   fits them into the notch's side-column sizing. */
+.google-side .google-calendar-agenda {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.google-side .google-calendar-heading {
+  flex-wrap: nowrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.google-side .google-calendar-heading .eyebrow {
+  font-size: 7.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.google-side .google-calendar-agenda p {
+  font-size: 8.5px;
+  margin: 5px 0;
+}
+
+.google-side .google-calendar-hint {
+  opacity: 1;
+  color: var(--muted-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.google-side .google-calendar-error {
+  font-size: 8.5px;
+}
+
+.google-side .google-calendar-actions {
+  gap: 5px;
+  margin: 6px 0;
+}
+
+.google-side .google-calendar-actions label {
+  gap: 4px;
+}
+
+.google-side .google-calendar-agenda input,
+.google-side .google-calendar-agenda select,
+.google-side .google-calendar-agenda textarea {
+  font-size: 9px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.google-side .google-calendar-agenda input::placeholder {
+  color: var(--muted-2);
+}
+
+.google-side .google-calendar-event {
+  padding: 6px 0;
+  gap: 6px;
+  border-top-color: rgba(255, 255, 255, 0.05);
+}
+
+.google-side .google-calendar-event > div {
+  display: block;
+}
+
+.google-side .google-calendar-event strong {
+  display: block;
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.google-side .google-calendar-event .google-calendar-hint {
+  display: block;
+  margin-top: 2px;
+}
+
+.google-side .google-calendar-editor {
+  margin-top: 8px;
+  gap: 8px;
+}
+
+.google-side .google-calendar-editor label {
+  gap: 4px;
+  font-size: 8px;
+}
+
+.google-side .google-calendar-editor span {
+  color: var(--muted-2);
+  font-size: 7.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 .side-card-head {
   display: flex;
   align-items: center;

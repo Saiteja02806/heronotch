@@ -27,6 +27,8 @@ import {
 } from '../lib/time'
 import { useApp } from '../state/AppContext'
 import { useNow } from '../state/clock'
+import { GoogleCalendarAgenda } from '../components/GoogleCalendarAgenda'
+import '../calendar.css'
 
 interface EditorState {
   task?: Task
@@ -536,6 +538,10 @@ export function PlannerPage() {
             <strong>{openTasks.length}</strong>
             <span>open</span>
           </div>
+        </div>
+
+        <div className="side-card google-side">
+          <GoogleCalendarAgenda date={plannerDate} dateLabel={formatDateShort(plannerDate)} />
         </div>
       </aside>
 
