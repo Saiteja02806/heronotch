@@ -17,7 +17,15 @@ function Equalizer({ playing }: { playing: boolean }) {
   )
 }
 
-export function CollapsedBar({ onOpen, style: styleProp }: { onOpen: () => void; style?: NotchStyle }) {
+export function CollapsedBar({
+  onOpen,
+  onOpenSessions,
+  style: styleProp
+}: {
+  onOpen: () => void
+  onOpenSessions?: () => void
+  style?: NotchStyle
+}) {
   const { state, sessions, glowTick } = useApp()
   const { remaining: timerRemaining } = useTimerClock()
   const { playback, progressMs } = useMedia()
@@ -26,12 +34,20 @@ export function CollapsedBar({ onOpen, style: styleProp }: { onOpen: () => void;
   const track = playback?.track
   const progress = track && track.duration ? Math.min(1, progressMs / track.duration) : 0
   const liveSessions = sessions?.sessions.filter((session) => session.active).length || 0
+  // Coding agents worth a glance while the tab is collapsed. App presence is
+  // the honest "how many IDEs are open" number; live conversations cover an
+  // agent chatting without a spotted process. Shown on every tab style, even
+  // the bare ones — otherwise the only way to find out is to open the notch,
+  // which nobody does on spec.
+  const runningApps = sessions?.apps.filter((app) => app.running).length ?? 0
+  const agentCount = Math.max(runningApps, liveSessions)
   const today = todayKey()
   const nextTask = state.tasks
     .filter((task) => !task.done && task.date === today)
     .sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'))[0]
   const showTimer = detailed && style !== 'pill' && timerRemaining > 0 && state.timer.running
-  const showSessions = detailed && style !== 'pill' && liveSessions > 0
+  const showSessions = detailed && style !== 'pill' && agentCount > 0
+  const showFloatingBadge = !detailed && agentCount > 0
   const showEmptyEqualizer = !detailed && Boolean(track && playback?.playing)
 
   return (
@@ -78,10 +94,15 @@ export function CollapsedBar({ onOpen, style: styleProp }: { onOpen: () => void;
           {showSessions && (
             <span
               className="mini-sessions"
-              title={`${liveSessions} live coding session${liveSessions === 1 ? '' : 's'}`}
+              role="button"
+              title={`${agentCount} coding ${agentCount === 1 ? 'agent' : 'agents'} running — see sessions`}
+              onClick={(event) => {
+                event.stopPropagation()
+                onOpenSessions?.()
+              }}
             >
               <Bot size={10} />
-              {liveSessions}
+              {agentCount}
             </span>
           )}
           <ChevronDown size={12} className="mini-chevron" />
@@ -94,6 +115,20 @@ export function CollapsedBar({ onOpen, style: styleProp }: { onOpen: () => void;
       ) : showEmptyEqualizer ? (
         <Equalizer playing />
       ) : null}
+      {showFloatingBadge && (
+        <span
+          className="mini-sessions is-float"
+          role="button"
+          title={`${agentCount} coding ${agentCount === 1 ? 'agent' : 'agents'} running — see sessions`}
+          onClick={(event) => {
+            event.stopPropagation()
+            onOpenSessions?.()
+          }}
+        >
+          <Bot size={9} />
+          {agentCount}
+        </span>
+      )}
       <EdgeGlow tick={glowTick} ready />
     </button>
   )

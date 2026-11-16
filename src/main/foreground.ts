@@ -13,9 +13,24 @@ export interface TargetSize {
   height: number
 }
 
-function buildScript(target: TargetSize): string {
+function buildScript(target: TargetSize, watchBrowser: boolean): string {
   const width = Math.max(1, Math.round(target.width))
   const height = Math.max(1, Math.round(target.height))
+  const browserSetup = watchBrowser ? `
+$browserNames = @('chrome','msedge','firefox','brave','opera','opera_gx','vivaldi','Arc','zen','waterfox','librewolf','chromium')
+# Include other installed browsers registered with Windows, as well as portable copies above.
+$clientRoots = 'HKCU:\\SOFTWARE\\Clients\\StartMenuInternet','HKLM:\\SOFTWARE\\Clients\\StartMenuInternet','HKLM:\\SOFTWARE\\WOW6432Node\\Clients\\StartMenuInternet'
+foreach ($client in (Get-ChildItem $clientRoots -ErrorAction SilentlyContinue)) {
+  $commandKey = Get-Item -LiteralPath ($client.PSPath + '\\shell\\open\\command') -ErrorAction SilentlyContinue
+  if ($commandKey -and ($commandKey.GetValue('') -match '^\\s*"?([^"]+?\\.exe)(?:"|\\s|$)')) {
+    $browserNames += [IO.Path]::GetFileNameWithoutExtension($Matches[1])
+  }
+}
+$browserNames = $browserNames | Sort-Object -Unique
+` : ''
+  const browserProbe = watchBrowser
+    ? '[bool](Get-Process -Name $browserNames -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1)'
+    : '$false'
   return `
 Add-Type -TypeDefinition @"
 using System;
@@ -37,6 +52,7 @@ try { [void][NotchFore]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) } catc
 $targetWidth = ${width}
 $targetHeight = ${height}
 \$notchPid = ${process.pid}
+${browserSetup}
 while (\$true) {
   try {
     \$hwnd = [NotchFore]::GetForegroundWindow()
@@ -54,7 +70,9 @@ while (\$true) {
     \$zoomed = [NotchFore]::IsZoomed(\$hwnd)
     \$covers = (-not \$zoomed) -and \$width -ge (\$targetWidth - 12) -and \$height -ge (\$targetHeight - 12) -and \$width -le (\$targetWidth + 48) -and \$height -le (\$targetHeight + 48)
     \$own = (\$procId -eq \$notchPid)
-    \$result = [ordered]@{ process = \$name; fullscreen = [bool](\$covers -and -not \$own); own = [bool]\$own }
+    # A minimized or background window counts. Background-only processes do not.
+    $browserOpen = ${browserProbe}
+    \$result = [ordered]@{ process = \$name; fullscreen = [bool](\$covers -and -not \$own); own = [bool]\$own; browserOpen = $browserOpen }
     [Console]::Out.WriteLine((ConvertTo-Json \$result -Compress))
     [Console]::Out.Flush()
   } catch {
@@ -67,17 +85,19 @@ while (\$true) {
 }
 
 let child: ChildProcess | null = null
-let buffer = ''
 let stopped = false
 let listener: ((sample: ForegroundSample) => void) | null = null
 let target: TargetSize | null = null
+let watchBrowser = false
 
 export function startForegroundWatch(
   onSample: (sample: ForegroundSample) => void,
-  nextTarget?: TargetSize
+  nextTarget?: TargetSize,
+  browserOnly = watchBrowser
 ): void {
   listener = onSample
   if (nextTarget) target = nextTarget
+  watchBrowser = browserOnly
   if (process.platform !== 'win32' || child) return
   stopped = false
   try {
@@ -92,7 +112,7 @@ export function startForegroundWatch(
         '-WindowStyle',
         'Hidden',
         '-Command',
-        buildScript(target || { width: 1920, height: 1080 })
+        buildScript(target || { width: 1920, height: 1080 }, watchBrowser)
       ],
       { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }
     )
@@ -101,8 +121,10 @@ export function startForegroundWatch(
     return
   }
   const spawned = child
+  let buffer = ''
   spawned.stdout?.setEncoding('utf8')
   spawned.stdout?.on('data', (chunk: string) => {
+    if (child !== spawned) return
     buffer += chunk
     let newline = buffer.indexOf('\n')
     while (newline !== -1) {
@@ -114,7 +136,8 @@ export function startForegroundWatch(
           onSample({
             process: String(parsed.process || ''),
             fullscreen: Boolean(parsed.fullscreen),
-            own: Boolean(parsed.own)
+            own: Boolean(parsed.own),
+            browserOpen: parsed.browserOpen === true
           })
         } catch {
           // Ignore a partial line.
@@ -123,22 +146,25 @@ export function startForegroundWatch(
       newline = buffer.indexOf('\n')
     }
   })
-  spawned.on('exit', () => {
+  const restart = (): void => {
     if (child !== spawned) return
     child = null
     if (!stopped) setTimeout(() => {
       if (!stopped && !child) startForegroundWatch(onSample)
     }, 3000)
-  })
+  }
+  spawned.once('error', restart)
+  spawned.once('exit', restart)
 }
 
 /** Point the watcher at another display without losing the listener. */
-export function setForegroundTarget(next: TargetSize): void {
+export function setForegroundTarget(next: TargetSize, browserOnly = watchBrowser): void {
   if (!next || next.width <= 0 || next.height <= 0) return
-  if (target && Math.abs(target.width - next.width) < 2 && Math.abs(target.height - next.height) < 2) {
+  if (target && watchBrowser === browserOnly && Math.abs(target.width - next.width) < 2 && Math.abs(target.height - next.height) < 2) {
     return
   }
   target = next
+  watchBrowser = browserOnly
   if (!listener || stopped) return
   const current = listener
   const previous = child

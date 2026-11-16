@@ -24,6 +24,22 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): () => vo
 }
 
 const api: NotchApi = {
+  approvals:{
+    list:()=>ipcRenderer.invoke('approvals:list'),
+    decide:(fingerprint,reply,port)=>ipcRenderer.invoke('approvals:decide',fingerprint,reply,port)
+  },
+  agent: {
+    status: () => ipcRenderer.invoke('agent:status'),
+    setup: (tool) => ipcRenderer.invoke('agent:setup', tool),
+    decide: (id, reply) => ipcRenderer.invoke('agent:decide', id, reply),
+    onUpdate: (listener) => subscribe('agent:update', listener)
+  },
+  phone: {
+    start:(file, options)=>ipcRenderer.invoke('phone:start',file,options),
+    status:()=>ipcRenderer.invoke('phone:status'),
+    collect:()=>ipcRenderer.invoke('phone:collect'),
+    stop:()=>ipcRenderer.invoke('phone:stop')
+  },
   getState: () => ipcRenderer.invoke('app:get-state') as Promise<AppState>,
   setState: (patch) => ipcRenderer.invoke('app:set-state', patch) as Promise<AppState>,
   getVersion: () => ipcRenderer.invoke('app:version') as Promise<string>,
@@ -48,6 +64,7 @@ const api: NotchApi = {
   onRequestClose: (callback) => subscribe<void>('notch:request-close', () => callback()),
   onPrepareOpen: (callback) => subscribe<void>('notch:prepare-open', () => callback()),
   onPresence: (callback) => subscribe<{ hidden: boolean }>('notch:presence', callback),
+  getPresence: () => ipcRenderer.invoke('notch:get-presence'),
   reportTiming: (mark, ms) => ipcRenderer.send('notch:timing', mark, ms),
   obsidian: {
     chooseVault: () => ipcRenderer.invoke('obsidian:choose-vault') as Promise<string | null>,
@@ -83,8 +100,8 @@ const api: NotchApi = {
     player: () => ipcRenderer.invoke('spotify:player') as Promise<SpotifyPlayback>,
     queue: () => ipcRenderer.invoke('spotify:queue') as Promise<SpotifyQueueItem[]>,
     library: () => ipcRenderer.invoke('spotify:library') as Promise<SpotifyLibrary>,
-    action: (action: SpotifyAction) =>
-      ipcRenderer.invoke('spotify:action', action) as Promise<SpotifyPlayback>,
+    action: (action, target) =>
+      ipcRenderer.invoke('spotify:action', action, target) as Promise<SpotifyPlayback>,
     launch: (target?: string) => ipcRenderer.invoke('spotify:launch', target) as Promise<boolean>
   },
   sessions: {
@@ -98,6 +115,11 @@ const api: NotchApi = {
         code?: string
       }>,
     focusCodex: () => ipcRenderer.invoke('sessions:focus-codex') as Promise<boolean>,
+    codexLock: (sessionId) =>
+      ipcRenderer.invoke('sessions:codex-lock', sessionId) as Promise<{
+        locked: boolean
+        missing: boolean
+      }>,
     onSendResult: (callback) => subscribe<SessionSendResult>('session:send-result', callback),
     onReply: (callback) => subscribe<SessionReplyEvent>('session:reply', callback)
   }

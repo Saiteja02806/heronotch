@@ -21,8 +21,8 @@ import { formatDateShort, formatTime, timeToTimestamp, todayKey, uid } from '../
 import { clampWaterGoal, waterToday } from '../lib/water'
 import { playPostureRing as playChime } from '../lib/alertSound'
 
-export type Page = 'home' | 'notes' | 'music' | 'planner' | 'sessions' | 'posture' | 'water' | 'settings'
-export type SettingsSection = 'appearance' | 'notch' | 'sections' | 'obsidian' | 'spotify' | 'about'
+export type Page = 'home' | 'notes' | 'music' | 'planner' | 'sessions' | 'posture' | 'water' | 'phone' | 'settings'
+export type SettingsSection = 'appearance' | 'notch' | 'sections' | 'obsidian' | 'spotify' | 'phone' | 'about'
 
 export interface ToastItem {
   id: string
@@ -179,7 +179,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     window.addEventListener('resize', onResize)
 
     const offNavigate = window.notch.onNavigate((target) => {
-      setPage(target as Page)
+      // "settings:phone" style targets deep-link into a settings tab.
+      const value = String(target)
+      const [page, section] = value.split(':')
+      if (page === 'settings' && section) setSettingsSection(section as SettingsSection)
+      setPage(page as Page)
       setExpandedState(true)
     })
 
@@ -231,9 +235,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const presenceHidden = useRef(false)
 
   useEffect(() => {
-    return window.notch.onPresence((event) => {
+    let useSnapshot = true
+    const unsubscribe = window.notch.onPresence((event) => {
+      useSnapshot = false
       presenceHidden.current = event.hidden
     })
+    void window.notch.getPresence().then((event) => {
+      if (useSnapshot) presenceHidden.current = event.hidden
+    })
+    return () => {
+      useSnapshot = false
+      unsubscribe()
+    }
   }, [])
 
   useEffect(() => {
@@ -294,12 +307,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     return window.notch.sessions.onReply((event) => {
       showToast(`${event.label} replied: ${event.title}`)
+      if (state?.settings.codingReplySound) playChime()
       setRepliedSessionId(event.sessionId)
       window.setTimeout(() => {
         setRepliedSessionId((current) => (current === event.sessionId ? null : current))
       }, 22000)
     })
-  }, [showToast])
+  }, [showToast,state?.settings.codingReplySound])
 
   useEffect(() => {
     return window.notch.sessions.onSendResult((result) => {

@@ -10,10 +10,10 @@ import { Logo } from './Logo'
 
 export function Footer() {
   const { state, setPage } = useApp()
-  const { status } = useMedia()
+  const { playerName, playerAvailable } = useMedia()
   const vaultName = state.settings.vaultPath?.split(/[\\/]/).filter(Boolean).pop()
   const openToday = state.tasks.filter((task) => !task.done && task.date === todayKey()).length
-  const spotifyLive = Boolean(status?.connected || status?.localAvailable)
+  const spotifyLive = playerAvailable
   const waterOn = sectionVisible(state, 'water')
   const glasses = waterOn ? waterCount(state.water) : 0
   const compact = state.settings.panelSize === 'compact'
@@ -44,7 +44,7 @@ export function Footer() {
         <span className="status-separator" />
         <span className={`status-label ${spotifyLive ? 'online-text' : ''}`}>
           <Music2 size={12} />
-          {spotifyLive ? (status?.connected ? 'Spotify' : 'Spotify Desktop') : 'Spotify off'}
+          {spotifyLive ? playerName : `${playerName} · unavailable`}
         </span>
         <span className="status-separator" />
         <span className="status-label">

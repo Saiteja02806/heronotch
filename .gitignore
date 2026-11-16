@@ -4,3 +4,7 @@ release
 dist
 .DS_Store
 *.log
+
+.scratch/
+.media-inspect.ps1
+demo/

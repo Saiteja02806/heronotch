@@ -16,11 +16,22 @@ import {
   Tray
 } from 'electron'
 import { execFile, execFileSync, spawn } from 'node:child_process'
-import { appendFileSync, promises as fs } from 'node:fs'
+import { appendFileSync, readFileSync, writeFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { AppState, AppStatePatch, NotchMetrics } from '../shared/types'
+import { randomBytes } from 'node:crypto'
+import {
+  agentStatusEvents,
+  agentStatusStart,
+  agentStatusStop,
+  decide as agentDecide,
+  setupSnippet,
+  snapshot as agentSnapshot
+} from './agentStatus'
+import { approvalClient } from './openCodeApprovals'
+import { startTransfer, phoneHost, qrImage, type Parcel } from './phoneTransfer'
+import type { AppState, AppStatePatch, NotchMetrics, MediaControlTarget } from '../shared/types'
 import { pauseForegroundWatch, resumeForegroundWatch, setForegroundTarget, startForegroundWatch, stopForegroundWatch } from './foreground'
-import { shouldAutoHide } from '../shared/presence'
+import { shouldAutoHide, type ForegroundSample } from '../shared/presence'
 import { followWithSpotifyApi } from '../shared/mediaFollow'
 import { collapsedLayout } from '../shared/notchLayout'
 import { displayPhysicalSize, effectiveNotchStyle, listDisplays, notchDisplay } from './notchDisplay'
@@ -56,10 +67,48 @@ let currentMetrics: NotchMetrics | null = null
 let closeFallback: NodeJS.Timeout | null = null
 let userHidden = false
 let autoHidden = false
+let agentToken = ''
+let agentPort = 0
+
+function loadAgentToken(): string {
+  const file = path.join(app.getPath('userData'), 'agent-token.json')
+  try {
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as { token?: unknown }
+    if (typeof saved.token === 'string' && saved.token.length >= 32) return saved.token
+  } catch {
+    // First run, or the file went away. A fresh token is fine.
+  }
+  const value = randomBytes(24).toString('hex')
+  try {
+    writeFileSync(file, JSON.stringify({ token: value }), { mode: 0o600 })
+  } catch {
+    // The bridge still works for this session even if it cannot be saved.
+  }
+  return value
+}
+
+function syncAgentBridge(): void {
+  const settings = getState().settings
+  const enabled = settings.agentStatus !== false
+  const wanted = enabled ? settings.agentStatusPort || 7432 : 0
+  if (wanted === agentPort) return
+  agentPort = wanted
+  if (wanted) agentStatusStart(wanted, agentToken)
+  else agentStatusStop()
+}
 let sessionLocked = false
 let presenceApplied: boolean | null = null
+let foreground: ForegroundSample | null = null
+let explicitBrowserOpen = false
+
+function handleForegroundSample(sample: ForegroundSample): void {
+  foreground = sample
+  if (sample.browserOpen) explicitBrowserOpen = false
+  applyPresence()
+}
 
 function applyPresence(): void {
+  autoHidden = shouldAutoHide(foreground, getState().settings, explicitBrowserOpen)
   if (!mainWindow || mainWindow.isDestroyed()) return
   const hidden = userHidden || autoHidden
   if (presenceApplied === hidden) return
@@ -68,16 +117,17 @@ function applyPresence(): void {
     if (expanded) void setExpanded(false)
     mainWindow.setOpacity(0)
     mainWindow.setIgnoreMouseEvents(true, { forward: true })
+    if (mainWindow.isFocused()) mainWindow.blur()
     logLine(`notch hidden user=${userHidden} auto=${autoHidden}`)
-    mainWindow.webContents.send('notch:presence', { hidden: true })
+    if (windowShown) mainWindow.webContents.send('notch:presence', { hidden: true })
     return
   }
   mainWindow.setOpacity(1)
   mainWindow.setIgnoreMouseEvents(false)
   applyWindowShape()
-  mainWindow.showInactive()
+  if (windowShown) mainWindow.showInactive()
   mainWindow.setSkipTaskbar(true)
-  mainWindow.webContents.send('notch:presence', { hidden: false })
+  if (windowShown) mainWindow.webContents.send('notch:presence', { hidden: false })
   logLine('notch shown')
 }
 
@@ -188,6 +238,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
   if (!mainWindow) return false
 
   if (next) {
+    if (userHidden || autoHidden) return false
     if (expanded) return true
     if (expanding) return expanding
     const token = ++expandToken
@@ -233,6 +284,10 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
   expandToken += 1
   expanding = null
   expanded = false
+  if (explicitBrowserOpen) {
+    explicitBrowserOpen = false
+    applyPresence()
+  }
   expandedShape = null
   syncEscapeShortcut()
   backdrop.resumeBackdropCapture()
@@ -256,7 +311,7 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
 // one mouse move in from the real cursor position so hover and the hand cursor
 // are correct without the user having to wiggle the mouse.
 function nudgePointerHover(): void {
-  if (!mainWindow || mainWindow.isDestroyed() || expanded || !mainWindow.isVisible()) return
+  if (!mainWindow || mainWindow.isDestroyed() || expanded || userHidden || autoHidden || !mainWindow.isVisible()) return
   const cursor = screen.getCursorScreenPoint()
   const bounds = mainWindow.getBounds()
   if (
@@ -318,6 +373,18 @@ function revealWindow(reason: string): void {
   logLine(
     `window shown (${reason}) bounds=${JSON.stringify(mainWindow.getBounds())} visible=${mainWindow.isVisible()}`
   )
+}
+
+async function openFromUserAction(focus = true): Promise<void> {
+  userHidden = false
+  explicitBrowserOpen = getState().settings.browserOnly === true && !foreground?.browserOpen
+  applyPresence()
+  if (await setExpanded(true)) {
+    if (focus) mainWindow?.focus()
+  } else {
+    explicitBrowserOpen = false
+    applyPresence()
+  }
 }
 
 function smartAppControlState(): 'on' | 'evaluation' | 'off' | 'unknown' {
@@ -508,6 +575,8 @@ function createWindow(): void {
   // leaving a strip below the tab that swallowed hover from the window
   // underneath. The tab only needs 26.
   mainWindow.setMinimumSize(1, 1)
+  presenceApplied = null
+  applyPresence()
   applyBounds()
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -611,7 +680,16 @@ function createWindow(): void {
     mainWindow.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
         const page = process.env.NOTCH_CAPTURE_PAGE
-        if (page) mainWindow?.webContents.send('navigate', page)
+        // The renderer may subscribe to 'navigate' after this first tick, so
+        // repeat it — setPage is idempotent.
+        if (page) {
+          let sent = 0
+          const navTimer = setInterval(() => {
+            mainWindow?.webContents.send('navigate', page)
+            if (++sent >= 12) clearInterval(navTimer)
+          }, 1200)
+          mainWindow?.webContents.send('navigate', page)
+        }
         const frames = (process.env.NOTCH_CAPTURE_FRAMES || '')
           .split(',')
           .map((value) => value.trim())
@@ -680,7 +758,7 @@ function createTray(): void {
         click: () => {
           if (!mainWindow) createWindow()
           revealWindow('tray-menu')
-          void setExpanded(true)
+          void openFromUserAction(false)
         }
       },
       { label: 'Collapse Notch', click: () => requestAnimatedClose() },
@@ -705,7 +783,7 @@ function createTray(): void {
       if (!mainWindow) createWindow()
       revealWindow('tray')
       if (expanded) requestAnimatedClose()
-      else void setExpanded(true)
+      else void openFromUserAction(false)
     })
   } catch {
     tray = null
@@ -717,7 +795,7 @@ function showNotification(title: string, body: string, silent = false): void {
   if (!Notification.isSupported()) return
   const notification = new Notification({ title, body, silent })
   notification.on('click', () => {
-    void setExpanded(true).then(() => mainWindow?.focus())
+    void openFromUserAction()
   })
   notification.show()
 }
@@ -797,6 +875,48 @@ function requireVault(requested?: string): string {
 }
 
 function registerIpc(): void {
+  let transfer: Awaited<ReturnType<typeof startTransfer>> | null = null
+  let qr = ''
+  let starting = false
+  ipcMain.handle('agent:status',()=>agentSnapshot())
+  ipcMain.handle('agent:setup',(_event,tool:'claude'|'codex'|'cursor')=>setupSnippet(tool,agentPort||getState().settings.agentStatusPort||7432,agentToken))
+  ipcMain.handle('agent:decide',(_event,id:string,reply:'allow'|'deny')=>agentDecide(id,reply))
+  ipcMain.handle('approvals:list',()=>approvalClient(getState().settings.openCodeApprovalPort || 0).list())
+  ipcMain.handle('approvals:decide',(_event,key,reply,port)=>{
+    if(port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
+    return approvalClient(port).decide(key,reply)
+  })
+  ipcMain.handle('phone:start', async (_event, file:Parcel|null, options?:{clipboard?:boolean;text?:string}) => {
+    if(starting || (transfer && transfer.expires>Date.now())) throw new Error('A transfer is already open.')
+    starting = true
+    try {
+      const typed = options?.text ?? ''
+      let parcel:Parcel|null = file
+      if(typed.trim()) parcel = {name:'note.txt',bytes:Buffer.from(typed,'utf8'),text:true}
+      else if(options?.clipboard) parcel = {name:'clipboard.txt',bytes:Buffer.from(await clipboard.readText()),text:true}
+      transfer = await startTransfer(phoneHost(), parcel)
+      qr = qrImage(transfer.url,app.getAppPath())
+    } catch(error){transfer?.stop();transfer=null;throw error} finally {starting=false}
+  })
+  ipcMain.handle('phone:status',()=>{
+    if(!transfer || transfer.expires<=Date.now()){transfer=null;return null}
+    const item=transfer.peek()
+    return {qr,received:item?{name:item.name,text:item.text}:null}
+  })
+  ipcMain.handle('phone:collect',async ()=>{
+    const current=transfer
+    const item=current?.peek()
+    if(!item || !current || current.expires<=Date.now()) throw new Error('Transfer expired.')
+    if(item.text) await clipboard.writeText(Buffer.from(item.bytes).toString('utf8'))
+    else {
+      const choice=await dialog.showSaveDialog({defaultPath:path.join(app.getPath('downloads'), /^\.+$/.test(item.name) ? 'received' : item.name)})
+      if(choice.canceled || !choice.filePath)return
+      await fs.writeFile(choice.filePath,item.bytes)
+    }
+    current.collected(item)
+  })
+  ipcMain.handle('phone:stop',()=>{transfer?.stop();transfer=null})
+  app.once('before-quit',()=>transfer?.stop())
   ipcMain.handle('app:get-state', () => getState())
   ipcMain.handle('app:version', () => app.getVersion())
 
@@ -823,6 +943,8 @@ function registerIpc(): void {
       })
     }
 
+    const browserModeChanged = before.settings.browserOnly !== next.settings.browserOnly
+    if (browserModeChanged) explicitBrowserOpen = false
     if (
       patch.settings?.notchPosition !== undefined ||
       patch.settings?.notchStyle !== undefined ||
@@ -830,9 +952,20 @@ function registerIpc(): void {
       patch.settings?.pillOnOtherDisplays !== undefined
     ) {
       applyBounds()
-      setForegroundTarget(displayPhysicalSize(notchDisplay()))
+    }
+    if (browserModeChanged || patch.settings?.notchDisplay !== undefined) {
+      setForegroundTarget(displayPhysicalSize(notchDisplay()), next.settings.browserOnly === true)
     }
     if (patch.tasks) scheduleRemindersSoon()
+    // Enabling browser detection starts a fresh watcher. Its first sample
+    // decides visibility, so an already-open browser doesn't cause a flash.
+    if (
+      (browserModeChanged && !next.settings.browserOnly) ||
+      patch.settings?.autoHideFullscreen !== undefined ||
+      patch.settings?.neverOver !== undefined
+    ) {
+      applyPresence()
+    }
     refreshVaultWatcher()
     return next
   })
@@ -843,6 +976,7 @@ function registerIpc(): void {
     logLine(`timing ${mark} ${ms.toFixed(1)}ms`)
   })
   ipcMain.handle('notch:get-expanded', () => expanded)
+  ipcMain.handle('notch:get-presence', () => ({ hidden: userHidden || autoHidden }))
   ipcMain.handle('notch:get-metrics', () => currentMetrics)
   ipcMain.handle('notch:displays', () => listDisplays())
   ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())
@@ -1007,7 +1141,16 @@ function registerIpc(): void {
     if (followWithSpotifyApi(settings.mediaSource, sessionId, status.connected)) {
       try {
         const playback = await spotify.getPlayback(settings.spotifyClientId)
-        if (playback.track || !localMedia.isLocalAvailable(settings.mediaSource)) return playback
+        if (sessionId) {
+          const local = localMedia.getLocalPlayback(sessionId)
+          // Connect may be playing on a different device. The selected Windows
+          // session remains authoritative for the track shown by the notch.
+          if (!local.track || local.track.name !== playback.track?.name ||
+              local.track.artists !== playback.track?.artists) return local
+        }
+        if (playback.track || !localMedia.isLocalAvailable(settings.mediaSource)) {
+          return { ...playback, localSessionId: sessionId || undefined }
+        }
       } catch {
         // Fall through to the Windows media session.
       }
@@ -1018,14 +1161,14 @@ function registerIpc(): void {
   ipcMain.handle('spotify:queue', async () => {
     const settings = getState().settings
     const status = await spotify.getStatus(settings.spotifyRedirectPort)
-    if (!status.connected) return []
+    if (!followWithSpotifyApi(settings.mediaSource, localMedia.currentMediaId(settings.mediaSource), status.connected)) return []
     return spotify.getQueue(settings.spotifyClientId)
   })
 
   ipcMain.handle('spotify:library', async () => {
     const settings = getState().settings
     const status = await spotify.getStatus(settings.spotifyRedirectPort)
-    if (!status.connected) return { recent: [], playlists: [] }
+    if (!followWithSpotifyApi(settings.mediaSource, localMedia.currentMediaId(settings.mediaSource), status.connected)) return { recent: [], playlists: [] }
     return spotify.getLibrary(settings.spotifyClientId)
   })
 
@@ -1089,11 +1232,31 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
   return null
 }
 
-  ipcMain.handle('spotify:action', (_event, action) => {
+  ipcMain.handle('spotify:action', (_event, action, target?: MediaControlTarget) => {
+    // Freeze the displayed session before entering the queue. A closed player
+    // must never redirect a queued command to another Windows session.
+    const preference = getState().settings.mediaSource || 'auto'
+    const sessionId = target ? target.sessionId : localMedia.currentMediaId(preference)
+    const requestedPreference = target?.preference ?? preference
     const run = spotifyActionQueue.then(async () => {
       const settings = getState().settings
+      if (requestedPreference !== (settings.mediaSource || 'auto') ||
+          (preference !== 'auto' && sessionId !== preference)) {
+        throw new Error('The selected player changed. Try the control again.')
+      }
+      if (sessionId && !localMedia.isLocalAvailable(sessionId)) {
+        throw new Error('The selected player is unavailable. Start playback in that player.')
+      }
+      if (target && !sessionId && localMedia.currentMediaId(preference)) {
+        throw new Error('The player changed. Wait for its track to appear before using the control.')
+      }
+      if (sessionId && ['play', 'pause', 'next', 'previous', 'seek'].includes(action?.type)) {
+        return localMedia.performLocalAction(action, sessionId)
+      }
       const status = await spotify.getStatus(settings.spotifyRedirectPort)
-      const sessionId = localMedia.currentMediaId(settings.mediaSource)
+      if (requestedPreference !== (getState().settings.mediaSource || 'auto')) {
+        throw new Error('The selected player changed. Try the control again.')
+      }
       const enhanced = followWithSpotifyApi(settings.mediaSource, sessionId, status.connected)
       const recoverable =
         action?.type === 'play' || action?.type === 'play-track' || action?.type === 'play-context'
@@ -1107,8 +1270,8 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
         } catch (error) {
           if (spotify.isPremiumRequired(error)) throw error
           if (!spotify.isNoActiveDevice(error)) {
-            if (!localMedia.isLocalAvailable()) throw error
-            return localMedia.performLocalAction(action)
+            if (!sessionId || !localMedia.isLocalAvailable(sessionId)) throw error
+            return localMedia.performLocalAction(action, sessionId)
           }
           const ready = await recoverSpotifyDevice(settings.spotifyClientId)
           if (ready) return spotify.performAction(settings.spotifyClientId, action, memory)
@@ -1124,11 +1287,11 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
           return await spotify.performAction(settings.spotifyClientId, action, getState().spotifyMemory)
         } catch (error) {
           if (spotify.isPremiumRequired(error) || spotify.isNoActiveDevice(error)) throw error
-          if (!localMedia.isLocalAvailable()) throw error
+          if (!sessionId || !localMedia.isLocalAvailable(sessionId)) throw error
         }
       }
-      return localMedia.performLocalAction(action)
-    })
+      return localMedia.performLocalAction(action, sessionId)
+    }).then((playback) => ({ ...playback, localSessionId: sessionId || undefined }))
     spotifyActionQueue = run.catch(() => undefined)
     return run
   })
@@ -1142,6 +1305,9 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
   })
   ipcMain.handle('sessions:send', (_event, sessionId: string, message: string) => {
     return sessions.sendSessionMessage(sessionId, message)
+  })
+  ipcMain.handle('sessions:codex-lock', (_event, sessionId: string) => {
+    return sessions.codexThreadLock(sessionId)
   })
   ipcMain.handle('sessions:focus-codex', () => {
     return new Promise<boolean>((resolve) => {
@@ -1160,15 +1326,11 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
 function registerGlobalShortcuts(): void {
   try {
     globalShortcut.register('CommandOrControl+Shift+Space', () => {
-      if (userHidden || autoHidden) {
-        userHidden = false
-        applyPresence()
-      }
       if (expanded) {
         requestAnimatedClose()
         return
       }
-      void setExpanded(true).then(() => mainWindow?.focus())
+      void openFromUserAction()
     })
     globalShortcut.register('CommandOrControl+Alt+Space', () => {
       userHidden = !userHidden
@@ -1179,7 +1341,10 @@ function registerGlobalShortcuts(): void {
   }
 }
 
-const gotLock = app.requestSingleInstanceLock()
+// Capture runs (NOTCH_CAPTURE) are throwaway verification instances that read
+// a synthetic state file and quit after writing their PNG. Let them start next
+// to the live notch instead of refusing, so a capture never has to close it.
+const gotLock = Boolean(process.env.NOTCH_CAPTURE) || app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
@@ -1192,7 +1357,7 @@ if (!gotLock) {
   app.on('second-instance', () => {
     if (!mainWindow) createWindow()
     logLine('second instance: revealing existing window')
-    void setExpanded(true).then(() => mainWindow?.focus())
+    void openFromUserAction()
   })
 
   app.whenReady().then(async () => {
@@ -1245,15 +1410,16 @@ if (!gotLock) {
       })
     }
     registerIpc()
+    agentToken = loadAgentToken()
+    syncAgentBridge()
+    agentStatusEvents.on('change', (value) => {
+      mainWindow?.webContents.send('agent:update', value)
+    })
     localMedia.startLocalMediaMonitor()
     startForegroundWatch(
-      (sample) => {
-        const next = shouldAutoHide(sample, getState().settings)
-        if (next === autoHidden) return
-        autoHidden = next
-        applyPresence()
-      },
-      displayPhysicalSize(notchDisplay())
+      handleForegroundSample,
+      displayPhysicalSize(notchDisplay()),
+      getState().settings.browserOnly === true
     )
     createWindow()
     createTray()
@@ -1277,6 +1443,7 @@ if (!gotLock) {
       mainWindow?.webContents.send('state:updated', next)
       scheduleRemindersSoon()
       refreshVaultWatcher()
+      syncAgentBridge()
     })
 
     const handleDisplayChange = (): void => {
@@ -1327,7 +1494,7 @@ if (!gotLock) {
 
     app.on('activate', () => {
       if (!mainWindow) createWindow()
-      void setExpanded(true)
+      void openFromUserAction(false)
     })
   })
 
@@ -1339,6 +1506,7 @@ if (!gotLock) {
     }
     logLine('quitting')
     flushState()
+    agentStatusStop()
     localMedia.stopLocalMediaMonitor()
     stopForegroundWatch()
     obsidian.closeVaultWatcher()

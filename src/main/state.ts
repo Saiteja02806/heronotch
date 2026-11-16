@@ -26,6 +26,9 @@ const DEFAULT_SETTINGS: Settings = {
   launchAtLogin: false,
   notifications: true,
   timerNotifications: true,
+  agentStatus: true,
+  agentStatusPort: 7432,
+  codingReplySound: true,
   spotifyClientId: '',
   spotifyRedirectPort: 43821,
   userName: '',
@@ -34,6 +37,7 @@ const DEFAULT_SETTINGS: Settings = {
   focusMode: true,
   mediaSource: 'auto',
   autoHideFullscreen: true,
+  browserOnly: false,
   notchDisplay: 'primary',
   pillOnOtherDisplays: true,
   neverOver: [],
@@ -47,31 +51,8 @@ function localDayKey(date = new Date()): string {
   return `${year}-${month}-${day}`
 }
 
-function id(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-}
-
 function createDefaultState(): AppState {
   const today = localDayKey()
-  const now = Date.now()
-  const starterTasks: Task[] = [
-    {
-      id: id(),
-      title: 'Connect your Obsidian vault',
-      date: today,
-      done: false,
-      createdAt: now,
-      priority: 'high'
-    },
-    {
-      id: id(),
-      title: 'Add a reminder to your day',
-      date: today,
-      done: false,
-      createdAt: now,
-      priority: 'normal'
-    }
-  ]
 
   return {
     settings: { ...DEFAULT_SETTINGS },
@@ -85,7 +66,7 @@ function createDefaultState(): AppState {
       completedToday: 0,
       dayKey: today
     },
-    tasks: starterTasks,
+    tasks: [],
     notes: {
       lastPath: null,
       favorites: []
@@ -175,6 +156,11 @@ function normalizeDay(state: AppState): AppState {
       ? { ...state.settings, timerNotifications: true }
       : state.settings
   const sections = normalizeSectionPrefs(settings.sections, Boolean(state.water?.enabled))
+  if (typeof settings.browserOnly !== 'boolean') settings = { ...settings, browserOnly: false }
+  if (typeof settings.agentStatus !== 'boolean') settings = { ...settings, agentStatus: true }
+  if (!settings.agentStatusPort) settings = { ...settings, agentStatusPort: 7432 }
+  if (typeof settings.codingReplySound !== 'boolean')
+    settings = { ...settings, codingReplySound: true }
   if (!sectionsEqual(settings.sections, sections)) settings = { ...settings, sections }
   const timer = state.timer
   const water = normalizeWater(state, today)

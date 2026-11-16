@@ -20,11 +20,14 @@ import {
   Save,
   ShieldCheck,
   SlidersHorizontal,
-  Sparkles
+  Smartphone,
+  Sparkles,
+  Wifi
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import {
   useEffect,
+  useRef,
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent
@@ -45,8 +48,9 @@ import {
   type SectionId
 } from '../lib/sections'
 import { formatTime } from '../lib/time'
+import { PhoneTransfer } from '../components/PhoneTransfer'
 
-type Section = 'appearance' | 'notch' | 'sections' | 'obsidian' | 'spotify' | 'about'
+type Section = 'appearance' | 'notch' | 'sections' | 'obsidian' | 'spotify' | 'phone' | 'about'
 
 const SECTIONS: { id: Section; label: string; icon: typeof Palette }[] = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
@@ -54,6 +58,7 @@ const SECTIONS: { id: Section; label: string; icon: typeof Palette }[] = [
   { id: 'sections', label: 'Sections', icon: Blocks },
   { id: 'obsidian', label: 'Notes', icon: NotebookPen },
   { id: 'spotify', label: 'Spotify', icon: Music2 },
+  { id: 'phone', label: 'Phone', icon: Smartphone },
   { id: 'about', label: 'About', icon: Info }
 ]
 
@@ -228,6 +233,7 @@ function Toggle({
 }
 
 export function SettingsPage() {
+  const mainRef = useRef<HTMLElement>(null)
   const {
     state,
     update,
@@ -240,7 +246,7 @@ export function SettingsPage() {
     settingsSection,
     setSettingsSection
   } = useApp()
-  const { status, connecting, connect, disconnect } = useMedia()
+  const { status, connecting, connect, disconnect, playerName } = useMedia()
   const { chooseVault } = useVaultPicker()
   const [version, setVersion] = useState('')
   useEffect(() => {
@@ -248,6 +254,9 @@ export function SettingsPage() {
   }, [])
   const section = settingsSection as Section
   const setSection = setSettingsSection
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0 })
+  }, [section])
   const [name, setName] = useState(state.settings.userName)
   const [clientId, setClientId] = useState(state.settings.spotifyClientId)
   const [port, setPort] = useState(String(state.settings.spotifyRedirectPort))
@@ -352,6 +361,20 @@ export function SettingsPage() {
     setTimeout(() => setCopied(false), 1800)
   }
 
+  const copyAgentSetup = async (tool: 'claude' | 'codex' | 'cursor'): Promise<void> => {
+    try {
+      const snippet = await window.notch.agent.setup(tool)
+      window.notch.copyText(snippet)
+      showToast(
+        `${tool === 'claude' ? 'Claude Code' : tool === 'codex' ? 'Codex' : 'Cursor'} setup copied`,
+        'Paste it into that tool’s hooks config, then restart the tool.',
+        'success'
+      )
+    } catch (cause) {
+      showToast('Could not copy setup', cause instanceof Error ? cause.message : String(cause), 'error')
+    }
+  }
+
   const commitPosition = (next: NotchPosition): void => {
     setPosition(next)
     updateSettings({ notchPosition: next })
@@ -444,7 +467,7 @@ export function SettingsPage() {
         </div>
       </aside>
 
-      <main className="settings-main">
+      <main className="settings-main" ref={mainRef}>
         {state.settings.panelSize === 'compact' && (
           <div className="settings-compact-nav" role="tablist" aria-label="Settings sections">
             {SECTIONS.map((item) => (
@@ -476,6 +499,7 @@ export function SettingsPage() {
               {section === 'sections' && 'Choose what stays on the notch.'}
               {section === 'obsidian' && 'Your notes, connected.'}
               {section === 'spotify' && 'Let the music in.'}
+              {section === 'phone' && 'Meet your phone halfway.'}
               {section === 'about' && 'Small app, big flow.'}
             </h1>
           </div>
@@ -563,6 +587,12 @@ export function SettingsPage() {
           {section === 'notch' && (
             <div className="settings-sections">
               <section className="setting-group">
+                <Toggle
+                  checked={state.settings.browserOnly === true}
+                  onChange={(value) => updateSettings({ browserOnly: value })}
+                  label="Show only when a browser is open"
+                  description="A minimized browser counts. When the last browser window closes, the notch hides. Use the tray icon to open it at any time."
+                />
                 <Toggle
                   checked={state.settings.focusMode !== false}
                   onChange={(value) => updateSettings({ focusMode: value })}
@@ -742,6 +772,52 @@ export function SettingsPage() {
                   onChange={(value) => updateSettings({ reduceMotion: value })}
                   label="Reduce motion"
                   description="Opens and closes in place, and turns off the other animations in the notch."
+                />
+                <label className="setting-row">OpenCode local server port
+                  <input type="number" min={1} max={65535} placeholder="Off" defaultValue={state.settings.openCodeApprovalPort || ''}
+                    onBlur={event=>{if(event.target.validity.valid)updateSettings({openCodeApprovalPort:Number(event.target.value)||0})}} />
+                </label>
+                <Toggle
+                  checked={state.settings.agentStatus !== false}
+                  onChange={(value) => updateSettings({ agentStatus: value })}
+                  label="Coding tool status"
+                  description="Local hooks let Claude Code, Codex and Cursor show waiting and done in Sessions, with approve buttons."
+                />
+                <label className="setting-row">Status bridge port
+                  <input
+                    type="number"
+                    min={1024}
+                    max={65535}
+                    defaultValue={state.settings.agentStatusPort || 7432}
+                    onBlur={(event) => {
+                      const value = Number(event.target.value)
+                      if (event.target.validity.valid && value >= 1024 && value <= 65535)
+                        updateSettings({ agentStatusPort: value })
+                    }}
+                  />
+                </label>
+                <div className="setting-row agent-setup-row">
+                  <span className="setting-copy">
+                    <strong>Connect a coding tool</strong>
+                    <small>Copy its hook config once, paste it into that tool’s settings, then restart the tool.</small>
+                  </span>
+                  <div className="agent-setup-buttons">
+                    {(['claude', 'codex', 'cursor'] as const).map((tool) => (
+                      <button
+                        key={tool}
+                        type="button"
+                        onClick={() => void copyAgentSetup(tool)}
+                      >
+                        {tool === 'claude' ? 'Claude Code' : tool === 'codex' ? 'Codex' : 'Cursor'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <Toggle
+                  checked={state.settings.codingReplySound === true}
+                  onChange={(value) => updateSettings({codingReplySound:value})}
+                  label="Coding reply sound"
+                  description="Chime when a coding tool finishes or asks for approval."
                 />
                 <Toggle
                   checked={state.settings.notifications}
@@ -971,7 +1047,7 @@ export function SettingsPage() {
                     <div className="spotify-local-connected">
                       <span className="local-spotify-icon"><Music2 size={18} /></span>
                       <div>
-                        <strong>Spotify Desktop</strong>
+                        <strong>{playerName}</strong>
                         <span>
                           {status.localTitle
                             ? `${status.localTitle}${status.localArtist ? ` · ${status.localArtist}` : ''}`
@@ -1060,6 +1136,32 @@ export function SettingsPage() {
                   </p>
                 </section>
               )}
+            </div>
+          )}
+
+          {section === 'phone' && (
+            <div className="settings-sections">
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Phone transfer</h3>
+                  <p className="phone-network-note">
+                    <Wifi size={12} aria-hidden="true" />
+                    <strong>Same Wi-Fi only</strong>
+                    <span>No account · nothing uploaded.</span>
+                  </p>
+                </div>
+                <PhoneTransfer bare />
+              </section>
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>How it works</h3>
+                </div>
+                <ol className="phone-steps">
+                  <li>Pick a file or this clipboard, or wait for your phone to send.</li>
+                  <li>Scan the code with your phone camera. The phone must be on the same Wi-Fi network as this laptop — it will not work over mobile data.</li>
+                  <li>The link expires after five minutes.</li>
+                </ol>
+              </section>
             </div>
           )}
 

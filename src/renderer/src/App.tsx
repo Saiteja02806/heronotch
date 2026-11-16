@@ -19,6 +19,7 @@ import { PosturePage } from './pages/PosturePage'
 import { SessionsPage } from './pages/SessionsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { WaterPage } from './pages/WaterPage'
+import { PhonePage } from './pages/PhonePage'
 import { sectionPrefs, visibleSections, type SectionId } from './lib/sections'
 import { AppProvider, useApp } from './state/AppContext'
 import { setClockPaused } from './state/clock'
@@ -444,7 +445,7 @@ function Shell() {
     <div
       className={`app ${expanded ? 'is-expanded' : 'is-collapsed'}${
         expanded && focusMode ? ' is-focus-mode' : ''
-      }${compact ? ' is-panel-compact' : ''}${metrics?.noticeAbove ? ' is-notice-above' : ''}`}
+      }${expanded && !focusMode ? ' is-shaped' : ''}${compact ? ' is-panel-compact' : ''}${metrics?.noticeAbove ? ' is-notice-above' : ''}`}
       style={appStyle}
       onPointerEnter={onPointerEnter}
       onPointerMove={onPointerMove}
@@ -512,6 +513,7 @@ function Shell() {
                   {page === 'sessions' && <SessionsPage />}
                   {page === 'posture' && <PosturePage />}
                   {page === 'water' && <WaterPage />}
+                  {page === 'phone' && <PhonePage />}
                   {page === 'settings' && <SettingsPage />}
                 </motion.div>
               </AnimatePresence>
@@ -522,7 +524,14 @@ function Shell() {
         <EdgeGlow tick={glowTick} ready={settled && !closing && expanded} />
       </div>
       <div className={`collapsed-layer${expanded ? ' is-hidden' : ''}`}>
-        <CollapsedBar onOpen={openImmediately} style={metrics?.style} />
+        <CollapsedBar
+          onOpen={openImmediately}
+          onOpenSessions={() => {
+            setPage('sessions')
+            openImmediately()
+          }}
+          style={metrics?.style}
+        />
         {!expanded && <CollapsedNotice onOpen={openImmediately} />}
       </div>
       {expanded && <Toasts />}

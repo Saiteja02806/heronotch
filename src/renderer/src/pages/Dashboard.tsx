@@ -29,6 +29,7 @@ import {
   type MouseEvent as ReactMouseEvent
 } from 'react'
 import type { Task, VaultNode } from '../../../shared/types'
+import { playbackHeading } from '../../../shared/mediaFollow'
 import {
   formatDateShort,
   formatDuration,
@@ -185,9 +186,9 @@ function TimerCard() {
 
 function MusicCard() {
   const { setPage, showToast } = useApp()
-  const { status, playback, queue, togglePlay, action, progressMs, pending } = useMedia()
+  const { playback, queue, togglePlay, action, progressMs, pending, playerName, playerAvailable } = useMedia()
   const track = playback?.track
-  const connected = Boolean(status?.connected || status?.localAvailable)
+  const connected = playerAvailable
   const duration = track?.duration || 0
   const elapsed = duration ? Math.min(progressMs, duration) : progressMs
   const progress = duration ? Math.min(1, elapsed / duration) : 0
@@ -197,7 +198,7 @@ function MusicCard() {
     event.stopPropagation()
     if (!connected || !track) {
       setPage('music')
-      if (!connected) showToast('Spotify is not connected', 'Open Music to sign in.')
+      if (!connected) showToast(`${playerName} is unavailable`, 'Start playback in the selected player.')
       return
     }
     void togglePlay()
@@ -217,11 +218,11 @@ function MusicCard() {
       <div className="card-heading">
         <span className="eyebrow">
           <span className={`live-dot ${playback?.playing ? 'is-live' : ''}`} />
-          Now playing
+          {playbackHeading(playback)}
         </span>
         <span className="mini-badge">
           <Music2 size={11} />
-          {connected ? playback?.device?.name || 'Spotify' : 'Offline'}
+          {playerName}{!connected && ' · unavailable'}
         </span>
       </div>
 
@@ -232,8 +233,8 @@ function MusicCard() {
           <p>
             {track?.artists ||
               (connected
-                ? 'Start a track in Spotify and it will show up here.'
-                : 'Connect Spotify to control playback without leaving your notch.')}
+                ? `Start playback in ${playerName} and it will show up here.`
+                : 'Start playback in your selected player to control it from the notch.')}
           </p>
 
           <div className={`seek-line ${track ? '' : 'is-empty'}`}>
@@ -255,13 +256,13 @@ function MusicCard() {
           )}
 
           <div className="music-controls">
-            <button className="control-button" onClick={skip('previous')} aria-label="Previous track">
+            <button className="control-button" onClick={skip('previous')} aria-label="Previous track" disabled={!connected || playback?.controls?.previous === false}>
               <SkipBack size={15} fill="currentColor" />
             </button>
             <button className="control-button is-primary" onClick={play} aria-label={playback?.playing ? 'Pause' : 'Play'}>
               {playback?.playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}
             </button>
-            <button className="control-button" onClick={skip('next')} aria-label="Next track">
+            <button className="control-button" onClick={skip('next')} aria-label="Next track" disabled={!connected || playback?.controls?.next === false}>
               <SkipForward size={15} fill="currentColor" />
             </button>
             <span className="music-open">

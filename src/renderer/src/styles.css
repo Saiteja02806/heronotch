@@ -403,6 +403,27 @@ html.notch-opening .collapsed-bar {
   font-size: 7.5px;
   color: #8f8e89;
   background: rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition:
+    color 140ms ease,
+    background 140ms ease;
+}
+
+.mini-sessions:hover {
+  color: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* The bare tab styles centre a single child, so the agent badge floats at the
+   tab's right end instead of joining the grid. Small enough to fit the 20px
+   notch-micro tab without spilling over its rounded corners. */
+.mini-sessions.is-float {
+  position: absolute;
+  right: 5px;
+  bottom: 3px;
+  height: 14px;
+  padding: 0 4px;
+  font-size: 7px;
 }
 
 .mini-chevron {
@@ -502,7 +523,11 @@ html.notch-opening .collapsed-bar {
     radial-gradient(700px 250px at 92% -6%, rgba(168, 227, 107, 0.045), transparent 62%),
     linear-gradient(180deg, #0b0c0d 0%, #08090a 44%, #070809 100%);
   box-shadow:
-    0 34px 90px rgba(0, 0, 0, 0.74),
+    /* The old single 90px, 74%-black shadow read as a hard grey band on light
+       wallpapers (and clipped grey arcs at the panel corners). Two tighter
+       layers give the same lift without the visible slab. */
+    0 18px 44px rgba(0, 0, 0, 0.46),
+    0 4px 14px rgba(0, 0, 0, 0.32),
     0 2px 0 rgba(255, 255, 255, 0.04) inset,
     0 0 0 1px rgba(0, 0, 0, 0.4);
 }
@@ -578,8 +603,8 @@ html.notch-opening .collapsed-bar {
 }
 
 .app.is-panel-compact .focus-hint {
-  left: calc(var(--panel-left, 0px) + var(--panel-w, 440px) / 2);
-  top: calc(var(--panel-h, 360px) + 16px);
+  left: calc(var(--panel-left) + var(--panel-w) / 2);
+  top: calc(var(--panel-h) + 16px);
   bottom: auto;
   max-width: min(400px, calc(100vw - 40px));
   white-space: normal;
@@ -672,8 +697,8 @@ html.notch-opening .collapsed-bar {
 }
 
 .app.is-panel-compact .panel {
-  width: min(440px, calc(100vw - 32px));
-  height: min(360px, max(300px, 42vh));
+  width: var(--panel-w);
+  height: var(--panel-h);
   border-radius: 0 0 22px 22px;
   box-shadow:
     0 22px 54px rgba(0, 0, 0, 0.58),
@@ -1896,6 +1921,385 @@ kbd {
   margin-bottom: 6px;
 }
 
+/* Phone transfer: the same-Wi-Fi handoff card on Home. */
+.phone-transfer {
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Inside Settings the surrounding group already draws the frame and heading. */
+.phone-transfer.is-bare {
+  padding: 10px 0 0;
+}
+
+.phone-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.phone-draft > span {
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+.phone-draft textarea {
+  width: 100%;
+  min-height: 56px;
+  max-height: 120px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 10.5px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.phone-draft textarea::placeholder {
+  color: var(--muted-2);
+}
+
+.phone-draft textarea:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.phone-transfer .card-heading {
+  margin-bottom: 0;
+}
+
+.phone-copy {
+  margin: 0;
+  font-size: 9.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.phone-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.phone-actions .soft-button,
+.phone-actions .primary-button {
+  height: 27px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.phone-session {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.phone-qr {
+  flex: 0 0 auto;
+  width: 96px;
+  height: 96px;
+  border-radius: 10px;
+  background: #fff;
+  padding: 4px;
+}
+
+.phone-session .phone-copy {
+  min-width: 0;
+}
+
+.phone-file-input {
+  display: none;
+}
+
+/* The Phone section page: two cards across the full panel — compose on the
+   left, scan zone (pill, steps, code) on the right, both filling the height. */
+.phone-page {
+  height: 100%;
+  padding: 16px 20px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    'head head'
+    'compose scan';
+  gap: 10px 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.phone-page > .phone-head {
+  grid-area: head;
+}
+
+.phone-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(700px 240px at 100% -10%, rgba(146, 201, 255, 0.055), transparent 60%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.013)),
+    #0b0c0d;
+  padding: 14px 16px 12px;
+  overflow: hidden;
+}
+
+.phone-compose {
+  grid-area: compose;
+}
+
+.phone-scan {
+  grid-area: scan;
+}
+
+/* The compose card gives the draft the full height it now has. */
+.phone-compose .phone-draft {
+  flex: 1;
+  min-height: 0;
+}
+
+.phone-compose .phone-draft textarea {
+  height: 100%;
+  min-height: 90px;
+  max-height: none;
+  flex: 1;
+  resize: none;
+}
+
+.phone-head {
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.phone-head h1 {
+  margin: 4px 0 2px;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 24px;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.phone-head p {
+  margin: 0;
+  font-size: 8.5px;
+  color: var(--muted-2);
+}
+
+/* Right card, waiting state: the requirement pill, the steps, a phone. */
+.phone-scan-idle {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.phone-pill {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.phone-mock {
+  margin-top: auto;
+  align-self: center;
+  width: 118px;
+  flex: 1 1 auto;
+  min-height: 110px;
+  max-height: 215px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02)), #0d0f10;
+  padding: 6px;
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.42);
+}
+
+.phone-mock-screen {
+  height: 100%;
+  border-radius: 13px;
+  background: radial-gradient(120% 90% at 50% 0%, rgba(146, 201, 255, 0.16), rgba(20, 26, 32, 0.92) 62%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 12px 12px;
+}
+
+.phone-mock-notch {
+  width: 34px;
+  height: 8px;
+  border-radius: 5px;
+  background: #06080a;
+}
+
+.phone-mock-line {
+  width: 78%;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.phone-mock-line.is-short {
+  width: 52%;
+}
+
+.phone-mock-line.is-accent {
+  background: color-mix(in srgb, var(--accent) 45%, rgba(255, 255, 255, 0.09));
+}
+
+.phone-mock-chip {
+  margin-top: auto;
+  width: 58%;
+  height: 16px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 18%, rgba(255, 255, 255, 0.05));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* Right card, active transfer: the code takes the stage. */
+.phone-session.is-large {
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.phone-qr.is-large {
+  width: 158px;
+  height: 158px;
+  border-radius: 14px;
+}
+
+.phone-session.is-large .phone-copy {
+  max-width: 360px;
+}
+
+/* Left card while a transfer runs: everything the phone sends lands here. */
+.phone-running {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+}
+
+.phone-running-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
+  animation: phone-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes phone-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.app.is-panel-compact .phone-page {
+  padding: 10px 12px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    'head'
+    'compose'
+    'scan';
+}
+
+.app.is-panel-compact .phone-panel {
+  border-radius: 14px;
+  padding: 10px 12px 8px;
+}
+
+/* Compact has no room for the idle decorations — only the code shows, and
+   only while a transfer runs. */
+.app.is-panel-compact .phone-scan:not(.has-session) {
+  display: none;
+}
+
+.app.is-panel-compact .phone-scan-idle {
+  display: none;
+}
+
+.app.is-panel-compact .phone-session.is-large {
+  flex: 0 0 auto;
+  flex-direction: row;
+  text-align: left;
+  gap: 12px;
+}
+
+.app.is-panel-compact .phone-qr.is-large {
+  width: 84px;
+  height: 84px;
+  border-radius: 10px;
+}
+
+.app.is-panel-compact .phone-head h1 {
+  font-size: 18px;
+}
+
+.phone-steps {
+  counter-reset: step;
+  margin: 0;
+  padding: 9px 0 2px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.phone-steps li {
+  display: flex;
+  gap: 8px;
+  font-size: 9.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.phone-steps li::before {
+  counter-increment: step;
+  content: counter(step);
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.07);
+  color: #dedcd5;
+  font-family: var(--mono);
+  font-size: 8px;
+  display: grid;
+  place-items: center;
+}
+
 .vault-empty {
   flex: 1;
   display: flex;
@@ -2072,6 +2476,113 @@ kbd {
 .session-app-chip.is-running i {
   background: var(--spotify);
   box-shadow: 0 0 6px rgba(168, 227, 107, 0.55);
+}
+
+/* Compact sessions: one line that says how many coding apps are up and lets you
+   pick one. The chips scroll sideways inside the card, so a long app name can
+   never push the row past the panel edge. */
+.sessions-running {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 1px 0 7px;
+}
+
+.sessions-running-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  height: 21px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.sessions-running-count .live-dot {
+  background: #5d5e59;
+  box-shadow: none;
+}
+
+.sessions-running-count.is-live {
+  color: #dfe9d6;
+  border-color: rgba(168, 227, 107, 0.22);
+  background: rgba(168, 227, 107, 0.07);
+}
+
+.sessions-running-count.is-live .live-dot {
+  background: var(--spotify);
+  box-shadow: 0 0 6px rgba(168, 227, 107, 0.55);
+}
+
+.sessions-running-count.is-filtered {
+  cursor: pointer;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.sessions-running-count:disabled {
+  cursor: default;
+}
+
+.sessions-running-list {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 1px;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 12px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 12px), transparent);
+}
+
+.sessions-running-list::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.sessions-running-list .session-app-chip {
+  flex: 0 0 auto;
+  height: 21px;
+  padding: 0 7px;
+  font-size: 8.5px;
+  cursor: pointer;
+  transition:
+    color 140ms ease,
+    background 140ms ease,
+    border-color 140ms ease;
+}
+
+.sessions-running-list .session-app-chip:hover {
+  color: #ece9e2;
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.sessions-running-list .session-app-chip.is-selected {
+  color: #fff;
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+}
+
+.sessions-apps-count {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
 }
 
 .session-preview {
@@ -5216,6 +5727,8 @@ input[type='range']:focus::-webkit-slider-thumb {
   display: grid;
   grid-template-columns: 262px minmax(0, 1fr);
   gap: 12px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .sessions-apps-column {
@@ -5317,6 +5830,23 @@ input[type='range']:focus::-webkit-slider-thumb {
 .agent-state.is-live i {
   background: var(--spotify);
   box-shadow: 0 0 7px rgba(168, 227, 107, 0.55);
+}
+
+.agent-state.is-open {
+  color: #a9c6e8;
+}
+
+.agent-state.is-open i {
+  background: #7eb6ff;
+  box-shadow: 0 0 7px rgba(126, 182, 255, 0.45);
+}
+
+.agent-state.is-idle {
+  color: var(--muted-2);
+}
+
+.agent-state.is-idle i {
+  background: #5d5e59;
 }
 
 .agent-window {
@@ -5531,7 +6061,9 @@ input[type='range']:focus::-webkit-slider-thumb {
 .sessions-scroll {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 2px 2px 6px 0;
 }
 
@@ -5771,6 +6303,16 @@ input[type='range']:focus::-webkit-slider-thumb {
 
 .session-inline-status.is-failed {
   color: #ff9c93;
+}
+
+.session-inline-codex {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.session-inline-codex .session-inline-copy {
+  flex: 0 0 auto;
 }
 
 .session-row-time {
@@ -6802,6 +7344,37 @@ input[type='range']:focus::-webkit-slider-thumb {
   font-size: 8px;
   color: var(--muted-2);
   text-align: right;
+}
+
+/* The network requirement decides whether a phone transfer can work at all,
+   so it gets a little more presence than ordinary helper copy. */
+.setting-group-head .phone-network-note {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid rgba(168, 227, 107, 0.16);
+  border-radius: 999px;
+  background: rgba(168, 227, 107, 0.055);
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.phone-network-note > svg {
+  flex: 0 0 auto;
+  color: var(--spotify);
+}
+
+.phone-network-note strong {
+  color: #d9edc6;
+  font-weight: 600;
+}
+
+.phone-network-note span {
+  color: var(--muted-2);
 }
 
 .setting-row {
@@ -8422,19 +8995,6 @@ input[type='range']:focus::-webkit-slider-thumb {
   filter: drop-shadow(0 8px 8px rgba(0, 0, 0, 0.3));
 }
 
-.vessel-lip {
-  position: absolute;
-  z-index: 4;
-  top: 0;
-  left: -4%;
-  width: 108%;
-  height: 7%;
-  border-radius: 50%;
-  background:
-    radial-gradient(ellipse at 50% 62%, rgba(8, 12, 14, 0.55) 0 46%, rgba(214, 232, 238, 0.15) 47% 58%, rgba(244, 251, 253, 0.92) 59% 72%, rgba(120, 156, 170, 0.45) 73%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
-}
-
 .vessel-body {
   position: absolute;
   z-index: 1;
@@ -9594,6 +10154,259 @@ input[type='range']:focus::-webkit-slider-thumb {
   }
 }
 
+.app.is-panel-compact .page-host {
+  padding-bottom: 0;
+}
+
+.app.is-panel-compact .statusbar {
+  position: static;
+  flex: 0 0 36px;
+}
+
+/* One pane at a time. Compact is a small strip under the notch, so a page that
+   normally opens two or three columns shows only the one it is for: the song,
+   the day, the conversation, the note. Enlarge brings the rest back. */
+.app.is-panel-compact .notes-page,
+.app.is-panel-compact .music-page,
+.app.is-panel-compact .planner-page,
+.app.is-panel-compact .sessions-page {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.app.is-panel-compact .notes-sidebar,
+.app.is-panel-compact .queue-panel,
+.app.is-panel-compact .calendar-panel,
+.app.is-panel-compact .planner-side,
+.app.is-panel-compact .sessions-apps-column {
+  display: none;
+}
+
+.app.is-panel-compact .notes-page,
+.app.is-panel-compact .music-page,
+.app.is-panel-compact .planner-page,
+.app.is-panel-compact .sessions-page,
+.app.is-panel-compact .note-workspace,
+.app.is-panel-compact .day-panel,
+.app.is-panel-compact .sessions-list-panel {
+  min-height: 0;
+  min-width: 0;
+}
+
+.app.is-panel-compact .music-page,
+.app.is-panel-compact .planner-page,
+.app.is-panel-compact .sessions-page {
+  padding: 10px 12px;
+}
+
+/* Music, one row: cover on the left, title, progress and controls stacked
+   beside it. The head row is dropped so the card is not mostly chrome. */
+.app.is-panel-compact .player-panel {
+  padding: 12px 14px;
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.app.is-panel-compact .player-head {
+  display: none;
+}
+
+.app.is-panel-compact .player-main {
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  margin-top: 0;
+  height: 100%;
+  min-height: 0;
+  text-align: left;
+}
+
+.app.is-panel-compact .player-details {
+  height: auto;
+  min-height: 0;
+  align-items: stretch;
+  justify-content: center;
+  text-align: left;
+}
+
+.app.is-panel-compact .player-details h2 {
+  font-size: 22px;
+  -webkit-line-clamp: 2;
+}
+
+.app.is-panel-compact .player-progress {
+  margin-top: 10px;
+  padding-top: 0;
+}
+
+.app.is-panel-compact .player-controls {
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+/* Settings in compact is one column under a row of chips. The chip row already
+   names the section, so the big serif title and its eyebrow are dropped to give
+   the actual controls the height. */
+.app.is-panel-compact .settings-main {
+  padding: 10px 16px 20px;
+}
+
+.app.is-panel-compact .settings-title {
+  display: none;
+}
+
+.app.is-panel-compact .notch-style-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* The empty day is a fixed 190px block, which is taller than the whole task
+   list in compact. Let it size to the space it has so nothing is cut off. */
+.app.is-panel-compact .day-empty {
+  min-height: 0;
+  gap: 3px;
+  padding: 8px 0;
+}
+
+.app.is-panel-compact .day-empty strong {
+  font-size: 17px;
+}
+
+/* The note editor is a scrolling textarea with its scrollbar hidden so the
+   formatted mirror lines up. Compact has room for a thin bar, and without it
+   a long note looks like it just stops. */
+.app.is-panel-compact .live-editor .note-textarea {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.app.is-panel-compact .live-editor .note-textarea::-webkit-scrollbar {
+  display: block;
+  width: 8px;
+}
+
+.app.is-panel-compact .live-editor .note-textarea::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.app.is-panel-compact .modal-backdrop,
+.app.is-panel-compact .task-editor-overlay {
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+}
+
+.app.is-panel-compact .modal-card,
+.app.is-panel-compact .task-editor-card {
+  max-height: calc(100% - 12px);
+  max-width: calc(100% - 16px);
+  overflow: auto;
+}
+
+.app.is-panel-compact .empty-vault-page {
+  overflow-y: auto;
+}
+
+.app.is-panel-compact .player-empty {
+  padding: 8px 12px;
+}
+
+.app.is-panel-compact .player-empty-icon {
+  width: 34px;
+  height: 34px;
+}
+
+.app.is-panel-compact .spotify-connect {
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  overflow-y: auto;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.app.is-panel-compact .spotify-hero {
+  gap: 14px;
+}
+
+.app.is-panel-compact .spotify-hero-copy h1 {
+  margin: 4px 0;
+  font-size: 23px;
+}
+
+.app.is-panel-compact .spotify-hero-actions {
+  margin-top: 8px;
+}
+
+.app.is-panel-compact .connect-steps {
+  max-width: none;
+}
+
+/* Home can be the only enabled section. In that case its timer needs
+   to fit without the full dashboard's other columns and fixed rows. */
+.app.is-panel-compact .home-shell > .dashboard {
+  grid-template: minmax(min-content, 1fr) / minmax(0, 1fr);
+  padding: 8px 12px;
+  overflow: auto;
+}
+
+.app.is-panel-compact .timer-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  justify-items: center;
+  gap: 4px 12px;
+}
+
+.app.is-panel-compact .timer-disc {
+  grid-column: 1;
+  grid-row: 1 / span 3;
+}
+
+.app.is-panel-compact .timer-card > :not(.timer-disc) {
+  grid-column: 2;
+}
+
+@container notch (min-width: 520px) and (max-width: 700px) {
+  .is-panel-compact .settings-page {
+    grid-template-columns: 112px minmax(0, 1fr);
+  }
+
+  .is-panel-compact .settings-rail {
+    display: flex;
+    overflow-y: auto;
+  }
+
+  .is-panel-compact .settings-rail-head,
+  .is-panel-compact .settings-compact-nav {
+    display: none;
+  }
+
+  .is-panel-compact .settings-nav {
+    height: 26px;
+    font-size: 11px;
+  }
+
+  .is-panel-compact .setting-group {
+    padding: 8px 12px;
+  }
+
+  .is-panel-compact .setting-copy strong {
+    font-size: 12px;
+  }
+
+  .is-panel-compact .setting-copy small {
+    font-size: 10px;
+    line-height: 1.4;
+  }
+
+  .is-panel-compact .water-page {
+    grid-template-columns: auto minmax(0, 300px);
+    column-gap: 24px;
+  }
+
+  .is-panel-compact .water-stage {
+    display: grid;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .panel,
   .panel.is-spatial,
@@ -9613,4 +10426,154 @@ html.reduce-motion *::after {
   animation-iteration-count: 1 !important;
   transition-duration: 0.01ms !important;
   scroll-behavior: auto !important;
+}
+
+/* Coding tool status — a thin strip above the session board. */
+.sessions-list-panel > .agent-status {
+  margin-bottom: 12px;
+}
+
+.agent-status {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.agent-status-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-status-alert {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--accent);
+}
+
+.agent-status-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.agent-status-item.is-waiting {
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.agent-status-icon {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+}
+
+.agent-status-item.is-waiting .agent-status-icon {
+  color: var(--accent);
+}
+
+.agent-status-item.is-done .agent-status-icon {
+  color: #8fd6ad;
+}
+
+.agent-status-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.agent-status-copy strong {
+  font-size: 10px;
+  font-weight: 540;
+  color: #dedcd5;
+}
+
+.agent-status-copy span,
+.agent-status-copy small {
+  font-size: 9px;
+  color: var(--muted-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-status-copy small {
+  font-family: var(--mono);
+  font-size: 8px;
+  max-width: 100%;
+}
+
+.agent-status-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.agent-status-actions button {
+  min-height: 24px;
+  padding: 0 10px;
+  font-size: 9px;
+}
+
+.agent-status-empty {
+  margin: 0;
+  font-size: 9px;
+  line-height: 1.45;
+  color: var(--muted-2);
+}
+
+.app.is-panel-compact .agent-status {
+  padding: 7px 9px;
+  gap: 6px;
+  border-radius: 10px;
+}
+
+.app.is-panel-compact .agent-status-item {
+  padding: 6px 8px;
+}
+
+.app.is-panel-compact .agent-status-copy small {
+  display: none;
+}
+
+.agent-setup-row {
+  align-items: flex-start;
+}
+
+.agent-setup-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.agent-setup-buttons button {
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: #dedcd5;
+  font-family: var(--sans);
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.agent-setup-buttons button:hover {
+  background: rgba(255, 255, 255, 0.09);
 }

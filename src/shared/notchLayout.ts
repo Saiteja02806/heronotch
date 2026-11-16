@@ -150,11 +150,12 @@ export function dockedPanelSize(
   compact: boolean
 ): { width: number; height: number } {
   if (compact) {
-    // A short single-column card. Keep this in step with the compact panel
-    // rule in styles.css — the flight lands on these numbers.
+    // A single-pane card hanging under the tab. Compact shows one thing at a
+    // time, so it stays narrow and lets a page scroll rather than opening a
+    // second column. Keep this in step with the compact rules in styles.css.
     return {
-      width: Math.round(Math.min(440, viewportWidth - 32)),
-      height: Math.round(Math.min(360, Math.max(300, viewportHeight * 0.42)))
+      width: Math.max(1, Math.round(Math.min(520, viewportWidth - 40))),
+      height: Math.max(1, Math.round(Math.min(360, Math.max(320, viewportHeight * 0.4))))
     }
   }
   return {

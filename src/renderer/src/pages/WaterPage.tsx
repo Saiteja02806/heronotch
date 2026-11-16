@@ -30,7 +30,6 @@ function MeasuringGlass({
       aria-label={decorative ? undefined : label}
       aria-hidden={decorative ? true : undefined}
     >
-      <div className="vessel-lip" />
       <div className="vessel-body">
         <div className="vessel-water" />
         {!tiny && !shelf && (

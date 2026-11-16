@@ -3,10 +3,12 @@ export interface ForegroundSample {
   fullscreen: boolean
   /** The foreground window belongs to Notch itself. */
   own: boolean
+  browserOpen: boolean
 }
 
 export interface PresenceSettings {
   autoHideFullscreen?: boolean
+  browserOnly?: boolean
   neverOver?: string[]
 }
 
@@ -14,8 +16,12 @@ function cleanName(value: string): string {
   return value.trim().toLowerCase().replace(/\.exe$/, '')
 }
 
-/** Hide the tab over a fullscreen app, or over an app the user listed. */
-export function shouldAutoHide(sample: ForegroundSample | null, settings: PresenceSettings): boolean {
+export function shouldAutoHide(
+  sample: ForegroundSample | null,
+  settings: PresenceSettings,
+  explicitOpen = false
+): boolean {
+  if (settings.browserOnly && !sample?.browserOpen && !explicitOpen) return true
   if (!sample || sample.own || !sample.process) return false
   const blocked = (settings.neverOver || []).some((name) => cleanName(name) === cleanName(sample.process))
   if (blocked) return true
