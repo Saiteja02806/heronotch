@@ -1,5 +1,4 @@
 import {
-  Bot,
   Check,
   Clock3,
   Copy,
@@ -13,41 +12,53 @@ import {
   TerminalSquare
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import type { CodingSession } from '../../../shared/types'
+import type { CodingSession, SessionProvider } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
 import { useNow } from '../state/clock'
 import { SESSION_META, SessionBadge, sessionAge } from '../components/SessionBits'
-const SENDABLE = new Set(['codex', 'opencode', 'antigravity'])
+import { OpenCodeApprovals } from '../components/OpenCodeApprovals'
+import { AgentStatus } from '../components/AgentStatus'
+const SENDABLE = new Set(['codex', 'opencode', 'antigravity', 'claude'])
 
 type DeliveryPhase = 'idle' | 'sending' | 'delivered' | 'unconfirmed' | 'failed'
 
 export function SessionsPage() {
-  const { sessions, sessionsLoading, refreshSessions, showToast, repliedSessionId } = useApp()
+  const { sessions, sessionsLoading, refreshSessions, showToast, repliedSessionId, state } = useApp()
   const now = useNow()
+  const compact = state.settings.panelSize === 'compact'
   const [query, setQuery] = useState('')
+  const [appFilter, setAppFilter] = useState<SessionProvider | null>(null)
   const [showSubagents, setShowSubagents] = useState(false)
   const [composer, setComposer] = useState<CodingSession | null>(null)
   const [message, setMessage] = useState('')
   const [phase, setPhase] = useState<DeliveryPhase>('idle')
   const [sendNote, setSendNote] = useState<string | null>(null)
   const [sendErrorCode, setSendErrorCode] = useState<string | null>(null)
+  // Armed while waiting for a Codex thread to close in ChatGPT; the watcher
+  // delivers the queued message the moment the lock is released.
+  const [watching, setWatching] = useState(false)
   const composerRef = useRef<CodingSession | null>(null)
   composerRef.current = composer
   const sending = phase === 'sending'
 
   const all = sessions?.sessions || []
   const subagentCount = all.filter((session) => session.subagent).length
+  const apps = sessions?.apps || []
+  const runningApps = apps.filter((app) => app.running)
+  const runningCount = runningApps.length
+  const filterLabel = appFilter ? runningApps.find((app) => app.provider === appFilter)?.label || appFilter : null
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
     return all.filter((session) => {
       if (!showSubagents && session.subagent) return false
+      if (appFilter && session.provider !== appFilter) return false
       if (!needle) return true
       return `${session.title} ${session.project || ''} ${session.provider} ${session.model || ''} ${session.origin || ''}`
         .toLowerCase()
         .includes(needle)
     })
-  }, [all, query, showSubagents])
+  }, [all, query, showSubagents, appFilter])
 
   const grouped = useMemo(
     () => ({
@@ -73,6 +84,7 @@ export function SessionsPage() {
     setPhase('idle')
     setSendNote(null)
     setSendErrorCode(null)
+    setWatching(false)
   }
 
   const closeComposer = (): void => {
@@ -82,7 +94,39 @@ export function SessionsPage() {
     setPhase('idle')
     setSendNote(null)
     setSendErrorCode(null)
+    setWatching(false)
   }
+
+  // While armed, watch the Codex thread-writer lock and deliver as soon as the
+  // thread is no longer open in ChatGPT.
+  useEffect(() => {
+    if (!watching || !composer || phase !== 'failed' || sendErrorCode !== 'codex-open') return
+    let alive = true
+    const tick = async (): Promise<void> => {
+      try {
+        const status = await window.notch.sessions.codexLock(composer.id)
+        if (!alive) return
+        if (status.missing) {
+          setWatching(false)
+          setSendNote('That session is no longer in the latest scan.')
+          return
+        }
+        if (!status.locked) {
+          setWatching(false)
+          setSendNote(null)
+          void send()
+        }
+      } catch {
+        // Keep watching; a single failed check is not a reason to stop.
+      }
+    }
+    const timer = window.setInterval(tick, 2000)
+    void tick()
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [watching, composer, phase, sendErrorCode])
 
   useEffect(() => {
     return window.notch.sessions.onSendResult((result) => {
@@ -104,6 +148,18 @@ export function SessionsPage() {
       setSendNote(result.error || 'The agent command failed.')
     })
   }, [])
+
+  const toggleWatch = (): void => {
+    if (watching) {
+      setWatching(false)
+      setSendNote('Not watching this thread anymore. Close the thread and press Send.')
+    } else {
+      setWatching(true)
+      setSendNote(
+        'Watching this thread. Close it in ChatGPT and Notch delivers the message automatically.'
+      )
+    }
+  }
 
   const send = async (): Promise<void> => {
     if (!composer || !message.trim() || sending) return
@@ -139,14 +195,25 @@ export function SessionsPage() {
 
   return (
     <div className="sessions-page">
+      <OpenCodeApprovals />
       <aside className="sessions-apps-column">
         <div className="sessions-apps-head">
           <span className="eyebrow">Running locally</span>
-          <Bot size={14} />
+          <span className="sessions-apps-count">
+            {runningCount} of {apps.length}
+          </span>
         </div>
         <div className="sessions-apps-list">
           {(sessions?.apps || []).map((app) => {
             const meta = SESSION_META[app.provider]
+            const stateMeta =
+              app.state === 'working'
+                ? { label: 'Working', cls: 'is-live' }
+                : app.state === 'open'
+                  ? { label: 'Open', cls: 'is-open' }
+                  : app.state === 'idle'
+                    ? { label: 'Background', cls: 'is-idle' }
+                    : { label: 'Closed', cls: '' }
             return (
               <div
                 key={app.provider}
@@ -156,13 +223,18 @@ export function SessionsPage() {
                 <div className="agent-card-top">
                   <SessionBadge provider={app.provider} size={24} />
                   <span className="agent-name">{app.label}</span>
-                  <span className={`agent-state ${app.running ? 'is-live' : ''}`}>
-                    <i /> {app.running ? 'Running' : 'Closed'}
+                  <span className={`agent-state ${stateMeta.cls}`}>
+                    <i /> {stateMeta.label}
                   </span>
                 </div>
                 <p className="agent-window">
                   <span>Latest</span>
-                  {app.windowTitle || (app.running ? 'No active conversation' : 'Not running')}
+                  {app.windowTitle ||
+                    (app.state === 'idle'
+                      ? 'Only background processes'
+                      : app.running
+                        ? 'No active conversation'
+                        : 'Not running')}
                 </p>
                 <div className="agent-stats">
                   <span><Cpu size={10} /> {app.processCount} process{app.processCount === 1 ? '' : 'es'}</span>
@@ -188,6 +260,7 @@ export function SessionsPage() {
       </aside>
 
       <section className="sessions-list-panel">
+        <AgentStatus />
         <header className="sessions-head">
           <div>
             <span className="eyebrow">
@@ -233,6 +306,52 @@ export function SessionsPage() {
           )}
         </div>
 
+        {compact && (
+          <div className="sessions-running" role="group" aria-label="Apps running on this machine">
+            <button
+              type="button"
+              className={`sessions-running-count ${runningCount ? 'is-live' : ''} ${appFilter ? 'is-filtered' : ''}`}
+              onClick={() => setAppFilter(null)}
+              disabled={!appFilter}
+              title={appFilter ? 'Show sessions from every app' : 'Apps running on this machine'}
+            >
+              <span className="live-dot" />
+              {appFilter ? `\u00d7 ${filterLabel}` : `${runningCount} running`}
+            </button>
+            <div className="sessions-running-list">
+              {runningApps.map((app) => (
+                <button
+                  key={app.provider}
+                  type="button"
+                  className={`session-app-chip is-running ${appFilter === app.provider ? 'is-selected' : ''}`}
+                  aria-pressed={appFilter === app.provider}
+                  onClick={() =>
+                    app.sessions === 0
+                      ? undefined
+                      : setAppFilter((current) => (current === app.provider ? null : app.provider))
+                  }
+                  disabled={app.sessions === 0}
+                  title={
+                    appFilter === app.provider
+                      ? `Show every app again`
+                      : app.sessions === 0
+                        ? `${app.label} has no conversations yet`
+                        : `Show ${app.label} sessions`
+                  }
+                >
+                  <i />
+                  {app.label}
+                </button>
+              ))}
+              {runningCount === 0 && (
+                <span className="session-app-chip">
+                  {sessions?.error ? 'Apps unavailable' : sessions ? 'No apps running' : 'Checking…'}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="sessions-scroll">
           {sessions?.error && <div className="sessions-error">{sessions.error}</div>}
 
@@ -257,24 +376,39 @@ export function SessionsPage() {
               <div className="sessions-empty-mark">
                 {query ? <Search size={26} /> : <TerminalSquare size={28} />}
               </div>
-              <span className="eyebrow">{query ? 'No match' : 'All quiet'}</span>
-              <h2>{query ? 'Nothing matches that search.' : 'No sessions found yet.'}</h2>
+              <span className="eyebrow">{query ? 'No match' : appFilter ? 'Filtered' : 'All quiet'}</span>
+              <h2>
+                {query
+                  ? 'Nothing matches that search.'
+                  : appFilter
+                    ? `No ${filterLabel} sessions on this machine.`
+                    : 'No sessions found yet.'}
+              </h2>
               <p>
                 {query
                   ? 'Try a project name, model, or a shorter search.'
-                  : subagentCount > 0 && !showSubagents
-                    ? 'Only subagent conversations are present right now. Show subagents to see them.'
-                    : 'Open a Codex thread, start an OpenCode session, or pick up an Anti Gravity conversation.'}
+                  : appFilter
+                    ? `${filterLabel} is running, but it has no saved conversations here yet.`
+                    : subagentCount > 0 && !showSubagents
+                      ? 'Only subagent conversations are present right now. Show subagents to see them.'
+                      : 'Open a Codex thread, start an OpenCode session, or pick up an Anti Gravity conversation.'}
               </p>
               <button
                 className="soft-button"
                 onClick={() => {
                   if (query) setQuery('')
+                  else if (appFilter) setAppFilter(null)
                   else if (subagentCount > 0) setShowSubagents(true)
                   else void refreshSessions()
                 }}
               >
-                {query ? 'Clear search' : subagentCount > 0 && !showSubagents ? 'Show subagents' : 'Scan again'}
+                {query
+                  ? 'Clear search'
+                  : appFilter
+                    ? 'Show all apps'
+                    : subagentCount > 0 && !showSubagents
+                      ? 'Show subagents'
+                      : 'Scan again'}
               </button>
             </div>
           )}
@@ -318,6 +452,8 @@ export function SessionsPage() {
         onSend={() => void send()}
         onCancel={closeComposer}
         onCopy={() => void copyAndOpenChatGpt()}
+        watching={watching}
+        onWatch={toggleWatch}
       />
     )
   }
@@ -337,7 +473,9 @@ function SessionRow({
   onDraft,
   onSend,
   onCancel,
-  onCopy
+  onCopy,
+  watching,
+  onWatch
 }: {
   session: CodingSession
   now: number
@@ -353,6 +491,8 @@ function SessionRow({
   onSend: () => void
   onCancel: () => void
   onCopy: () => void
+  watching: boolean
+  onWatch: () => void
 }) {
   const meta = SESSION_META[session.provider]
   const canSend = SENDABLE.has(session.provider) && !session.subagent
@@ -450,9 +590,26 @@ function SessionRow({
           </div>
           {note && <p className={`session-inline-status is-${phase}`}>{note}</p>}
           {errorCode === 'codex-open' && (
-            <button type="button" className="soft-button session-inline-copy" onClick={onCopy}>
-              <Copy size={12} /> Copy &amp; open ChatGPT
-            </button>
+            <div className="session-inline-codex">
+              <button
+                type="button"
+                className={`compact ${watching ? 'primary-button session-inline-copy' : 'soft-button session-inline-copy'}`}
+                onClick={onWatch}
+              >
+                {watching ? (
+                  <>
+                    <Loader2 size={12} className="spin" /> Watching… click to stop
+                  </>
+                ) : (
+                  <>
+                    <Clock3 size={12} /> Send when the thread closes
+                  </>
+                )}
+              </button>
+              <button type="button" className="soft-button compact session-inline-copy" onClick={onCopy}>
+                <Copy size={12} /> Copy &amp; open ChatGPT
+              </button>
+            </div>
           )}
         </form>
       )}

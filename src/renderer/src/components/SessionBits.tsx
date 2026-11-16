@@ -20,7 +20,18 @@ export const SESSION_META: Record<
   claude: { label: 'Claude', short: 'Cl', color: '#d97757' },
   cursor: { label: 'Cursor', short: 'Cu', color: '#f4f1ea' },
   windsurf: { label: 'Windsurf', short: 'Ws', color: '#3ddc97' },
-  zed: { label: 'Zed', short: 'Zd', color: '#f4f1ea' }
+  zed: { label: 'Zed', short: 'Zd', color: '#f4f1ea' },
+  vscode: { label: 'VS Code', short: 'Vs', color: '#3ea6ff' },
+  jetbrains: { label: 'JetBrains', short: 'Jb', color: '#ff5b8d' },
+  deepai: { label: 'DeepAI Code', short: 'Dp', color: '#79c99e' },
+  trae: { label: 'Trae', short: 'Tr', color: '#f97362' },
+  qoder: { label: 'Qoder', short: 'Qd', color: '#a78bfa' },
+  kiro: { label: 'Kiro', short: 'Ki', color: '#f5a623' },
+  gemini: { label: 'Gemini', short: 'Ge', color: '#5c9bff' },
+  copilot: { label: 'Copilot', short: 'Co', color: '#9d7cff' },
+  aider: { label: 'Aider', short: 'Ai', color: '#d9b23a' },
+  cline: { label: 'Cline', short: 'Cn', color: '#d98a4b' },
+  other: { label: 'Other tools', short: 'Ot', color: '#9fb4c7' }
 }
 
 const MARK_PATHS: Partial<Record<SessionProvider, string>> = {

@@ -24,10 +24,21 @@ const PROVIDER_LABELS: Record<SessionProvider, string> = {
   claude: 'Claude',
   cursor: 'Cursor',
   windsurf: 'Windsurf',
-  zed: 'Zed'
+  zed: 'Zed',
+  vscode: 'VS Code',
+  jetbrains: 'JetBrains',
+  deepai: 'DeepAI Code',
+  trae: 'Trae',
+  qoder: 'Qoder',
+  kiro: 'Kiro',
+  gemini: 'Gemini',
+  copilot: 'Copilot',
+  aider: 'Aider',
+  cline: 'Cline',
+  other: 'Other tools'
 }
 
-const CORE_PROVIDERS: SessionProvider[] = ['codex', 'opencode', 'antigravity']
+const CORE_PROVIDERS: SessionProvider[] = ['codex', 'opencode', 'antigravity', 'claude']
 
 let lastDirectories = new Set<string>()
 let lastSessions = new Map<string, CodingSession>()
@@ -80,34 +91,103 @@ function providerForProcess(name: string): SessionProvider | null {
   if (normalizedName === 'cursor.exe') return 'cursor'
   if (normalizedName.includes('windsurf')) return 'windsurf'
   if (normalizedName === 'zed.exe') return 'zed'
+  if (normalizedName.startsWith('code')) return 'vscode'
+  if (
+    /^(idea64|idea|pycharm64|pycharm|webstorm64|webstorm|goland64|goland|phpstorm64|phpstorm|clion64|clion|rider64|rider|datagrip64|datagrip|jetbrainsclient)/.test(normalizedName) ||
+    normalizedName.includes('jetbrains')
+  ) {
+    return 'jetbrains'
+  }
+  if (normalizedName.includes('deepai')) return 'deepai'
+  if (normalizedName.includes('trae')) return 'trae'
+  if (normalizedName.includes('qoder')) return 'qoder'
+  if (normalizedName.includes('kiro')) return 'kiro'
+  if (normalizedName.startsWith('gemini')) return 'gemini'
+  if (normalizedName === 'copilot.exe') return 'copilot'
+  if (normalizedName.includes('aider')) return 'aider'
+  if (normalizedName.includes('cline')) return 'cline'
+  return null
+}
+
+/** Generic hosts (Electron apps, JVM launchers) hide behind ordinary exe
+ * names; their window titles are the only tell. Match known coding-tool
+ * keywords so every popular AI IDE surfaces as its own card. */
+function providerForTitle(title: string): SessionProvider | null {
+  const normalized = (title || '').toLowerCase()
+  if (!normalized || /^n\/a$/.test(normalized)) return null
+  if (normalized.includes('chatgpt')) return 'codex'
+  if (normalized === 'claude' || normalized.startsWith('claude ')) return 'claude'
+  if (normalized.includes('opencode')) return 'opencode'
+  if (normalized.includes('cursor')) return 'cursor'
+  if (normalized.includes('windsurf')) return 'windsurf'
+  if (/\bzed\b/.test(normalized)) return 'zed'
+  if (normalized.includes('visual studio code')) return 'vscode'
+  if (
+    normalized.includes('intellij') ||
+    normalized.includes('pycharm') ||
+    normalized.includes('webstorm') ||
+    normalized.includes('goland') ||
+    normalized.includes('phpstorm') ||
+    normalized.includes('clion') ||
+    normalized.includes('rider') ||
+    normalized.includes('datagrip') ||
+    normalized.includes('jetbrains')
+  ) {
+    return 'jetbrains'
+  }
+  if (normalized.includes('deepai')) return 'deepai'
+  if (normalized.includes('trae')) return 'trae'
+  if (normalized.includes('qoder')) return 'qoder'
+  if (normalized.includes('kiro')) return 'kiro'
+  if (normalized.includes('gemini')) return 'gemini'
+  if (normalized.includes('copilot')) return 'copilot'
+  if (normalized.includes('aider')) return 'aider'
+  if (normalized.includes('cline')) return 'cline'
   return null
 }
 
 function scanProcesses(): Promise<ProcessInfo[]> {
   return new Promise((resolve) => {
+    // `tasklist /V` can take a minute or more on some machines; Get-Process
+    // returns in well under a second and exposes the main window title, which
+    // is what tells an actually-open tool apart from its leftover daemons.
     execFile(
-      'tasklist.exe',
-      ['/FO', 'CSV', '/NH'],
-      { windowsHide: true, timeout: 5000, maxBuffer: 4 * 1024 * 1024 },
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        "Get-Process | ForEach-Object { \"{0}`t{1}`t{2}\" -f $_.Id, $_.ProcessName, $_.MainWindowTitle }"
+      ],
+      { windowsHide: true, timeout: 8000, maxBuffer: 4 * 1024 * 1024 },
       (error, stdout) => {
         if (error || !stdout.trim()) {
           resolve([])
           return
         }
         const processes: ProcessInfo[] = []
-        const rows = stdout.split(/\r?\n/)
-        for (const row of rows) {
-          const match = row.match(/^"([^"]+)","([0-9]+)"/)
-          if (!match) continue
-          const name = match[1]
-          if (!providerForProcess(name)) continue
-          processes.push({ Id: Number(match[2]), Name: name, Title: null, Path: null })
+        for (const row of stdout.split(/\r?\n/)) {
+          const parts = row.split('\t')
+          if (parts.length < 3) continue
+          const pid = Number(parts[0])
+          if (!Number.isFinite(pid)) continue
+          const name = `${parts[1].trim()}.exe`
+          const title = parts.slice(2).join(' ').trim()
+          const provider = providerForProcess(name) ?? providerForTitle(title)
+          if (!provider) continue
+          const hasWindow = Boolean(title) && !HIDDEN_WINDOW_TITLE.test(title)
+          processes.push({ Id: pid, Name: name, Title: hasWindow ? title : null, Path: null })
         }
         resolve(processes)
       }
     )
   })
 }
+
+/** Tasklist /V also reports invisible helper windows (COM pumps, .NET
+ * broadcast sinks). They must not make an idle daemon look open. */
+const HIDDEN_WINDOW_TITLE =
+  /^(n\/a|olemainthreadwndname|olechannelwnd|uxdservice|gdi\+ window|\.net-broadcasteventwindow|dwm notification window|progman|default ime|msctfime ui|task host window|windows input experience|broadcastlistenerwindow|crossdeviceresumewindow)/i
 
 async function latestFile(directory: string, pattern: RegExp): Promise<string | null> {
   try {
@@ -353,33 +433,223 @@ async function scanAntigravity(): Promise<CodingSession[]> {
   }
 }
 
+/**
+ * Claude Code keeps one JSONL transcript per session under
+ * ~/.claude/projects/<munged-project-path>/<session-id>.jsonl. Each line is a
+ * JSON record (user / assistant / system) with sessionId, cwd and a timestamp.
+ */
+async function scanClaude(): Promise<CodingSession[]> {
+  const root = path.join(os.homedir(), '.claude', 'projects')
+  try {
+    const projects = await fs.readdir(root, { withFileTypes: true })
+    const candidates: { file: string; mtime: number }[] = []
+    for (const project of projects) {
+      if (!project.isDirectory()) continue
+      const dir = path.join(root, project.name)
+      const files = await fs.readdir(dir).catch(() => [] as string[])
+      for (const file of files) {
+        if (!file.endsWith('.jsonl')) continue
+        const full = path.join(dir, file)
+        const stat = await fs.stat(full).catch(() => null)
+        if (stat && stat.size > 0) candidates.push({ file: full, mtime: stat.mtimeMs })
+      }
+    }
+    candidates.sort((a, b) => b.mtime - a.mtime)
+    const picked: CodingSession[] = []
+    for (const candidate of candidates.slice(0, 16)) {
+      const session = await claudeSessionFromFile(candidate.file, candidate.mtime)
+      if (session) picked.push(session)
+    }
+    return picked
+  } catch {
+    // Claude Code has not run yet.
+    return []
+  }
+}
+
+async function claudeSessionFromFile(file: string, mtime: number): Promise<CodingSession | null> {
+  try {
+    const handle = await fs.open(file, 'r')
+    try {
+      const stat = await handle.stat()
+      const head = await readSlice(handle, 0, Math.min(stat.size, 65536))
+      const tail = await readSlice(handle, Math.max(0, stat.size - 32768), stat.size)
+
+      let sessionId = ''
+      let cwd = ''
+      let title = ''
+      let model: string | null = null
+      let subagent = false
+      let updatedAt = mtime
+
+      for (const line of head.split(/\r?\n/)) {
+        if (!line.startsWith('{')) continue
+        let entry: ClaudeRecord
+        try {
+          entry = JSON.parse(line) as ClaudeRecord
+        } catch {
+          continue
+        }
+        if (!sessionId && entry.sessionId) sessionId = String(entry.sessionId)
+        if (!cwd && entry.cwd) cwd = String(entry.cwd)
+        if (entry.isSidechain) subagent = true
+        if (!model && entry.message?.model) model = String(entry.message.model)
+        if (!title && entry.type === 'user') {
+          const text = claudeContentText(entry.message?.content)
+          if (text) title = text
+        }
+      }
+      for (const line of tail.split(/\r?\n/).reverse()) {
+        if (!line.includes('"timestamp"')) continue
+        let entry: ClaudeRecord
+        try {
+          entry = JSON.parse(line) as ClaudeRecord
+        } catch {
+          continue
+        }
+        const parsed = entry.timestamp ? Date.parse(String(entry.timestamp)) : NaN
+        if (Number.isFinite(parsed)) {
+          updatedAt = parsed
+          break
+        }
+      }
+
+      if (!sessionId) sessionId = path.basename(file, '.jsonl')
+      // A transcript written seconds ago is a live turn; an older file is at rest.
+      const active = !subagent && Date.now() - updatedAt < 90_000
+      return {
+        id: `claude-${sessionId}`,
+        rawId: sessionId,
+        provider: 'claude' as const,
+        title: cleanTitle(title, baseName(cwd) || 'Claude Code session'),
+        project: baseName(cwd),
+        directory: cwd || null,
+        model: model ? model.replace(/^claude-/, '') : null,
+        detail: model ? null : null,
+        updatedAt,
+        active,
+        subagent,
+        origin: 'Claude Code'
+      }
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return null
+  }
+}
+
+interface ClaudeRecord {
+  type?: string
+  sessionId?: string
+  cwd?: string
+  isSidechain?: boolean
+  timestamp?: string
+  message?: {
+    role?: string
+    model?: string
+    content?: unknown
+  }
+}
+
+/** Claude content is either a plain string or a block array; keep the first readable text. */
+function claudeContentText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (
+        block &&
+        typeof block === 'object' &&
+        (block as { type?: string }).type === 'text' &&
+        typeof (block as { text?: unknown }).text === 'string'
+      ) {
+        const text = (block as { text: string }).text.trim()
+        // Skip tool output and system reminders; keep real user words.
+        if (text && !/^<system-reminder>|^Caveat:/i.test(text)) return text
+      }
+    }
+  }
+  return ''
+}
+
+async function readSlice(handle: fs.FileHandle, start: number, end: number): Promise<string> {
+  const length = Math.max(0, end - start)
+  if (length === 0) return ''
+  const buffer = Buffer.alloc(length)
+  await handle.read(buffer, 0, length, start)
+  return buffer.toString('utf8')
+}
+
+async function findClaudeCli(): Promise<string | null> {
+  const home = os.homedir()
+  const candidates = [
+    path.join(home, '.local', 'bin', 'claude.exe'),
+    path.join(home, '.local', 'bin', 'claude.cmd'),
+    path.join(home, 'AppData', 'Roaming', 'npm', 'claude.cmd')
+  ]
+  for (const candidate of candidates) {
+    if (await fs.stat(candidate).then((stat) => stat.isFile()).catch(() => false)) return candidate
+  }
+  // Native installs and npm shims move around; ask PATH as a fallback.
+  return new Promise<string | null>((resolve) => {
+    execFile('where.exe', ['claude'], { windowsHide: true, timeout: 4000 }, (error, stdout) => {
+      if (error || !stdout.trim()) return resolve(null)
+      const first = stdout.split(/\r?\n/).find((line) => line.trim().endsWith('.exe') || line.trim().endsWith('.cmd'))
+      resolve(first ? first.trim() : null)
+    })
+  })
+}
+
 function buildPresence(processes: ProcessInfo[], sessions: CodingSession[]): AppPresence[] {
   const providers = new Set<SessionProvider>(CORE_PROVIDERS)
   for (const session of sessions) providers.add(session.provider)
   for (const process of processes) {
-    const provider = providerForProcess(process.Name)
+    const provider = providerForProcess(process.Name) ?? providerForTitle(process.Title || '')
     if (provider) providers.add(provider)
+  }
+
+  const coreIndex = (provider: SessionProvider): number => {
+    if (provider === 'other') return 999
+    const index = CORE_PROVIDERS.indexOf(provider)
+    return index === -1 ? CORE_PROVIDERS.length : index
   }
 
   return Array.from(providers)
     .map((provider) => {
-      const matching = processes.filter((process) => providerForProcess(process.Name) === provider)
+      const matching = processes.filter(
+        (process) => (providerForProcess(process.Name) ?? providerForTitle(process.Title || '')) === provider
+      )
       const providerSessions = sessions.filter((session) => session.provider === provider)
+      const activeSession = providerSessions.some((session) => session.active)
+      // CLI agents keep daemons alive long after the user stops using them, so
+      // bare process counts must never claim "running". A real window or an
+      // actively-generating session does.
+      const windowed = matching.filter((process) => process.Title)
+      const state: AppPresence['state'] = activeSession
+        ? 'working'
+        : windowed.length > 0
+          ? 'open'
+          : matching.length > 0
+            ? 'idle'
+            : 'closed'
       const windowTitle =
         providerSessions.find((session) => session.active)?.title ||
+        windowed[0]?.Title ||
         providerSessions[0]?.title ||
         null
       return {
         provider,
         label: PROVIDER_LABELS[provider],
-        running: matching.length > 0 || providerSessions.some((session) => session.active),
+        running: state === 'working' || state === 'open',
+        state,
         processCount: matching.length,
+        windowedCount: windowed.length,
         windowTitle,
         sessions: providerSessions.length
       }
     })
     .sort((a, b) => {
-      const order = CORE_PROVIDERS.indexOf(a.provider) - CORE_PROVIDERS.indexOf(b.provider)
+      const order = coreIndex(a.provider) - coreIndex(b.provider)
       return order !== 0 ? order : a.label.localeCompare(b.label)
     })
 }
@@ -429,7 +699,9 @@ function demoSnapshot(): SessionsSnapshot {
       provider,
       label: PROVIDER_LABELS[provider],
       running: provider === 'opencode' || provider === 'codex',
+      state: (provider === 'opencode' || provider === 'codex' ? 'open' : 'closed') as AppPresence['state'],
       processCount: provider === 'opencode' ? 2 : provider === 'codex' ? 1 : 0,
+      windowedCount: provider === 'opencode' || provider === 'codex' ? 1 : 0,
       windowTitle: sessions.find((item) => item.provider === provider)?.title || null,
       sessions: 1
     })
@@ -447,13 +719,14 @@ async function performScan(): Promise<SessionsSnapshot> {
       readCodexSessionNames(),
       readCodexTurnStatuses()
     ])
-    const [codex, opencode, antigravity] = await Promise.all([
+    const [codex, opencode, antigravity, claude] = await Promise.all([
       scanCodex(names, statuses),
       scanOpenCode(),
-      scanAntigravity()
+      scanAntigravity(),
+      scanClaude()
     ])
 
-    const sessions = [...codex, ...opencode, ...antigravity]
+    const sessions = [...codex, ...opencode, ...antigravity, ...claude]
       .filter((session) => session.updatedAt > 0)
       .sort((a, b) => {
         if (a.active !== b.active) return a.active ? -1 : 1
@@ -616,6 +889,14 @@ function cleanProcessError(output: string): string {
     .slice(-320)
 }
 
+export async function codexThreadLock(
+  sessionId: string
+): Promise<{ locked: boolean; missing: boolean }> {
+  const session = lastSessions.get(sessionId)
+  if (!session || session.provider !== 'codex') return { locked: false, missing: true }
+  return { locked: await codexThreadIsOpen(session.rawId), missing: false }
+}
+
 export async function sendSessionMessage(
   sessionId: string,
   rawMessage: string
@@ -648,7 +929,7 @@ export async function sendSessionMessage(
         ok: false,
         code: 'codex-open',
         error:
-          'That Codex thread is open in ChatGPT. Codex locks open threads, so a background CLI cannot deliver into it. Copy the message and send it in ChatGPT, or close the thread and retry.'
+          'That Codex thread is open in ChatGPT. Codex locks open threads, so a background CLI cannot deliver into it. Close the thread in ChatGPT and use “Send when the thread closes”, or copy the message and send it there.'
       }
     }
     const cli = await findCodexCli()
@@ -657,6 +938,26 @@ export async function sendSessionMessage(
     }
     command = cli
     args = ['exec', 'resume', '--skip-git-repo-check', session.rawId, message]
+  } else if (session.provider === 'claude') {
+    // Claude Code has no writer lock like Codex's, but a headless resume while
+    // a turn is still streaming would interleave two writers in one
+    // transcript. Wait for the turn to end instead.
+    if (session.active) {
+      return {
+        ok: false,
+        code: 'claude-active',
+        error:
+          'Claude is still working in this session. Wait for the current turn to finish, then press Send again.'
+      }
+    }
+    const cli = await findClaudeCli()
+    if (!cli) {
+      return { ok: false, error: 'Claude Code CLI was not found. Install Claude Code, then try again.' }
+    }
+    // Claude organises transcripts per project, so the resume has to run in
+    // the session's own directory to find this conversation.
+    command = cli
+    args = ['--resume', session.rawId, '--print', message]
   } else if (session.provider === 'antigravity') {
     const address = await findAntiGravityAddress()
     if (!address) {
@@ -686,12 +987,21 @@ export async function sendSessionMessage(
   let child: ChildProcess
   prepareReplyWatch(session)
   try {
-    child = spawn(command, args, {
-      cwd: session.directory || os.homedir(),
-      env,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
+    // Node refuses to spawn .cmd/.bat shims directly; those go through cmd.exe.
+    const needsShell = /\.(cmd|bat)$/i.test(command)
+    child = needsShell
+      ? spawn('cmd.exe', ['/d', '/s', '/c', command, ...args], {
+          cwd: session.directory || os.homedir(),
+          env,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
+      : spawn(command, args, {
+          cwd: session.directory || os.homedir(),
+          env,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
   } catch (error) {
     discardReplyWatch(session.id)
     return {

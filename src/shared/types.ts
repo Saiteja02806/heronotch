@@ -19,6 +19,11 @@ export type NotchStyle =
   | 'notch-micro'
 
 export interface Settings {
+  openCodeApprovalPort?: number
+  codingReplySound?: boolean
+  /** Local hook bridge for coding-tool status and approvals. */
+  agentStatus?: boolean
+  agentStatusPort?: number
   accent: Accent
   vaultPath: string | null
   hoverDelay: number
@@ -42,6 +47,8 @@ export interface Settings {
   mediaSource?: string
   /** Hide the tab while another app covers the display the notch is on. On unless turned off. */
   autoHideFullscreen?: boolean
+  /** Show the tab only while a supported Windows browser has a window open. */
+  browserOnly?: boolean
   /** Display the notch lives on: `primary`, or the id of a connected display. */
   notchDisplay?: string
   /** On a display other than the primary one, shrink the tab to a small pill. */
@@ -159,7 +166,54 @@ export interface AppStatePatch {
   spotifyMemory?: SpotifyMemory | null
 }
 
-export type SessionProvider = 'codex' | 'opencode' | 'antigravity' | 'claude' | 'cursor' | 'windsurf' | 'zed'
+export type SessionProvider =
+  | 'codex'
+  | 'opencode'
+  | 'antigravity'
+  | 'claude'
+  | 'cursor'
+  | 'windsurf'
+  | 'zed'
+  | 'vscode'
+  | 'jetbrains'
+  | 'deepai'
+  | 'trae'
+  | 'qoder'
+  | 'kiro'
+  | 'gemini'
+  | 'copilot'
+  | 'aider'
+  | 'cline'
+  | 'other'
+
+/** Tools that can report their state to Notch through the local hook bridge. */
+export type AgentTool = 'claude' | 'codex' | 'cursor'
+export type AgentState = 'working' | 'waiting' | 'done'
+
+export interface AgentStatus {
+  tool: AgentTool
+  state: AgentState
+  title: string
+  detail: string
+  at: number
+}
+
+export interface AgentPermission {
+  id: string
+  tool: AgentTool
+  title: string
+  detail: string
+  at: number
+}
+
+export interface AgentSnapshot {
+  statuses: AgentStatus[]
+  pending: AgentPermission[]
+  port: number
+  token: string
+  running: boolean
+  error: string | null
+}
 
 export interface CodingSession {
   id: string
@@ -180,7 +234,11 @@ export interface AppPresence {
   provider: SessionProvider
   label: string
   running: boolean
+  /** working = a session is actively generating; open = the app has a real
+   * window; idle = only background processes; closed = nothing at all. */
+  state: 'working' | 'open' | 'idle' | 'closed'
   processCount: number
+  windowedCount: number
   windowTitle: string | null
   sessions: number
 }
@@ -269,6 +327,9 @@ export interface SpotifyDevice {
 }
 
 export interface SpotifyPlayback {
+  /** Windows app that supplied the displayed session, including an enriched Spotify session. */
+  localSessionId?: string
+  controls?: { next?: boolean; previous?: boolean; seek?: boolean }
   connected: boolean
   playing: boolean
   track: SpotifyTrack | null
@@ -350,6 +411,11 @@ export interface ReminderEvent {
   time?: string
 }
 
+export interface MediaControlTarget {
+  preference: string
+  sessionId: string | null
+}
+
 export type SpotifyAction =
   | { type: 'play' }
   | { type: 'pause' }
@@ -363,7 +429,24 @@ export type SpotifyAction =
   | { type: 'repeat'; state: 'off' | 'track' | 'context' }
   | { type: 'transfer'; deviceId: string }
 
+export interface PendingApproval { id:string; session:string; operation:string; details:string; fingerprint:string }
 export interface NotchApi {
+  approvals:{list():Promise<PendingApproval[]>;decide(fingerprint:string,reply:'once'|'reject',port:number):Promise<void>}
+  agent: {
+    status(): Promise<AgentSnapshot>
+    setup(tool: AgentTool): Promise<string>
+    decide(id: string, reply: 'allow' | 'deny'): Promise<void>
+    onUpdate(listener: (snapshot: AgentSnapshot) => void): () => void
+  }
+  phone: {
+    start(
+      file: {name:string;bytes:Uint8Array}|null,
+      options?: { clipboard?: boolean; text?: string }
+    ): Promise<void>
+    status():Promise<{qr:string;received:{name:string;text:boolean}|null}|null>
+    collect():Promise<void>
+    stop():Promise<void>
+  }
   getState: () => Promise<AppState>
   getVersion: () => Promise<string>
   setState: (patch: AppStatePatch) => Promise<AppState>
@@ -394,6 +477,7 @@ export interface NotchApi {
   onRequestClose: (callback: () => void) => () => void
   onPrepareOpen: (callback: () => void) => () => void
   onPresence: (callback: (event: { hidden: boolean }) => void) => () => void
+  getPresence: () => Promise<{ hidden: boolean }>
   reportTiming: (mark: string, ms: number) => void
   obsidian: {
     chooseVault: () => Promise<string | null>
@@ -417,7 +501,7 @@ export interface NotchApi {
     player: () => Promise<SpotifyPlayback>
     queue: () => Promise<SpotifyQueueItem[]>
     library: () => Promise<SpotifyLibrary>
-    action: (action: SpotifyAction) => Promise<SpotifyPlayback>
+    action: (action: SpotifyAction, target?: MediaControlTarget) => Promise<SpotifyPlayback>
     launch: (target?: string) => Promise<boolean>
   }
   sessions: {
@@ -428,6 +512,9 @@ export interface NotchApi {
       message: string
     ) => Promise<{ ok: boolean; pending?: boolean; error?: string; code?: string }>
     focusCodex: () => Promise<boolean>
+    codexLock: (
+      sessionId: string
+    ) => Promise<{ locked: boolean; missing: boolean }>
     onSendResult: (callback: (result: SessionSendResult) => void) => () => void
     onReply: (callback: (event: SessionReplyEvent) => void) => () => void
   }

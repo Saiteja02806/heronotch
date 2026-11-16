@@ -27,6 +27,7 @@ export async function confirmDeliveredMessage(
   if (provider === 'opencode') return confirmOpenCode(rawId, text)
   if (provider === 'codex') return confirmCodex(rawId, text)
   if (provider === 'antigravity') return confirmAntiGravity(rawId, text)
+  if (provider === 'claude') return confirmClaude(rawId, text)
   return {
     check: 'unavailable',
     reason: 'Notch cannot read a session store for this provider.'
@@ -94,6 +95,60 @@ function openCodeUserText(messageData: string, partData: string, text: string): 
     return typeof part.text === 'string' && part.text.includes(text)
   } catch {
     return typeof partData === 'string' && partData.includes(text)
+  }
+}
+
+/** Claude Code writes ~/.claude/projects/<project>/<session-id>.jsonl. */
+async function claudeTranscripts(rawId: string): Promise<string[]> {
+  const root = path.join(os.homedir(), '.claude', 'projects')
+  try {
+    const entries = await fs.readdir(root, { recursive: true })
+    return entries
+      .map((entry) => String(entry))
+      .filter((entry) => entry.endsWith(`${rawId}.jsonl`))
+      .map((entry) => path.join(root, entry))
+  } catch {
+    return []
+  }
+}
+
+async function confirmClaude(rawId: string, text: string): Promise<DeliveryReport> {
+  const files = await claudeTranscripts(rawId)
+  if (files.length === 0) {
+    return { check: 'unavailable', reason: 'No Claude Code transcript was found for this session.' }
+  }
+  for (const file of files) {
+    if (await claudeJsonlHasUserText(file, text)) return { check: 'confirmed' }
+  }
+  return {
+    check: 'missing',
+    reason: 'The Claude Code command finished, but that message is not in this session’s transcript.'
+  }
+}
+
+async function claudeJsonlHasUserText(file: string, text: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(file)
+    const handle = await fs.open(file, 'r')
+    try {
+      const length = Math.min(stat.size, 2_000_000)
+      const start = stat.size > length ? stat.size - length : 0
+      const buffer = Buffer.alloc(length)
+      await handle.read(buffer, 0, length, start)
+      return buffer
+        .toString('utf8')
+        .split(/\r?\n/)
+        .some(
+          (line) =>
+            line.includes(text) &&
+            /"type"\s*:\s*"user"/.test(line) &&
+            !/"type"\s*:\s*"tool_result"/.test(line)
+        )
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return false
   }
 }
 

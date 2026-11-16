@@ -18,6 +18,8 @@ import { codexRolloutMatches } from './sessionDelivery'
  * Anti Gravity: the conversation summary's step count advanced and the row
  * returned to IDLE. The local store does not keep readable assistant text, so
  * this one is inferred. If those columns are missing, nothing is guessed.
+ * Claude Code: a new assistant line in the session transcript, and the file
+ * quiet for a moment (Claude appends events continuously while streaming).
  *
  * A watch gives up after 12 minutes.
  */
@@ -26,12 +28,13 @@ const WATCH_MS = 12 * 60 * 1000
 const POLL_MS = 2000
 const MAX_WATCHES = 6
 
-const WATCHABLE = new Set<SessionProvider>(['opencode', 'codex', 'antigravity'])
+const WATCHABLE = new Set<SessionProvider>(['opencode', 'codex', 'antigravity', 'claude'])
 
 const LABELS: Partial<Record<SessionProvider, string>> = {
   opencode: 'OpenCode',
   codex: 'Codex',
-  antigravity: 'Anti Gravity'
+  antigravity: 'Anti Gravity',
+  claude: 'Claude Code'
 }
 
 export interface ReplyRoots {
@@ -39,6 +42,7 @@ export interface ReplyRoots {
   codexSessions: string
   codexStateDir: string
   antigravityDb: string
+  claudeProjects: string
 }
 
 export interface ReplyCursor {
@@ -58,7 +62,8 @@ export function defaultReplyRoots(): ReplyRoots {
     opencodeDb: path.join(home, '.local', 'share', 'opencode', 'opencode.db'),
     codexSessions: path.join(home, '.codex', 'sessions'),
     codexStateDir: path.join(home, '.codex'),
-    antigravityDb: path.join(home, '.gemini', 'antigravity', 'conversation_summaries.db')
+    antigravityDb: path.join(home, '.gemini', 'antigravity', 'conversation_summaries.db'),
+    claudeProjects: path.join(home, '.claude', 'projects')
   }
 }
 
@@ -225,6 +230,7 @@ export async function readReplyCursor(
   if (session.provider === 'opencode') return readOpenCodeReply(roots.opencodeDb, session.rawId)
   if (session.provider === 'codex') return readCodexReply(roots.codexSessions, roots.codexStateDir, session.rawId)
   if (session.provider === 'antigravity') return readAntiGravityReply(roots.antigravityDb, session.rawId)
+  if (session.provider === 'claude') return readClaudeReply(roots.claudeProjects, session.rawId)
   return { ok: false }
 }
 
@@ -345,6 +351,75 @@ export async function readAntiGravityReply(dbPath: string, rawId: string): Promi
     } catch {
       // Already closed.
     }
+  }
+}
+
+/**
+ * Claude Code appends to the transcript continuously while a turn streams, so
+ * the newest assistant line offset is the token and a recently touched file
+ * means the agent is still producing.
+ */
+export async function readClaudeReply(projectsRoot: string, rawId: string): Promise<ReadResult> {
+  try {
+    const entries = await fs.readdir(projectsRoot, { recursive: true }).catch(() => [] as string[])
+    const files = entries
+      .map((entry) => String(entry))
+      .filter((entry) => entry.endsWith(`${rawId}.jsonl`))
+      .map((entry) => path.join(projectsRoot, entry))
+    if (files.length === 0) return { ok: true, cursor: emptyCursor() }
+
+    let token = ''
+    let busy: boolean | null = null
+    for (const file of files) {
+      const stat = await fs.stat(file).catch(() => null)
+      if (!stat) continue
+      if (Date.now() - stat.mtimeMs < 15_000) busy = true
+      else if (busy === null) busy = false
+      const offset = await claudeAssistantOffset(file)
+      if (offset >= 0) token += `claude:${path.basename(path.dirname(file))}:${offset}|`
+    }
+    return {
+      ok: true,
+      cursor: { token, busy, evidence: token ? 'assistant' : 'none' }
+    }
+  } catch {
+    return { ok: false }
+  }
+}
+
+async function claudeAssistantOffset(file: string): Promise<number> {
+  const stat = await fs.stat(file)
+  const length = Math.min(stat.size, 2_000_000)
+  const start = stat.size - length
+  const handle = await fs.open(file, 'r')
+  try {
+    const buffer = Buffer.alloc(length)
+    await handle.read(buffer, 0, length, start)
+    const text = buffer.toString('utf8')
+    const lines = text.split(/\r?\n/)
+    let cursor = start
+    let last = -1
+    for (const line of lines) {
+      if (isClaudeAssistantLine(line)) last = cursor + line.length
+      cursor += line.length + 1
+    }
+    return last
+  } finally {
+    await handle.close()
+  }
+}
+
+function isClaudeAssistantLine(line: string): boolean {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('{')) return false
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      type?: string
+      message?: { role?: string }
+    }
+    return parsed.type === 'assistant' || parsed.message?.role === 'assistant'
+  } catch {
+    return /"type"\s*:\s*"assistant"/.test(trimmed)
   }
 }
 
