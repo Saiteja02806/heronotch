@@ -1,4 +1,9 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { promises as fsPromises } from 'node:fs'
+import { existsSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+import path from 'node:path'
 import { friendlyMediaName, pickMediaSession, type MediaSessionInfo } from '../shared/mediaFollow'
 import { getState } from './state'
 import type { SpotifyAction, SpotifyPlayback } from '../shared/types'
@@ -37,19 +42,47 @@ function Await($operation, $resultType) {
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $manager = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
 function Get-TargetSession([string]$wanted) {
-  $sessions = @($manager.GetSessions())
-  if ($wanted) {
-    $match = $sessions | Where-Object { [string]$_.SourceAppUserModelId -eq $wanted } | Select-Object -First 1
-    if ($match) { return $match }
-  }
-  $current = $null
-  try { $current = $manager.GetCurrentSession() } catch {}
-  if ($current) { return $current }
-  return $sessions | Select-Object -First 1
+  if (-not $wanted) { return $null }
+  return @($manager.GetSessions()) | Where-Object { [string]$_.SourceAppUserModelId -ceq $wanted } | Select-Object -First 1
 }
 `
 
-const MONITOR_SCRIPT = `${WINRT_PREAMBLE}
+// One album-art file per unique title+artist+session. Windows exposes the
+// cover as a thumbnail stream on the media properties; it is cached to disk so
+// the renderer can load it as a file:// image. Nothing here runs unless the
+// monitor was given NOTCH_MEDIA_ART_DIR.
+const ART_SCRIPT = `
+$artDir = $env:NOTCH_MEDIA_ART_DIR
+$artDll = $env:NOTCH_MEDIA_ART_DLL
+$artLoaded = $false
+if ($artDir -and $artDll -and [System.IO.File]::Exists($artDll)) {
+  try { [Reflection.Assembly]::LoadFrom($artDll) | Out-Null; $artLoaded = $true } catch {}
+}
+$artMap = @{}
+# The WinRT stream projection PowerShell 5.1 cannot do happens in
+# resources/notch-media-art.dll (see notch-media-art.cs for the rebuild).
+function Get-Art([string]$sessionKey, $session, $props) {
+  if (-not $artLoaded) { return $null }
+  $key = -join ($sessionKey, '|', $props.Title, '|', $props.Artist)
+  $cached = $artMap[$key]
+  if ($cached) { return $cached }
+  try {
+    $bytes = [NotchMediaArt]::Read([object]$session)
+    if (-not $bytes -or $bytes.Length -eq 0) { return $null }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($key))
+    $name = ([System.BitConverter]::ToString($digest)).Replace('-', '').Substring(0, 24).ToLower()
+    $isPng = $bytes.Length -gt 4 -and $bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50
+    $file = Join-Path $artDir ($name + $(if ($isPng) { '.png' } else { '.jpg' }))
+    [System.IO.File]::WriteAllBytes($file, $bytes)
+    $artMap[$key] = $file
+    return $file
+  } catch {}
+  return $null
+}
+`
+
+const MONITOR_SCRIPT = `${WINRT_PREAMBLE}${ART_SCRIPT}
 while ($true) {
   try {
     $currentId = ''
@@ -64,6 +97,8 @@ while ($true) {
         $info = $session.GetPlaybackInfo()
         $timeline = $session.GetTimelineProperties()
         $id = [string]$session.SourceAppUserModelId
+        $art = $null
+        try { $art = Get-Art $id $session $props } catch {}
         $list += [ordered]@{
           id = $id
           current = ($id -eq $currentId)
@@ -76,6 +111,7 @@ while ($true) {
           canNext = $info.Controls.IsNextEnabled
           canPrevious = $info.Controls.IsPreviousEnabled
           canSeek = $info.Controls.IsPlaybackPositionEnabled
+          art = $art
         }
       } catch {}
     }
@@ -112,6 +148,119 @@ let stopping = false
 let paused = false
 let restartTimer: NodeJS.Timeout | null = null
 let actionQueue: Promise<unknown> = Promise.resolve()
+let artPrunedAt = 0
+
+/** Resolved art file URLs per track key; null means known-miss or in flight. */
+const artByKey = new Map<string, string | null>()
+const artQueriedAt = new Map<string, number>()
+
+function artKey(session: { id?: string; title?: string; artist?: string }): string {
+  return `${session.id || ''}|${session.title || ''}|${session.artist || ''}`
+}
+
+function artHash(key: string): string {
+  return createHash('sha256').update(key).digest('hex').slice(0, 24)
+}
+
+/**
+ * Cover art fallback. Windows only exposes a thumbnail to the compiled helper
+ * (blocked by Application Control policies on some machines), so a track with
+ * no local art is looked up once on the public iTunes Search API and cached on
+ * disk. Keyless, no account, small result.
+ */
+async function remoteArtFile(session: { id?: string; title?: string; artist?: string }): Promise<string | null> {
+  const key = artKey(session)
+  const dir = mediaArtDir()
+  if (!dir || !session.title) return null
+  if (artByKey.has(key)) return artByKey.get(key) || null
+  const last = artQueriedAt.get(key) || 0
+  if (Date.now() - last < 10 * 60_000) return null
+  artQueriedAt.set(key, Date.now())
+  artByKey.set(key, null)
+  try {
+    const term = [session.artist, session.title].filter(Boolean).join(' ')
+    const query = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=song&limit=1`
+    const res = await fetch(query, { signal: AbortSignal.timeout(6000) })
+    if (!res.ok) return null
+    const json = (await res.json()) as { results?: { artworkUrl100?: string }[] }
+    const cover = json.results?.[0]?.artworkUrl100
+    if (!cover) return null
+    const image = await fetch(cover.replace('100x100bb', '600x600bb'), { signal: AbortSignal.timeout(8000) })
+    if (!image.ok) return null
+    const bytes = Buffer.from(await image.arrayBuffer())
+    if (bytes.length < 1000) return null
+    const file = path.join(dir, `${artHash(key)}.jpg`)
+    await fsPromises.writeFile(file, bytes)
+    const url = pathToFileURL(file).href
+    artByKey.set(key, url)
+    return url
+  } catch {
+    return null
+  }
+}
+
+function mediaArtDir(): string {
+  try {
+    // electron 'app' is intentionally not imported here; resolve it lazily so
+    // this module stays loadable outside the ready app (tests, dev tooling).
+    const app = process.versions.electron ? require('electron').app : null
+    const base = app ? app.getPath('userData') : process.env.APPDATA || ''
+    if (!base) return ''
+    return `${base}/media-art`
+  } catch {
+    return ''
+  }
+}
+
+/** The compiled WinRT helper. In a packaged build it is unpacked from the asar. */
+function mediaArtDll(): string {
+  try {
+    const app = process.versions.electron ? require('electron').app : null
+    const appPath = app ? app.getAppPath() : process.cwd()
+    const candidate = path.join(appPath, 'resources', 'notch-media-art.dll')
+    if (existsSync(candidate)) return candidate
+    const unpacked = candidate.replace('app.asar', 'app.asar.unpacked')
+    if (existsSync(unpacked)) return unpacked
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+/** Validate the PowerShell-written art file and hand the renderer a file:// URL. */
+async function resolveArtUrl(pathName: string): Promise<string | null> {
+  try {
+    const stat = await fsPromises.stat(pathName)
+    if (!stat.isFile() || stat.size === 0) return null
+    if (Date.now() - artPrunedAt > 10 * 60_000) {
+      artPrunedAt = Date.now()
+      void pruneMediaArt()
+    }
+    return pathToFileURL(pathName).href
+  } catch {
+    return null
+  }
+}
+
+/** Art files are small, but a music library can still pile them up. Drop a day's leftovers. */
+async function pruneMediaArt(): Promise<void> {
+  const dir = mediaArtDir()
+  if (!dir) return
+  try {
+    const names = await fsPromises.readdir(dir)
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000
+    for (const name of names) {
+      if (!/\.(png|jpe?g|img)$/i.test(name)) continue
+      const full = `${dir}/${name}`
+      const stat = await fsPromises.stat(full).catch(() => null)
+      if (stat && stat.isFile() && stat.mtimeMs < cutoff) {
+        await fsPromises.unlink(full).catch(() => undefined)
+      }
+    }
+  } catch {
+    // The directory may not exist yet.
+  }
+}
 
 function scheduleRestart(): void {
   if (stopping || restartTimer) return
@@ -123,6 +272,15 @@ function scheduleRestart(): void {
 
 export function startLocalMediaMonitor(): void {
   if (process.platform !== 'win32' || monitor || stopping || paused) return
+  const artDir = mediaArtDir()
+  const artDll = mediaArtDll()
+  if (artDir) {
+    try {
+      fsPromises.mkdir(artDir, { recursive: true }).catch(() => undefined)
+    } catch {
+      // Art is optional; the monitor still runs without it.
+    }
+  }
   let child: ChildProcess
   try {
     child = spawn(
@@ -138,7 +296,15 @@ export function startLocalMediaMonitor(): void {
         '-Command',
         MONITOR_SCRIPT
       ],
-      { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }
+      {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          ...(artDir ? { NOTCH_MEDIA_ART_DIR: artDir } : {}),
+          ...(artDll ? { NOTCH_MEDIA_ART_DLL: artDll } : {})
+        }
+      }
     )
     monitor = child
   } catch {
@@ -148,7 +314,7 @@ export function startLocalMediaMonitor(): void {
   }
 
   child.stdout?.setEncoding('utf8')
-  child.stdout?.on('data', (chunk: string) => {
+  child.stdout?.on('data', async (chunk: string) => {
     buffer += chunk
     let newline = buffer.indexOf('\n')
     while (newline !== -1) {
@@ -159,6 +325,14 @@ export function startLocalMediaMonitor(): void {
           const parsed = JSON.parse(line) as { sessions?: MediaSessionInfo[] }
           if (!Array.isArray(parsed.sessions)) continue
           const nextSessions = parsed.sessions.filter((session) => session && typeof session.id === 'string')
+          for (const session of nextSessions) {
+            if (session.art && typeof session.art === 'string') {
+              const url = await resolveArtUrl(session.art)
+              session.art = url
+            } else {
+              session.art = null
+            }
+          }
           const previous = pickMediaSession(sessions, preference())
           const snapshot = pickMediaSession(nextSessions, preference())
           sessions = nextSessions
@@ -195,6 +369,15 @@ export function startLocalMediaMonitor(): void {
                 positionSampledAt: positionClock
               }
             : { available: false, sampledAt }
+          const current = latest
+          if (current && current.available && current.title && current.source) {
+            const key = artKey({ id: current.source, title: current.title, artist: current.artist })
+            const smtcArt = nextSessions.find((session) => session.id === current.source)?.art || null
+            if (smtcArt) artByKey.set(key, smtcArt)
+            if (!smtcArt && !artByKey.has(key)) {
+              void remoteArtFile({ id: current.source, title: current.title, artist: current.artist })
+            }
+          }
         } catch {
           // Ignore partial or malformed status lines.
         }
@@ -295,6 +478,8 @@ export function getLocalPlayback(source?: string): SpotifyPlayback {
   const fetchedAt = picked.id === latest?.source ? latest.positionSampledAt || latest.sampledAt : sessionsAt
   return {
     connected: true,
+    localSessionId: picked.id,
+    controls: { next: picked.canNext, previous: picked.canPrevious, seek: picked.canSeek },
     playing: picked.status === 'Playing',
     track: picked.title
       ? {
@@ -302,7 +487,7 @@ export function getLocalPlayback(source?: string): SpotifyPlayback {
           name: picked.title,
           artists: picked.artist || label,
           album: picked.album || '',
-          image: null,
+          image: picked.art || artByKey.get(artKey(picked)) || null,
           duration,
           progress: Math.min(position, duration || position),
           url: null
@@ -339,9 +524,8 @@ function controlScript(action: Extract<SpotifyAction, { type: 'play' | 'pause' |
 
   // Do not pipe the assignment into Out-Null: that would assign $null to $op
   // and make Await fail even though Spotify accepted the command.
-  const wanted = (currentMediaId() || '').replace(/'/g, "''")
   return `${WINRT_PREAMBLE}
-$session = Get-TargetSession '${wanted}'
+$session = Get-TargetSession $env:NOTCH_MEDIA_TARGET
 if (-not $session) {
   [Console]::Out.WriteLine('{"ok":false,"error":"no-session"}')
   exit
@@ -390,7 +574,8 @@ interface ControlResult {
 }
 
 function runControl(
-  action: Extract<SpotifyAction, { type: 'play' | 'pause' | 'next' | 'previous' | 'seek' }>
+  action: Extract<SpotifyAction, { type: 'play' | 'pause' | 'next' | 'previous' | 'seek' }>,
+  sessionId: string
 ): Promise<ControlResult> {
   return new Promise((resolve) => {
     execFile(
@@ -406,7 +591,7 @@ function runControl(
         '-Command',
         controlScript(action)
       ],
-      { windowsHide: true, timeout: 9000, maxBuffer: 1024 * 1024 },
+      { windowsHide: true, timeout: 9000, maxBuffer: 1024 * 1024, env: { ...process.env, NOTCH_MEDIA_TARGET: sessionId } },
       (error, stdout) => {
         if (error) {
           resolve({ ok: false })
@@ -446,9 +631,9 @@ function runControl(
   })
 }
 
-async function performLocalActionNow(action: SpotifyAction): Promise<SpotifyPlayback> {
-  if (!isLocalAvailable()) {
-    throw new Error('No media session is available. Start playback in an app on this PC.')
+async function performLocalActionNow(action: SpotifyAction, sessionId: string | null): Promise<SpotifyPlayback> {
+  if (!sessionId || !isLocalAvailable(sessionId)) {
+    throw new Error('The selected player is unavailable. Start playback in that player.')
   }
 
   if (action.type === 'play-track') {
@@ -462,11 +647,11 @@ async function performLocalActionNow(action: SpotifyAction): Promise<SpotifyPlay
     action.type !== 'previous' &&
     action.type !== 'seek'
   ) {
-    return getLocalPlayback()
+    throw new Error('This control is unavailable for the selected player.')
   }
 
   const beforeTitle = latest?.title || null
-  const result = await runControl(action)
+  const result = await runControl(action, sessionId)
   if (!result.ok) {
     throw new Error('That player did not accept the control. Make sure it is open and a track is active.')
   }
@@ -499,11 +684,11 @@ async function performLocalActionNow(action: SpotifyAction): Promise<SpotifyPlay
     }
   }
 
-  const base = getLocalPlayback()
+  const base = getLocalPlayback(sessionId)
   if (!base.track) return base
   if (action.type === 'play' || action.type === 'pause') {
     const nextPlaying = action.type === 'play'
-    if (latest) {
+    if (latest?.source === sessionId) {
       latest = {
         ...latest,
         status: nextPlaying ? 'Playing' : 'Paused',
@@ -511,7 +696,7 @@ async function performLocalActionNow(action: SpotifyAction): Promise<SpotifyPlay
         positionSampledAt: Date.now()
       }
     }
-    return { ...getLocalPlayback(), playing: nextPlaying }
+    return { ...base, playing: nextPlaying }
   }
   if (action.type === 'seek') {
     return {
@@ -523,10 +708,10 @@ async function performLocalActionNow(action: SpotifyAction): Promise<SpotifyPlay
   return base
 }
 
-export function performLocalAction(action: SpotifyAction): Promise<SpotifyPlayback> {
+export function performLocalAction(action: SpotifyAction, sessionId: string | null): Promise<SpotifyPlayback> {
   // Controls arrive from the renderer as separate IPC calls. Queue them so a
   // quick pause/play or double-skip is applied in order instead of dropped.
-  const run = actionQueue.then(() => performLocalActionNow(action))
+  const run = actionQueue.then(() => performLocalActionNow(action, sessionId))
   actionQueue = run.catch(() => undefined)
   return run
 }

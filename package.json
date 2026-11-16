@@ -81,7 +81,10 @@
       "createDesktopShortcut": true,
       "shortcutName": "Notch",
       "artifactName": "Notch-Setup-${version}.${ext}"
-    }
+    },
+    "asarUnpack": [
+      "resources/notch-media-art.dll"
+    ]
   },
   "type": "commonjs"
 }

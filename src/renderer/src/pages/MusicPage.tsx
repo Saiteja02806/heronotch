@@ -20,10 +20,11 @@ import {
   VolumeX
 } from 'lucide-react'
 import { motion } from 'framer-motion'
-import { useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react'
 import { formatDuration } from '../lib/time'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
+import { isSpotifySource, playbackHeading, playbackSessionId } from '../../../shared/mediaFollow'
 
 function Cover({
   image,
@@ -79,7 +80,7 @@ function ConnectSpotify() {
         <div className="spotify-glow glow-one" />
         <div className="spotify-glow glow-two" />
         <div className="spotify-cover-wrap">
-          <Cover seed="notch-spotify" size={236} />
+          <Cover seed="notch-spotify" size={state.settings.panelSize === 'compact' ? 72 : 236} />
           <span className="spotify-wave">
             <i /><i /><i /><i /><i />
           </span>
@@ -178,7 +179,7 @@ function ConnectSpotify() {
 
 export function MusicPage() {
   const { openSettings, state } = useApp()
-  const artSize = state.settings.panelSize === 'compact' ? 84 : 226
+  const artSize = state.settings.panelSize === 'compact' ? 112 : 226
   const {
     status,
     playback,
@@ -192,7 +193,10 @@ export function MusicPage() {
     disconnect,
     pending,
     library,
-    phase
+    phase,
+    playerName,
+    playerAvailable,
+    spotifyControls
   } = useMedia()
   const [scrub, setScrub] = useState<number | null>(null)
   const [volumeDraft, setVolumeDraft] = useState<number | null>(null)
@@ -203,13 +207,20 @@ export function MusicPage() {
   const rawProgress = scrub ?? progressMs
   const shownProgress = duration ? Math.min(rawProgress, duration) : rawProgress
   const volume = volumeDraft ?? playback?.volume ?? 0
+  const sessionId = playbackSessionId(playback)
+  useEffect(() => {
+    setScrub(null)
+    setVolumeDraft(null)
+  }, [sessionId, state.settings.mediaSource])
 
   const hasCachedTrack = Boolean(playback?.track)
 
-  if (!status?.connected && !status?.localAvailable && !hasCachedTrack) return <ConnectSpotify />
+  if ((!state.settings.mediaSource || state.settings.mediaSource === 'auto') &&
+      !status?.connected && !status?.localAvailable && !hasCachedTrack) return <ConnectSpotify />
 
-  const apiConnected = Boolean(status?.connected)
-  const localMode = !apiConnected && Boolean(status?.localAvailable)
+  const apiConnected = spotifyControls
+  const localMode = !apiConnected
+  const spotifyPlayer = apiConnected || isSpotifySource(sessionId || state.settings.mediaSource)
   const changing = pending === 'next' || pending === 'previous'
   const phaseCopy =
     phase === 'opening'
@@ -252,27 +263,27 @@ export function MusicPage() {
           <div>
             <span className="eyebrow">
               <span className="spotify-dot" />{' '}
-              {playback?.source === 'local' ? playback.device?.name || 'This PC' : 'Spotify'} ·{' '}
+              {playerName} ·{' '}
               {phase === 'opening'
                 ? 'Opening Spotify…'
                 : phase === 'no-device'
                   ? 'No device'
-                  : track && !playback?.device?.active && !status?.localAvailable
-                    ? 'Closed · cached'
-                    : status?.connected || status?.localAvailable
+                  : !playerAvailable
+                    ? 'Unavailable'
+                    : playerAvailable
                       ? playback?.device?.name || 'No device'
                       : 'Closed · cached'}
             </span>
-            <h1>{track ? 'Now playing' : 'Quiet for a moment'}</h1>
+            <h1>{playbackHeading(playback)}</h1>
           </div>
           <div className="player-head-actions">
-            {status?.profile?.image && <img className="profile-face" src={status.profile.image} alt="" />}
-            {!apiConnected && (
+            {apiConnected && status?.profile?.image && <img className="profile-face" src={status.profile.image} alt="" />}
+            {spotifyPlayer && !apiConnected && (
               <button className="soft-button compact" onClick={() => void launchSpotify()} title="Open the Spotify app">
                 <ExternalLink size={13} /> Open Spotify
               </button>
             )}
-            <button className="soft-button compact" onClick={() => openSettings('spotify')} title="Spotify settings">
+            <button className="soft-button compact" onClick={() => openSettings('spotify')} title="Music settings">
               <SlidersHorizontal size={13} />
             </button>
           </div>
@@ -280,9 +291,9 @@ export function MusicPage() {
 
         {track ? (
           <div className="player-main">
-            <button className="player-art-button" onClick={openTrack} title="Open track in Spotify">
+            <button className="player-art-button" onClick={openTrack} title={track.url ? `Open track in ${playerName}` : playerName} disabled={!track.url}>
               <Cover image={track.image} seed={track.id} size={artSize} />
-              <span className="art-open"><ArrowUpRight size={13} /> Spotify</span>
+              {track.url && <span className="art-open"><ArrowUpRight size={13} /> {playerName}</span>}
             </button>
             <div className={`player-details ${changing ? 'is-changing' : ''}`}>
               <span className="eyebrow">{track.album || 'Single'}</span>
@@ -300,6 +311,7 @@ export function MusicPage() {
                   onKeyUp={commitSeek}
                   style={{ '--filled': `${duration ? (shownProgress / duration) * 100 : 0}%` } as CSSProperties}
                   aria-label="Seek"
+                  disabled={!playerAvailable || playback?.controls?.seek === false}
                 />
                 <div className="player-times">
                   <span>{formatDuration(shownProgress)}</span>
@@ -317,7 +329,7 @@ export function MusicPage() {
                     <Shuffle size={17} />
                   </button>
                 )}
-                <button className="player-control" onClick={() => void action({ type: 'previous' })} title="Previous">
+                <button className="player-control" onClick={() => void action({ type: 'previous' })} title="Previous" disabled={!playerAvailable || playback?.controls?.previous === false}>
                   <SkipBack size={21} fill="currentColor" />
                 </button>
                 <motion.button
@@ -326,6 +338,7 @@ export function MusicPage() {
                   whileTap={{ scale: 0.93 }}
                   title={phase === 'opening' ? 'Opening Spotify…' : playback?.playing ? 'Pause' : 'Play'}
                   aria-busy={phase === 'opening'}
+                  disabled={!playerAvailable && state.settings.mediaSource !== 'auto' && Boolean(state.settings.mediaSource)}
                 >
                   {phase === 'opening' ? (
                     <Loader2 size={22} className="spin" />
@@ -335,7 +348,7 @@ export function MusicPage() {
                     <Play size={23} fill="currentColor" />
                   )}
                 </motion.button>
-                <button className="player-control" onClick={() => void action({ type: 'next' })} title="Next">
+                <button className="player-control" onClick={() => void action({ type: 'next' })} title="Next" disabled={!playerAvailable || playback?.controls?.next === false}>
                   <SkipForward size={21} fill="currentColor" />
                 </button>
                 {apiConnected && (
@@ -372,9 +385,9 @@ export function MusicPage() {
                   <span className="volume-value">{volume}%</span>
                 </div>
               ) : (
-                <button className="local-session-note" onClick={() => (localMode ? openSettings('spotify') : void launchSpotify())}>
-                  {localMode ? 'Spotify Desktop · local controls' : 'Saved on this computer'}
-                  <span>{localMode ? 'Unlock queue and full controls' : 'Open Spotify to play this again'}</span>
+                <button className="local-session-note" onClick={() => openSettings('spotify')}>
+                  {playerName} · {playerAvailable ? 'local controls' : 'unavailable'}
+                  <span>Choose a player in Music settings</span>
                 </button>
               )}
               {phaseCopy && (
@@ -392,13 +405,13 @@ export function MusicPage() {
         ) : (
           <div className="player-empty">
             <div className="player-empty-icon"><Music2 size={30} /></div>
-            <h2>{apiConnected ? 'Nothing playing right now.' : 'Start something on Spotify.'}</h2>
+            <h2>{playerAvailable ? 'Nothing playing right now.' : `${playerName} is unavailable.`}</h2>
             <p>
               {apiConnected
                 ? `Spotify is connected${
                     status?.profile?.name ? ` as ${status.profile.name}` : ''
                   }. Press play on any device and the track will appear here.`
-                : 'Open Spotify on this computer and press play. Notch reads the Windows media session, so there is nothing to set up.'}
+                : `Start playback in ${playerName}. The notch will follow it when its media session returns.`}
             </p>
             {phaseCopy && <p className={`player-phase is-${phase}`}>{phaseCopy}</p>}
             <div>
@@ -408,7 +421,7 @@ export function MusicPage() {
                   {phase === 'opening' ? 'Opening Spotify…' : 'Play'}
                 </button>
               )}
-              <button
+              {spotifyPlayer && <button
                 className={apiConnected ? 'soft-button' : 'primary-button'}
                 onClick={() => {
                   void launchSpotify().then((opened) => {
@@ -417,7 +430,7 @@ export function MusicPage() {
                 }}
               >
                 <ExternalLink size={14} /> Open Spotify
-              </button>
+              </button>}
               {!apiConnected && (
                 <button className="soft-button" onClick={() => openSettings('spotify')}>
                   <SlidersHorizontal size={13} /> Settings
@@ -445,16 +458,15 @@ export function MusicPage() {
             <div className="local-queue-icon">
               <Music2 size={22} />
             </div>
-            <h3>Playing from Spotify Desktop</h3>
+            <h3>{playerName}{playerAvailable ? ' · Windows media session' : ' · unavailable'}</h3>
             <p>
-              Your current track and transport controls work without any setup. Spotify does not
-              expose the upcoming queue through Windows, so connect a Spotify app to see what is next,
-              use volume, shuffle and repeat.
+              Windows provides the selected player's track and supported playback controls.
+              {spotifyPlayer && ' Connect Spotify for its queue, volume, shuffle and repeat.'}
             </p>
             <button className="primary-button" onClick={() => openSettings('spotify')}>
-              <SlidersHorizontal size={14} /> Unlock full Spotify
+              <SlidersHorizontal size={14} /> {spotifyPlayer ? 'Spotify connection' : 'Choose player'}
             </button>
-            <span className="local-queue-note">One-time setup · optional</span>
+            <span className="local-queue-note">The selection stays saved when the player closes.</span>
           </div>
         ) : (
           <div className="queue-list">
@@ -576,7 +588,7 @@ export function MusicPage() {
 
         <div className="account-card">
           <div className="account-profile">
-            {status?.profile?.image ? (
+            {apiConnected && status?.profile?.image ? (
               <img src={status.profile.image} alt="" />
             ) : (
               <span className="profile-fallback">
@@ -584,7 +596,7 @@ export function MusicPage() {
               </span>
             )}
             <div>
-              <strong>{status?.profile?.name || (localMode ? 'Spotify Desktop' : 'Spotify listener')}</strong>
+              <strong>{apiConnected ? status?.profile?.name || 'Spotify listener' : playerName}</strong>
               <span>
                 {localMode
                   ? 'Local Windows media session'

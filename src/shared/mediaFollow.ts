@@ -1,3 +1,5 @@
+import type { SpotifyPlayback } from './types'
+
 /** A Windows media session the notch can follow. */
 export interface MediaSessionInfo {
   id: string
@@ -11,6 +13,8 @@ export interface MediaSessionInfo {
   canPrevious?: boolean
   canSeek?: boolean
   current?: boolean
+  /** Absolute path of a cached album-art file, when Windows exposes one. */
+  art?: string | null
 }
 
 const KNOWN_PLAYERS: { test: RegExp; label: string }[] = [
@@ -36,6 +40,62 @@ export function friendlyMediaName(id: string): string {
 
 export function isSpotifySource(id: string | null | undefined): boolean {
   return Boolean(id && /spotify/i.test(id))
+}
+
+export function playbackSessionId(playback: SpotifyPlayback | null): string | null {
+  return playback?.localSessionId || (playback?.source === 'local' ? playback.device?.id : null) || null
+}
+
+export function playbackMatchesPreference(playback: SpotifyPlayback | null, preference: string): boolean {
+  return preference === 'auto' || playbackSessionId(playback) === preference
+}
+
+export function playbackLabel(playback: SpotifyPlayback | null, preference: string): string {
+  const sessionId = playbackSessionId(playback)
+  if (sessionId) return friendlyMediaName(sessionId)
+  if (preference !== 'auto') return friendlyMediaName(preference)
+  return playback?.source === 'api' || playback?.track ? 'Spotify' : 'Music'
+}
+
+/** Preserve real history after a failed read, without claiming it is still live. */
+export function unavailablePlayback(playback: SpotifyPlayback | null): SpotifyPlayback | null {
+  if (!playback) return null
+  return {
+    ...playback,
+    localSessionId: playbackSessionId(playback) || undefined,
+    connected: false,
+    playing: false,
+    device: null,
+    source: 'none',
+    queueAvailable: false,
+    controls: { next: false, previous: false, seek: false }
+  }
+}
+
+export function playbackHeading(playback: SpotifyPlayback | null): string {
+  if (!playback?.track) return 'Nothing playing'
+  if (!playback.connected && !playback.device?.active) return 'Last played'
+  return playback.playing ? 'Now playing' : 'Paused'
+}
+
+/** Remember a closed player's track only for the same source and selection. */
+export function retainPlayback(
+  next: SpotifyPlayback,
+  previous: SpotifyPlayback | null,
+  preference: string
+): SpotifyPlayback {
+  if (next.track || !previous?.track || !playbackMatchesPreference(previous, preference)) return next
+  const nextId = playbackSessionId(next)
+  const previousId = playbackSessionId(previous)
+  if (nextId && nextId !== previousId) return next
+  if (next.source === 'api' && previousId && !isSpotifySource(previousId)) return next
+  return {
+    ...next,
+    track: previous.track,
+    localSessionId: previousId || undefined,
+    playing: false,
+    contextUri: previous.contextUri
+  }
 }
 
 /**
@@ -69,7 +129,7 @@ export function followWithSpotifyApi(
 ): boolean {
   if (!apiConnected) return false
   const wanted = (preference || 'auto').trim()
-  if (wanted && wanted !== 'auto') return isSpotifySource(wanted)
+  if (wanted && wanted !== 'auto') return wanted === sessionId && isSpotifySource(wanted)
   if (!sessionId) return true
   return isSpotifySource(sessionId)
 }
