@@ -4856,6 +4856,17 @@ input[type='range']:focus::-webkit-slider-thumb {
   min-height: 0;
 }
 
+/* The side column stacks more cards than fit at once; scroll instead of clip
+   (e.g. while the Google Calendar editor is open). */
+.planner-side {
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.planner-side::-webkit-scrollbar {
+  display: none;
+}
+
 .calendar-panel {
   border-radius: 20px;
   border: 1px solid var(--line);
@@ -5386,7 +5397,14 @@ input[type='range']:focus::-webkit-slider-thumb {
 
 .google-side .google-calendar-editor {
   margin-top: 8px;
-  gap: 8px;
+  gap: 6px;
+}
+
+.google-side .google-calendar-actions > label > span {
+  font-size: 7.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted-2);
 }
 
 .google-side .google-calendar-editor label {
