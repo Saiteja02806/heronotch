@@ -1,9 +1,9 @@
-import { ChevronUp, Maximize2, Minimize2, Pin, PinOff, Settings2 } from 'lucide-react'
+import { Maximize2, Minimize2, Settings2 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { useApp } from '../state/AppContext'
+import { useNowWhen } from '../state/clock'
 import { SECTION_META, sectionPrefs, visibleSections } from '../lib/sections'
-import { formatDateShort, greeting, todayKey } from '../lib/time'
-import { Logo } from './Logo'
+import { formatDateShort, todayKey } from '../lib/time'
 
 export function SectionNav() {
   const { page, setPage, state } = useApp()
@@ -12,16 +12,17 @@ export function SectionNav() {
 
   return (
     <nav className="nav-tabs" aria-label="Sections">
-      {tabs.map((id) => {
+      {tabs.map((id, index) => {
         const tab = SECTION_META[id]
         const Icon = tab.icon
         const active = page === id
         return (
           <button
             key={id}
+            data-demo-nav={id}
             className={`nav-tab ${active ? 'is-active' : ''}`}
             onClick={() => setPage(id)}
-            title={tab.label}
+            title={`${tab.label} (${index + 1})`}
             aria-current={active ? 'page' : undefined}
           >
             {active && (
@@ -41,28 +42,16 @@ export function SectionNav() {
 }
 
 export function Header() {
-  const { page, setPage, pinned, setPinned, state, openSettings, updateSettings, setExpanded } = useApp()
+  const { page, setPage, state, openSettings, updateSettings, expanded, updateState } = useApp()
+  const now = useNowWhen(expanded)
   const compact = state.settings.panelSize === 'compact'
   const firstSection = visibleSections(sectionPrefs(state), { compact })[0]
-  const clock = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-  const vaultName = state.settings.vaultPath?.split(/[\\/]/).filter(Boolean).pop()
+  const clock = new Date(now).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  const hasUpdateNotice =
+    updateState?.status === 'available' || updateState?.status === 'downloaded'
 
   return (
     <header className="topbar">
-      <div className="brand-lockup">
-        <Logo size={26} />
-        <div className="brand-copy">
-          <strong>notch</strong>
-          <span>
-            {state.settings.userName
-              ? `${greeting()}, ${state.settings.userName}`
-              : vaultName
-                ? `${vaultName} notes`
-                : 'personal dashboard'}
-          </span>
-        </div>
-      </div>
-
       {!compact && <SectionNav />}
 
       <div className="top-actions">
@@ -71,24 +60,18 @@ export function Header() {
           <strong>{clock}</strong>
         </div>
         <button
-          className={`icon-button ${pinned ? 'is-on' : ''}`}
-          onClick={() => setPinned(!pinned)}
-          title={
-            pinned
-              ? 'Pinned — stays open when the pointer leaves'
-              : 'Pin — stay open when the pointer leaves'
-          }
-          aria-pressed={pinned}
-        >
-          {pinned ? <PinOff size={14} /> : <Pin size={14} />}
-        </button>
-        <button
-          className={`icon-button ${page === 'settings' ? 'is-on' : ''}`}
+          data-demo-settings-btn="true"
+          className={`icon-button has-badge ${page === 'settings' ? 'is-on' : ''}`}
           onClick={() => (page === 'settings' ? setPage(firstSection) : openSettings())}
-          title="Settings"
+          title={
+            hasUpdateNotice
+              ? `Settings · Update ${updateState?.availableVersion ?? ''} ${updateState?.status === 'downloaded' ? 'ready' : 'available'}`
+              : 'Settings'
+          }
           aria-pressed={page === 'settings'}
         >
           <Settings2 size={15} />
+          {hasUpdateNotice && <span className="update-badge-dot" aria-hidden="true" />}
         </button>
         <button
           className={`close-notch ${compact ? 'is-enlarge' : ''}`}
@@ -98,15 +81,6 @@ export function Header() {
         >
           {compact ? <Maximize2 size={15} /> : <Minimize2 size={13} />}
           <span>{compact ? 'Enlarge' : 'Compact'}</span>
-        </button>
-        <button
-          className="close-notch is-collapse"
-          onClick={() => setExpanded(false)}
-          title="Collapse the notch"
-          aria-label="Collapse the notch"
-        >
-          <ChevronUp size={14} />
-          <span>Collapse</span>
         </button>
       </div>
     </header>

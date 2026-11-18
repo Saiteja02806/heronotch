@@ -229,7 +229,9 @@ jobs:
           name: notch-${{ github.run_number }}
           path: |
             release/Notch-Setup-*.exe
+            release/Notch-Setup-*.exe.blockmap
             release/Notch-Portable-*.exe
+            release/latest.yml
             release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30

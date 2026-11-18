@@ -24,7 +24,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEve
 import { formatDuration } from '../lib/time'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
-import { isSpotifySource, playbackHeading, playbackSessionId } from '../../../shared/mediaFollow'
+import { isSpotifySource, normalizeMediaPreference, playbackHeading, playbackSessionId } from '../../../shared/mediaFollow'
 
 function Cover({
   image,
@@ -37,10 +37,10 @@ function Cover({
   size?: number
   className?: string
 }) {
-  const hue = useMemo(() => {
+  const tone = useMemo(() => {
     let hash = 0
     for (let index = 0; index < seed.length; index += 1) hash = seed.charCodeAt(index) + ((hash << 5) - hash)
-    return Math.abs(hash) % 360
+    return 5 + (Math.abs(hash) % 6)
   }, [seed])
 
   return (
@@ -51,9 +51,9 @@ function Cover({
         height: size,
         background: image
           ? undefined
-          : `radial-gradient(circle at 30% 22%, hsl(${hue} 78% 64%), transparent 55%),
-             radial-gradient(circle at 74% 76%, hsl(${(hue + 60) % 360} 62% 46%), transparent 58%),
-             linear-gradient(150deg, hsl(${hue} 35% 24%), #0c0d0f)`
+          : `radial-gradient(circle at 30% 22%, hsl(0 0% ${tone + 11}%), transparent 55%),
+             radial-gradient(circle at 74% 76%, hsl(0 0% ${tone}%), transparent 58%),
+             linear-gradient(150deg, hsl(0 0% ${tone - 2}%), #050505)`
       }}
     >
       {image ? <img src={image} alt="" /> : <AudioLines size={size ? size * 0.24 : 44} />}
@@ -86,12 +86,13 @@ function ConnectSpotify() {
           </span>
         </div>
         <div className="spotify-hero-copy">
-          <span className="eyebrow"><span className="spotify-dot" /> Spotify</span>
+          <span className="eyebrow"><span className="spotify-dot" /> Music &amp; Media</span>
           <h1>Your soundtrack,<br />in the notch.</h1>
           <p>
-            Notch controls Spotify. The audio still plays in the Spotify app or on another Connect
-            device. A Client ID adds the queue, volume, and recently played. Without one, the
-            desktop app can still be controlled through Windows.
+            Play in Spotify and {window.notchDemo ? 'Hero Notch' : 'Notch'} follows it through Windows: play/pause, skip, seek and
+            the current track, no setup needed. Connect a Spotify Client ID to unlock the queue,
+            volume and your library. YouTube Music is followed too when it is the only music
+            playing.
           </p>
           <div className="spotify-hero-actions">
             {hasClientId ? (
@@ -100,30 +101,28 @@ function ConnectSpotify() {
                 {connecting ? 'Waiting for Spotify…' : 'Connect Spotify'}
               </button>
             ) : (
-              <button className="primary-button spotify-primary" onClick={() => openSettings('spotify')}>
-                <SlidersHorizontal size={15} />
-                Add Client ID in Settings
+              <button
+                className="primary-button spotify-primary"
+                onClick={() => {
+                  void window.notch.spotify.launch('spotify:').then((opened) => {
+                    if (!opened) window.notch.openExternal('https://open.spotify.com')
+                  })
+                }}
+              >
+                <ExternalLink size={15} /> Open Spotify
               </button>
             )}
             <button
               className="soft-button"
-              onClick={() => {
-                void window.notch.spotify.launch('spotify:').then((opened) => {
-                  if (!opened) window.notch.openExternal('https://open.spotify.com')
-                })
-              }}
+              onClick={() => openSettings('spotify')}
             >
-              <ExternalLink size={13} /> Open Spotify
-            </button>
-            <button
-              className="soft-button"
-              onClick={() => window.notch.openExternal('https://developer.spotify.com/dashboard')}
-            >
-              <ExternalLink size={13} /> Spotify developer
+              <SlidersHorizontal size={13} />
+              {hasClientId ? 'Music settings' : 'Add Client ID (optional)'}
             </button>
           </div>
           <span className="spotify-note">
-            Playback control requires Spotify Premium. Notch uses PKCE — no client secret is stored.
+            Only Spotify and YouTube Music are followed. No Client ID is needed for play/pause,
+            skip, seek and track info.
           </span>
         </div>
       </div>
@@ -180,6 +179,7 @@ function ConnectSpotify() {
 export function MusicPage() {
   const { openSettings, state } = useApp()
   const artSize = state.settings.panelSize === 'compact' ? 112 : 226
+  const preference = normalizeMediaPreference(state.settings.mediaSource)
   const {
     status,
     playback,
@@ -187,6 +187,7 @@ export function MusicPage() {
     action,
     togglePlay,
     launchSpotify,
+    clearCachedPlayback,
     connect,
     connecting,
     progressMs,
@@ -215,20 +216,20 @@ export function MusicPage() {
 
   const hasCachedTrack = Boolean(playback?.track)
 
-  if ((!state.settings.mediaSource || state.settings.mediaSource === 'auto') &&
+  if (preference === 'auto' &&
       !status?.connected && !status?.localAvailable && !hasCachedTrack) return <ConnectSpotify />
 
   const apiConnected = spotifyControls
   const localMode = !apiConnected
-  const spotifyPlayer = apiConnected || isSpotifySource(sessionId || state.settings.mediaSource)
+  const spotifyPlayer = apiConnected || isSpotifySource(sessionId || preference)
   const changing = pending === 'next' || pending === 'previous'
   const phaseCopy =
     phase === 'opening'
       ? 'Opening Spotify…'
       : phase === 'no-device'
-        ? 'No device — open Spotify'
+        ? 'Spotify is not open yet'
         : phase === 'premium'
-          ? 'Spotify Premium is required to start playback from Notch.'
+          ? 'A song from Notch needs Spotify Premium'
           : null
 
   const commitSeek = (): void => {
@@ -267,20 +268,27 @@ export function MusicPage() {
               {phase === 'opening'
                 ? 'Opening Spotify…'
                 : phase === 'no-device'
-                  ? 'No device'
+                  ? 'Not open'
                   : !playerAvailable
                     ? 'Unavailable'
                     : playerAvailable
-                      ? playback?.device?.name || 'No device'
+                      ? playback?.device?.name &&
+                        playback.device.name.toLowerCase() !== playerName.toLowerCase()
+                        ? playback.device.name
+                        : 'This PC'
                       : 'Closed · cached'}
             </span>
             <h1>{playbackHeading(playback)}</h1>
           </div>
           <div className="player-head-actions">
             {apiConnected && status?.profile?.image && <img className="profile-face" src={status.profile.image} alt="" />}
-            {spotifyPlayer && !apiConnected && (
-              <button className="soft-button compact" onClick={() => void launchSpotify()} title="Open the Spotify app">
-                <ExternalLink size={13} /> Open Spotify
+            {!playerAvailable && track && (
+              <button
+                className="soft-button compact"
+                onClick={clearCachedPlayback}
+                title="Clear remembered track and switch player"
+              >
+                Switch player
               </button>
             )}
             <button className="soft-button compact" onClick={() => openSettings('spotify')} title="Music settings">
@@ -338,7 +346,7 @@ export function MusicPage() {
                   whileTap={{ scale: 0.93 }}
                   title={phase === 'opening' ? 'Opening Spotify…' : playback?.playing ? 'Pause' : 'Play'}
                   aria-busy={phase === 'opening'}
-                  disabled={!playerAvailable && state.settings.mediaSource !== 'auto' && Boolean(state.settings.mediaSource)}
+                  disabled={!playerAvailable && preference !== 'auto'}
                 >
                   {phase === 'opening' ? (
                     <Loader2 size={22} className="spin" />
@@ -387,7 +395,7 @@ export function MusicPage() {
               ) : (
                 <button className="local-session-note" onClick={() => openSettings('spotify')}>
                   {playerName} · {playerAvailable ? 'local controls' : 'unavailable'}
-                  <span>Choose a player in Music settings</span>
+                  <span>Windows media session</span>
                 </button>
               )}
               {phaseCopy && (
@@ -447,8 +455,10 @@ export function MusicPage() {
       <aside className="queue-panel">
         <div className="queue-head">
           <div>
-            <span className="eyebrow">{localMode ? 'Desktop session' : 'Up next'}</span>
-            <h2>{localMode ? 'Queue' : 'Up next'}</h2>
+            <span className="eyebrow">
+              {localMode ? (window.notchDemo ? 'Native media · zero setup' : 'Windows media') : 'Up next'}
+            </span>
+            <h2>{localMode ? 'Player' : 'Up next'}</h2>
           </div>
           <ListMusic size={16} />
         </div>
@@ -458,15 +468,25 @@ export function MusicPage() {
             <div className="local-queue-icon">
               <Music2 size={22} />
             </div>
-            <h3>{playerName}{playerAvailable ? ' · Windows media session' : ' · unavailable'}</h3>
+            <h3>{playerAvailable ? playerName : `${playerName} is closed`}</h3>
             <p>
-              Windows provides the selected player's track and supported playback controls.
-              {spotifyPlayer && ' Connect Spotify for its queue, volume, shuffle and repeat.'}
+              {playerAvailable
+                ? window.notchDemo
+                  ? 'Zero-setup native media control. Optional Spotify PKCE adds queue, library & volume.'
+                  : `Playing through Windows. Notch follows Spotify and YouTube Music only.`
+                : `Open Spotify and press play, and ${window.notchDemo ? 'Hero Notch' : 'Notch'} picks it up. It follows Spotify and YouTube Music only.`}
             </p>
-            <button className="primary-button" onClick={() => openSettings('spotify')}>
-              <SlidersHorizontal size={14} /> {spotifyPlayer ? 'Spotify connection' : 'Choose player'}
-            </button>
-            <span className="local-queue-note">The selection stays saved when the player closes.</span>
+            <div className="local-queue-actions">
+              <button className="primary-button compact" onClick={() => void launchSpotify()}>
+                <ExternalLink size={13} /> Open Spotify
+              </button>
+              <button className="soft-button compact" onClick={() => openSettings('spotify')}>
+                <SlidersHorizontal size={13} /> Settings
+              </button>
+            </div>
+            <span className="local-queue-note">
+              Connect Spotify for queue, volume, shuffle and repeat.
+            </span>
           </div>
         ) : (
           <div className="queue-list">
@@ -599,7 +619,9 @@ export function MusicPage() {
               <strong>{apiConnected ? status?.profile?.name || 'Spotify listener' : playerName}</strong>
               <span>
                 {localMode
-                  ? 'Local Windows media session'
+                  ? window.notchDemo
+                    ? 'Native OS media · Spotify PKCE ready'
+                    : 'Local Windows media session'
                   : apiConnected
                     ? `${status?.profile?.product === 'premium' ? 'Premium' : 'Free'} account`
                     : 'Last track, saved on this computer'}
@@ -608,12 +630,14 @@ export function MusicPage() {
             <span className="account-live">{localMode ? 'Local' : apiConnected ? 'Live' : 'Cached'}</span>
           </div>
           <div className="account-actions">
-            <button className="link-button" onClick={() => window.notch.openExternal('https://open.spotify.com')}>
-              <ExternalLink size={11} /> Open Spotify
-            </button>
+            {!localMode && (
+              <button className="link-button" onClick={() => window.notch.openExternal('https://open.spotify.com')}>
+                <ExternalLink size={11} /> Open Spotify
+              </button>
+            )}
             {localMode ? (
               <button className="link-button" onClick={() => openSettings('spotify')}>
-                <SlidersHorizontal size={11} /> Full connection
+                <SlidersHorizontal size={11} /> Connect Spotify
               </button>
             ) : (
               <button className="link-button danger-text" onClick={() => void disconnect()}>

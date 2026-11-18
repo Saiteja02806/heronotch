@@ -21,33 +21,47 @@ import {
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import {
+  Fragment,
   useEffect,
   useMemo,
   useState,
-  type CSSProperties,
   type FormEvent,
-  type MouseEvent as ReactMouseEvent
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode
 } from 'react'
 import type { Task, VaultNode } from '../../../shared/types'
 import { playbackHeading } from '../../../shared/mediaFollow'
 import {
+  convertTaskSchedule,
   formatDateShort,
   formatDuration,
+  formatTaskClock,
   formatTimer,
   greeting,
   monthMatrix,
+  resolvePlannerTimeZone,
+  resolveSystemTimeZone,
   timeToTimestamp,
-  todayKey
+  todayKey,
+  todayKeyInZone
 } from '../lib/time'
 import { useApp, useTimerClock } from '../state/AppContext'
-import { useNow } from '../state/clock'
+import { useNowWhen } from '../state/clock'
 import { useMedia } from '../state/MediaContext'
 import { playPostureRing as playChime } from '../lib/alertSound'
 import { SessionBadge, relativeSessionTime } from '../components/SessionBits'
 import { useVaultPicker } from '../hooks/useVaultPicker'
 import { waterCount } from '../lib/water'
+import { usePickedCalendarTimeZone } from '../state/useGoogleCalendar'
 import { sectionVisible } from '../lib/sections'
-import { WaterGlance } from './WaterPage'
+import { WaterCard } from './WaterPage'
+import {
+  HOME_CARD_IDS,
+  homeLayoutEqual,
+  normalizeHomeLayout,
+  shownHomeCards,
+  type HomeCardId
+} from '../../../shared/homeLayout'
 
 function Artwork({
   image,
@@ -60,10 +74,10 @@ function Artwork({
   size?: number
   className?: string
 }) {
-  const hue = useMemo(() => {
+  const tone = useMemo(() => {
     let hash = 0
     for (let index = 0; index < seed.length; index += 1) hash = seed.charCodeAt(index) + ((hash << 5) - hash)
-    return Math.abs(hash) % 360
+    return 5 + (Math.abs(hash) % 6)
   }, [seed])
 
   return (
@@ -74,9 +88,9 @@ function Artwork({
         height: size,
         background: image
           ? undefined
-          : `radial-gradient(circle at 25% 20%, hsl(${hue} 70% 62%), transparent 55%),
-             radial-gradient(circle at 78% 72%, hsl(${(hue + 70) % 360} 65% 42%), transparent 58%),
-             linear-gradient(145deg, hsl(${(hue + 20) % 360} 40% 20%), #0d0e10)`
+          : `radial-gradient(circle at 25% 20%, hsl(0 0% ${tone + 11}%), transparent 55%),
+             radial-gradient(circle at 78% 72%, hsl(0 0% ${tone}%), transparent 58%),
+             linear-gradient(145deg, hsl(0 0% ${tone - 2}%), #050505)`
       }}
     >
       {image ? <img src={image} alt="" /> : <Music2 size={size ? Math.max(16, size * 0.24) : 24} />}
@@ -131,10 +145,20 @@ function TimerCard() {
 
       <button
         className={`timer-disc ${running ? 'is-running' : ''}`}
-        style={{ '--ring-progress': `${ringProgress * 360}deg` } as CSSProperties}
         onClick={() => (running ? pauseTimer() : startTimer())}
         aria-label={running ? 'Pause timer' : 'Start timer'}
       >
+        <svg className="timer-ring" viewBox="0 0 116 116" aria-hidden="true">
+          <circle className="timer-ring-track" cx="58" cy="58" r="52" />
+          <circle
+            className="timer-ring-value"
+            cx="58"
+            cy="58"
+            r="52"
+            pathLength={100}
+            strokeDasharray={`${Math.max(0.001, ringProgress) * 100} ${100 - Math.max(0.001, ringProgress) * 100}`}
+          />
+        </svg>
         <span className="timer-disc-face">
           <span className="timer-disc-label">{label}</span>
           <span className="timer-disc-time">{formatTimer(timerRemaining)}</span>
@@ -196,9 +220,8 @@ function MusicCard() {
 
   const play = (event: ReactMouseEvent): void => {
     event.stopPropagation()
-    if (!connected || !track) {
+    if (!track && !connected) {
       setPage('music')
-      if (!connected) showToast(`${playerName} is unavailable`, 'Start playback in the selected player.')
       return
     }
     void togglePlay()
@@ -278,21 +301,36 @@ function MusicCard() {
 function TasksCard() {
   const { state, toggleTask, addTask, openPlanner } = useApp()
   const [draft, setDraft] = useState('')
-  const today = todayKey()
+  const systemTz = resolveSystemTimeZone()
+  const displayTimeZone = resolvePlannerTimeZone(usePickedCalendarTimeZone())
+  const today = todayKeyInZone(displayTimeZone)
   const tasks = useMemo(() => {
     const order = { high: 0, normal: 1, low: 2 } as const
     return state.tasks
-      .filter((task) => task.date === today)
-      .sort((a, b) => {
-        if (a.done !== b.done) return a.done ? 1 : -1
-        if (a.time && b.time) return a.time.localeCompare(b.time)
-        if (a.time) return -1
-        if (b.time) return 1
-        return order[a.priority] - order[b.priority]
+      .map((task) => {
+        const converted = convertTaskSchedule(
+          task.date,
+          task.time,
+          task.timeZone || systemTz,
+          displayTimeZone
+        )
+        return {
+          task,
+          displayDate: converted.date,
+          displayTime: converted.time
+        }
       })
-  }, [state.tasks, today])
+      .filter((entry) => entry.displayDate === today)
+      .sort((a, b) => {
+        if (a.task.done !== b.task.done) return a.task.done ? 1 : -1
+        if (a.displayTime && b.displayTime) return a.displayTime.localeCompare(b.displayTime)
+        if (a.displayTime) return -1
+        if (b.displayTime) return 1
+        return order[a.task.priority] - order[b.task.priority]
+      })
+  }, [state.tasks, systemTz, displayTimeZone, today])
 
-  const doneCount = tasks.filter((task) => task.done).length
+  const doneCount = tasks.filter((entry) => entry.task.done).length
   const openCount = tasks.length - doneCount
 
   const submit = (event: FormEvent): void => {
@@ -323,8 +361,15 @@ function TasksCard() {
             <span>Nothing on the docket. Add one small thing.</span>
           </div>
         )}
-        {tasks.slice(0, 4).map((task) => (
-          <TaskRow key={task.id} task={task} onToggle={() => toggleTask(task.id)} />
+        {tasks.slice(0, 4).map((entry) => (
+          <TaskRow
+            key={entry.task.id}
+            task={entry.task}
+            displayDate={entry.displayDate}
+            displayTime={entry.displayTime}
+            displayTimeZone={displayTimeZone}
+            onToggle={() => toggleTask(entry.task.id)}
+          />
         ))}
         {tasks.length > 4 && <span className="more-tasks">+{tasks.length - 4} more in Plan</span>}
       </div>
@@ -343,7 +388,19 @@ function TasksCard() {
   )
 }
 
-function TaskRow({ task, onToggle }: { task: Task; onToggle: () => void }) {
+function TaskRow({
+  task,
+  displayDate,
+  displayTime,
+  displayTimeZone,
+  onToggle
+}: {
+  task: Task
+  displayDate: string
+  displayTime?: string
+  displayTimeZone: string
+  onToggle: () => void
+}) {
   return (
     <div className={`task-row ${task.done ? 'is-done' : ''}`}>
       <button className="task-check" onClick={onToggle} aria-label={task.done ? 'Mark incomplete' : 'Mark complete'}>
@@ -351,10 +408,10 @@ function TaskRow({ task, onToggle }: { task: Task; onToggle: () => void }) {
       </button>
       <span className={`priority-dot ${task.priority}`} />
       <span className="task-title">{task.title}</span>
-      {task.time && (
+      {displayTime && (
         <span className="task-time">
           <Clock3 size={10} />
-          {task.time}
+          {formatTaskClock(displayDate, displayTime, displayTimeZone, true)}
         </span>
       )}
     </div>
@@ -476,8 +533,8 @@ function ObsidianCard() {
 }
 
 function SessionsCard() {
-  const { sessions, sessionsLoading, refreshSessions, setPage } = useApp()
-  const now = useNow()
+  const { sessions, sessionsLoading, refreshSessions, setPage, expanded } = useApp()
+  const now = useNowWhen(expanded)
   const active = sessions?.sessions.filter((session) => session.active && !session.subagent) || []
   const recent = sessions?.sessions.filter((session) => !session.active && !session.subagent) || []
   const subagents = sessions?.sessions.filter((session) => session.subagent) || []
@@ -656,21 +713,40 @@ export function Dashboard() {
   const showPlan = sectionVisible(state, 'planner')
   const showSessions = sectionVisible(state, 'sessions')
   const showWater = sectionVisible(state, 'water')
+  const showWaterCard = !showMusic && showWater
   const glasses = showWater ? waterCount(state.water) : null
+
+  // Saved order is the grid position: index 0 is top left, and the cards keep
+  // their size. Turning a section off closes the gap instead of leaving a hole.
+  const layout = normalizeHomeLayout(state.settings.homeLayout)
+  const cards: Record<HomeCardId, { available: boolean; node: ReactNode }> = {
+    timer: { available: true, node: <TimerCard /> },
+    music: {
+      available: showMusic || showWaterCard,
+      node: showMusic ? <MusicCard /> : showWaterCard ? <WaterCard /> : null
+    },
+    tasks: { available: showPlan, node: <TasksCard /> },
+    notes: { available: showNotes, node: <ObsidianCard /> },
+    sessions: { available: showSessions, node: <SessionsCard /> },
+    calendar: { available: showPlan, node: <CalendarCard /> }
+  }
+  const shown = shownHomeCards(layout, (id) => cards[id].available)
+  const customLayout = !homeLayoutEqual(state.settings.homeLayout, {
+    order: [...HOME_CARD_IDS]
+  })
+
   return (
     <div className="home-shell">
-      {showWater && <WaterGlance />}
-      <div className={`dashboard ${showMusic ? '' : 'is-no-music'}`}>
+      <div
+        className={`dashboard ${showMusic || showWaterCard ? '' : 'is-no-music'} ${customLayout ? 'is-custom-layout' : ''}`}
+      >
       <div className="dashboard-sr">
         {greeting()}. {showNotes ? (vaultName ? `${vaultName} folder connected.` : 'No notes folder connected.') : ''}
         {glasses !== null ? ` Water, ${glasses} of ${state.water.goalGlasses} glasses.` : ''}
       </div>
-      <TimerCard />
-      {showMusic && <MusicCard />}
-      {showPlan && <TasksCard />}
-      {showNotes && <ObsidianCard />}
-      {showSessions && <SessionsCard />}
-      {showPlan && <CalendarCard />}
+      {shown.map((id) =>
+        cards[id].node ? <Fragment key={id}>{cards[id].node}</Fragment> : null
+      )}
       </div>
     </div>
   )

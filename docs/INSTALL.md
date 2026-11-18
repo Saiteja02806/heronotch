@@ -55,7 +55,7 @@ Both contain the same app.
 ## Verify the download (optional, recommended)
 
 ```powershell
-Get-FileHash .\Notch-Portable-1.0.0.exe -Algorithm SHA256
+Get-FileHash .\Notch-Portable-1.0.22.exe -Algorithm SHA256
 ```
 
 Compare the output with the matching line in `SHA256SUMS.txt`. They must match
@@ -87,6 +87,14 @@ Deleting `%APPDATA%\notch` resets the app. Your notes are never stored there.
 
 - Installer build: **Settings → Apps → Installed apps → Notch → Uninstall**.
 - Portable build: delete the `.exe`. Optionally delete `%APPDATA%\notch`.
+
+## Updates
+
+Open **Settings → About** (or tray icon → **Check for updates…**).
+
+- **Installer build (`Notch-Setup-*.exe`)**: Downloads the update from GitHub Releases inside Settings and applies it on **Restart to update**. Notes, settings, and connected sessions stay in `%APPDATA%\notch`.
+- **Portable build (`Notch-Portable-*.exe`)**: Shows when a new version is out and opens the new `.exe` download from GitHub Releases so you can replace your portable file without touching `%APPDATA%\notch`.
+- You can turn background update checks off in **Settings → About → Check for updates automatically** and still check manually anytime.
 
 ## If the notch does not appear
 

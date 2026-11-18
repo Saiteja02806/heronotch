@@ -9,12 +9,18 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@demo/*": ["./demo/*"],
+      "@shared/*": ["./src/shared/*"]
+    }
   },
   "include": [
     "electron.vite.config.ts",
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
-    "src/shared/**/*.ts"
+    "src/shared/**/*.ts",
+    "demo/main/**/*.ts",
+    "demo/shared/**/*.ts"
   ]
 }

@@ -7,6 +7,7 @@ import {
   WATER_GLASS_ML,
   WATER_GOAL_MAX,
   WATER_GOAL_MIN,
+  WATER_REMINDER_MAX,
   type AppState,
   type AppStatePatch,
   type Settings,
@@ -17,13 +18,13 @@ import {
 export const stateEvents = new EventEmitter()
 
 const DEFAULT_SETTINGS: Settings = {
-  accent: 'coral',
+  accent: 'obsidian',
   vaultPath: null,
   hoverDelay: 140,
   openTrigger: 'hover',
   notchPosition: { x: 0.5, y: 0 },
   notchStyle: 'minimal',
-  launchAtLogin: false,
+  launchAtLogin: true,
   notifications: true,
   timerNotifications: true,
   agentStatus: true,
@@ -41,7 +42,10 @@ const DEFAULT_SETTINGS: Settings = {
   notchDisplay: 'primary',
   pillOnOtherDisplays: true,
   neverOver: [],
-  reduceMotion: false
+  reduceMotion: false,
+  autoCheckUpdates: true,
+  welcomeSeen: false,
+  plannerTimeZone: 'local'
 }
 
 function localDayKey(date = new Date()): string {
@@ -76,6 +80,7 @@ function createDefaultState(): AppState {
       notifications: true,
       threshold: 65,
       baseline: null,
+      profile: null,
       dayKey: today,
       goodSeconds: 0,
       badSeconds: 0,
@@ -86,7 +91,9 @@ function createDefaultState(): AppState {
       goalGlasses: 8,
       glassMl: WATER_GLASS_ML,
       dayKey: today,
-      pours: []
+      pours: [],
+      reminderMinutes: 0,
+      remindAt: null
     },
     focusLog: [],
     spotifyMemory: null
@@ -126,12 +133,23 @@ function normalizeWater(state: AppState, today: string): WaterState {
   const pours = Array.isArray(water?.pours)
     ? water.pours.filter((value) => typeof value === 'number' && Number.isFinite(value))
     : []
+  const rawReminder = Math.round(Number(water?.reminderMinutes) || 0)
+  const reminderMinutes =
+    rawReminder > 0 ? Math.min(WATER_REMINDER_MAX, Math.max(1, rawReminder)) : 0
+  const remindAt =
+    reminderMinutes > 0
+      ? typeof water?.remindAt === 'number' && Number.isFinite(water.remindAt)
+        ? water.remindAt
+        : Date.now() + reminderMinutes * 60 * 1000
+      : null
   return {
     enabled: Boolean(water?.enabled),
     goalGlasses,
     glassMl,
     dayKey: today,
-    pours: water?.dayKey === today ? pours : []
+    pours: water?.dayKey === today ? pours : [],
+    reminderMinutes,
+    remindAt
   }
 }
 
@@ -142,7 +160,9 @@ function sameWater(left: WaterState | undefined, right: WaterState): boolean {
     left.goalGlasses !== right.goalGlasses ||
     left.glassMl !== right.glassMl ||
     left.dayKey !== right.dayKey ||
-    left.pours.length !== right.pours.length
+    left.pours.length !== right.pours.length ||
+    (left.reminderMinutes || 0) !== (right.reminderMinutes || 0) ||
+    (left.remindAt ?? null) !== (right.remindAt ?? null)
   ) {
     return false
   }
@@ -161,6 +181,12 @@ function normalizeDay(state: AppState): AppState {
   if (!settings.agentStatusPort) settings = { ...settings, agentStatusPort: 7432 }
   if (typeof settings.codingReplySound !== 'boolean')
     settings = { ...settings, codingReplySound: true }
+  if (typeof settings.autoCheckUpdates !== 'boolean')
+    settings = { ...settings, autoCheckUpdates: true }
+  if (typeof settings.welcomeSeen !== 'boolean')
+    settings = { ...settings, welcomeSeen: false }
+  if (typeof settings.plannerTimeZone !== 'string' || !settings.plannerTimeZone.trim())
+    settings = { ...settings, plannerTimeZone: 'local' }
   if (!sectionsEqual(settings.sections, sections)) settings = { ...settings, sections }
   const timer = state.timer
   const water = normalizeWater(state, today)
@@ -231,6 +257,13 @@ export function getState(): AppState {
 
 export function setState(patch: AppStatePatch): AppState {
   current = normalizeDay(merge(current, patch))
+  queueSave()
+  stateEvents.emit('change', getState())
+  return current
+}
+
+export function replaceState(next: AppState): AppState {
+  current = normalizeDay(merge(createDefaultState(), next))
   queueSave()
   stateEvents.emit('change', getState())
   return current

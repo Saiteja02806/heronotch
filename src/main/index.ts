@@ -15,8 +15,8 @@ import {
   shell,
   Tray
 } from 'electron'
-import { execFile, execFileSync, spawn } from 'node:child_process'
-import { appendFileSync, readFileSync, writeFileSync, promises as fs } from 'node:fs'
+import { execFile, spawn } from 'node:child_process'
+import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import {
@@ -24,23 +24,62 @@ import {
   agentStatusStart,
   agentStatusStop,
   decide as agentDecide,
+  decideQuestion as agentDecideQuestion,
+  releaseQuestion as agentReleaseQuestion,
   setupSnippet,
-  snapshot as agentSnapshot
+  snapshot as agentSnapshot,
+  syncInstalledToolHooks,
+  toolConnections
 } from './agentStatus'
-import { approvalClient } from './openCodeApprovals'
+import { approvalClient, detectOpenCodePort } from './openCodeApprovals'
 import { startTransfer, phoneHost, qrImage, type Parcel } from './phoneTransfer'
 import type { AppState, AppStatePatch, NotchMetrics, MediaControlTarget } from '../shared/types'
 import { pauseForegroundWatch, resumeForegroundWatch, setForegroundTarget, startForegroundWatch, stopForegroundWatch } from './foreground'
 import { shouldAutoHide, type ForegroundSample } from '../shared/presence'
-import { followWithSpotifyApi } from '../shared/mediaFollow'
+import { followWithSpotifyApi, isMusicSourceId, normalizeMediaPreference } from '../shared/mediaFollow'
 import { collapsedLayout } from '../shared/notchLayout'
-import { displayPhysicalSize, effectiveNotchStyle, listDisplays, notchDisplay } from './notchDisplay'
+import { displayPhysicalSize, effectiveNotchStyle, listDisplays, notchDisplay, setDemoStageSize } from './notchDisplay'
 import * as backdrop from './backdrop'
+import {
+  cleanupDemoSandbox,
+  initDemoSandbox,
+  isDemoCapture,
+  isDemoMode,
+  isDemoStage,
+  registerDemoIpc,
+  syncDemoPlatformFromDisplay
+} from '@demo/main'
 import * as localMedia from './localMedia'
 import * as obsidian from './obsidian'
 import * as sessions from './sessions'
 import * as spotify from './spotify'
-import { flushState, getState, initState, setState, stateEvents, updateTask } from './state'
+import * as calendar from './calendar'
+import { convertTaskSchedule, formatTaskClock, resolveSystemTimeZone } from '../shared/timeZone'
+import {
+  checkForUpdates,
+  disposeUpdater,
+  downloadUpdate,
+  getUpdateState,
+  initUpdater,
+  installUpdate,
+  openUpdateRelease,
+  syncAutoUpdateChecks
+} from './updater'
+import {
+  activateLicenseKey,
+  deactivateStoredLicense,
+  getLicenseState,
+  initLicense,
+  validateStoredLicense
+} from './license'
+import { flushState, getState, initState, persistNow, replaceState, setState, stateEvents, updateTask } from './state'
+
+if (isDemoMode) {
+  initDemoSandbox()
+  if (isDemoCapture) {
+    app.commandLine.appendSwitch('force-device-scale-factor', '1.5')
+  }
+}
 
 if (process.env.NOTCH_CAPTURE) {
   app.disableHardwareAcceleration()
@@ -49,10 +88,11 @@ if (process.env.NOTCH_CAPTURE) {
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let expanded = false
-let expandToken = 0
+let expandedAt = 0
 let expanding: Promise<boolean> | null = null
-let collapsedShape: Electron.Rectangle | null = null
+let collapsedShape: Electron.Rectangle[] | null = null
 let expandedShape: Electron.Rectangle[] | null = null
+let eventLoopWatch: ReturnType<typeof setInterval> | null = null
 let lastWatchedVault: string | null = null
 let reminderTimers = new Map<string, NodeJS.Timeout>()
 let reminderReschedule: NodeJS.Timeout | null = null
@@ -62,9 +102,11 @@ let windowShown = false
 let revealTimer: NodeJS.Timeout | null = null
 let topmostTimer: NodeJS.Timeout | null = null
 let rendererRecoveries = 0
+let rendererRecoveryResetTimer: NodeJS.Timeout | null = null
 let failureDialogOpen = false
 let currentMetrics: NotchMetrics | null = null
 let closeFallback: NodeJS.Timeout | null = null
+let nativeDialogs = 0
 let userHidden = false
 let autoHidden = false
 let agentToken = ''
@@ -99,39 +141,179 @@ function syncAgentBridge(): void {
 let sessionLocked = false
 let presenceApplied: boolean | null = null
 let foreground: ForegroundSample | null = null
-let explicitBrowserOpen = false
+let fullscreenStreak = 0
+let explicitUserOpen = false
+let lastShapeKey = ''
+let appInitialized = false
+let revealPending = false
+let logChain: Promise<void> = Promise.resolve()
+
+function armRevealTimer(): void {
+  if (revealTimer) clearTimeout(revealTimer)
+  revealTimer = setTimeout(() => revealWindow('timeout'), 2600)
+}
+
+function syncStoreStartupTask(openAtLogin: boolean): void {
+  if (process.platform !== 'win32') return
+  const desired = openAtLogin ? '$true' : '$false'
+  const ps = [
+    'Add-Type -AssemblyName System.Runtime.WindowsRuntime',
+    '$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq \'AsTask\' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq \'IAsyncOperation`1\' })[0]',
+    'function Await($op, $type) { $t = $asTaskGeneric.MakeGenericMethod($type).Invoke($null, @($op)); $t.Wait(-1) | Out-Null; $t.Result }',
+    '[Windows.ApplicationModel.StartupTask,Windows.ApplicationModel,ContentType=WindowsRuntime] | Out-Null',
+    "$task = Await ([Windows.ApplicationModel.StartupTask]::GetAsync('NotchStartup')) ([Windows.ApplicationModel.StartupTask])",
+    `if ($task) { if (${desired}) { Await ($task.RequestEnableAsync()) ([Windows.ApplicationModel.StartupTaskState]) | Out-Null } else { $task.Disable() } }`
+  ].join('; ')
+  execFile(
+    'powershell.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps],
+    { windowsHide: true, timeout: 5000 },
+    (error) => {
+      if (error) logLine(`store StartupTask sync skipped (${error.message})`)
+    }
+  )
+}
+
+function syncLoginItem(openAtLogin: boolean): void {
+  if (isDemoMode || !app.isPackaged) return
+  if (process.windowsStore) {
+    syncStoreStartupTask(openAtLogin)
+    return
+  }
+  try {
+    // Portable builds extract to a temporary directory on every run; register the
+    // persistent wrapper path when running portable so login auto-start survives reboot.
+    app.setLoginItemSettings({
+      openAtLogin,
+      path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath
+    })
+  } catch {
+    // Ignore login-item registration failures under restricted policies.
+  }
+}
+
+/**
+ * Re-assert window visibility and screen-saver topmost stacking without stealing focus.
+ * Recovers from Windows z-order drops (taskbar popups, toasts, overlays) or Win+D hides.
+ */
+function assertTopmost(): void {
+  if (quitting || isDemoStage || !mainWindow || mainWindow.isDestroyed()) return
+  if (!windowShown || userHidden || autoHidden || sessionLocked) return
+  if (nativeDialogs > 0) return
+  if (!mainWindow.isVisible()) {
+    mainWindow.showInactive()
+    lastShapeKey = ''
+    applyWindowShape()
+  }
+  mainWindow.setAlwaysOnTop(true, 'screen-saver')
+  mainWindow.setSkipTaskbar(true)
+}
+
+function sendToRenderer(channel: string, ...args: unknown[]): void {
+  const win = mainWindow
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
+  win.webContents.send(channel, ...args)
+}
+
+function syncBackgroundThrottling(): void {
+  const win = mainWindow
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
+  const state = getState()
+  const needsBackgroundTimers =
+    expanded ||
+    state.timer.running ||
+    ((state.water.reminderMinutes ?? 0) > 0 && state.water.remindAt !== null) ||
+    state.posture.enabled
+  win.webContents.setBackgroundThrottling(!needsBackgroundTimers)
+}
 
 function handleForegroundSample(sample: ForegroundSample): void {
-  foreground = sample
-  if (sample.browserOpen) explicitBrowserOpen = false
+  const wasFullscreen = foreground?.fullscreen === true
+  fullscreenStreak = sample.fullscreen ? Math.min(fullscreenStreak + 1, 2) : 0
+  // Require two consecutive fullscreen samples (~1.6s) before auto-hiding so
+  // single-frame focus transitions and Alt+Tab flickers do not blink the notch.
+  foreground = {
+    ...sample,
+    fullscreen: sample.fullscreen && fullscreenStreak >= 2
+  }
+  if (explicitUserOpen && !expanded && !shouldAutoHide(foreground, getState().settings, false)) {
+    explicitUserOpen = false
+  }
   applyPresence()
+  if (
+    wasFullscreen &&
+    !foreground.fullscreen &&
+    !userHidden &&
+    !autoHidden &&
+    !sessionLocked &&
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    mainWindow.isVisible()
+  ) {
+    mainWindow.setAlwaysOnTop(true, 'screen-saver')
+  }
 }
 
 function applyPresence(): void {
-  autoHidden = shouldAutoHide(foreground, getState().settings, explicitBrowserOpen)
+  if (isDemoStage) {
+    autoHidden = false
+    userHidden = false
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setIgnoreMouseEvents(false)
+      if (windowShown && !mainWindow.isVisible()) mainWindow.show()
+    }
+    return
+  }
+  autoHidden = shouldAutoHide(foreground, getState().settings, explicitUserOpen)
+  if (userHidden) {
+    pauseForegroundWatch()
+  } else if (!sessionLocked) {
+    resumeForegroundWatch()
+  }
   if (!mainWindow || mainWindow.isDestroyed()) return
   const hidden = userHidden || autoHidden
-  if (presenceApplied === hidden) return
+  const visibleNow = mainWindow.isVisible()
+  const alreadyMatches =
+    presenceApplied === hidden &&
+    (hidden ? !visibleNow : !windowShown || visibleNow)
+  if (alreadyMatches) return
+  const changed = presenceApplied !== hidden
   presenceApplied = hidden
   if (hidden) {
     if (expanded) void setExpanded(false)
-    mainWindow.setOpacity(0)
-    mainWindow.setIgnoreMouseEvents(true, { forward: true })
+    // Calling hide() removes the window from DWM compositing without leaving a
+    // transparent full-screen surface or low-level mouse forwarding hook active.
+    mainWindow.hide()
     if (mainWindow.isFocused()) mainWindow.blur()
-    logLine(`notch hidden user=${userHidden} auto=${autoHidden}`)
-    if (windowShown) mainWindow.webContents.send('notch:presence', { hidden: true })
+    syncBackgroundThrottling()
+    if (changed) logLine(`notch hidden user=${userHidden} auto=${autoHidden}`)
+    if (changed && windowShown) sendToRenderer('notch:presence', { hidden: true })
     return
   }
-  mainWindow.setOpacity(1)
   mainWindow.setIgnoreMouseEvents(false)
-  applyWindowShape()
-  if (windowShown) mainWindow.showInactive()
+  if (windowShown && !visibleNow) mainWindow.showInactive()
+  mainWindow.setAlwaysOnTop(true, 'screen-saver')
   mainWindow.setSkipTaskbar(true)
-  if (windowShown) mainWindow.webContents.send('notch:presence', { hidden: false })
-  logLine('notch shown')
+  lastShapeKey = ''
+  applyWindowShape()
+  syncBackgroundThrottling()
+  if (changed && windowShown) sendToRenderer('notch:presence', { hidden: false })
+  logLine(changed ? 'notch shown' : 'notch visibility restored')
 }
 
 function logLine(message: string): void {
+  try {
+    const file = path.join(app.getPath('userData'), 'notch.log')
+    const line = `[${new Date().toISOString()}] ${message}\n`
+    logChain = logChain
+      .then(() => fs.appendFile(file, line, 'utf8'))
+      .catch(() => undefined)
+  } catch {
+    // Logging must never be the reason the app fails.
+  }
+}
+
+function logLineSync(message: string): void {
   try {
     appendFileSync(
       path.join(app.getPath('userData'), 'notch.log'),
@@ -144,11 +326,11 @@ function logLine(message: string): void {
 }
 
 process.on('uncaughtException', (error) => {
-  logLine(`uncaughtException ${error?.stack || String(error)}`)
+  logLineSync(`uncaughtException ${error?.stack || String(error)}`)
 })
 
 process.on('unhandledRejection', (reason) => {
-  logLine(`unhandledRejection ${reason instanceof Error ? reason.stack : String(reason)}`)
+  logLineSync(`unhandledRejection ${reason instanceof Error ? reason.stack : String(reason)}`)
 })
 
 function notifyRaw(title: string, body: string): void {
@@ -188,11 +370,20 @@ function refreshCollapsedLayout(): Electron.Rectangle {
     },
     tabScreen: layout.metrics.tabScreen,
     noticeAbove: layout.metrics.noticeAbove,
-    style
+    style,
+    inset: {
+      right: Math.max(
+        0,
+        display.bounds.x + display.bounds.width - (display.workArea.x + display.workArea.width)
+      ),
+      bottom: Math.max(
+        0,
+        display.bounds.y + display.bounds.height - (display.workArea.y + display.workArea.height)
+      )
+    }
   }
-  const win = mainWindow
-  if (win && !win.isDestroyed()) win.webContents.send('notch:metrics', currentMetrics)
-  if (!expanded) collapsedShape = tabHit(currentMetrics)
+  sendToRenderer('notch:metrics', currentMetrics)
+  if (!expanded) collapsedShape = [tabHit(currentMetrics)]
   return {
     x: display.bounds.x,
     y: display.bounds.y,
@@ -203,6 +394,12 @@ function refreshCollapsedLayout(): Electron.Rectangle {
 
 function applyBounds(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
+  if (isDemoStage) {
+    const [w, h] = mainWindow.getContentSize()
+    if (w > 100 && h > 100) setDemoStageSize(w, h)
+    refreshCollapsedLayout()
+    return
+  }
   const next = refreshCollapsedLayout()
   const current = mainWindow.getBounds()
   if (
@@ -222,11 +419,26 @@ function clearCloseFallback(): void {
   closeFallback = null
 }
 
+// A native file picker deactivates the notch, which looks exactly like an
+// outside click. Keep the panel open while a dialog is up.
+async function withNativeDialog<T>(run: () => Promise<T>): Promise<T> {
+  nativeDialogs += 1
+  // Esc belongs to the dialog while it is up, not to the global notch close.
+  const hadEscape = globalShortcut.isRegistered('Escape')
+  if (hadEscape) globalShortcut.unregister('Escape')
+  try {
+    return await run()
+  } finally {
+    nativeDialogs -= 1
+    syncEscapeShortcut()
+  }
+}
+
 // Ask the renderer to shrink the panel back into the tab, then actually resize.
 // A fallback covers a renderer that never finishes the animation.
 function requestAnimatedClose(): void {
   if (!mainWindow || !expanded) return
-  mainWindow.webContents.send('notch:request-close')
+  sendToRenderer('notch:request-close')
   clearCloseFallback()
   closeFallback = setTimeout(() => {
     closeFallback = null
@@ -241,66 +453,64 @@ async function setExpanded(next: boolean, notify = true): Promise<boolean> {
     if (userHidden || autoHidden) return false
     if (expanded) return true
     if (expanding) return expanding
-    const token = ++expandToken
     const started = performance.now()
-    const cached = backdrop.getCachedBackdrop()
     // The window is already display-sized. Do not resize, and do not wait
     // for a snapshot or a "hide the tab" frame.
     expanded = true
     expandedShape = null
+    expandedAt = Date.now()
+    // While the panel covers the screen a capture would only photograph the
+    // panel, so background refreshes stop until it closes.
     backdrop.suspendBackdropCapture()
+    const focusBackdrop = getState().settings.focusMode !== false ? backdrop.getCachedBackdrop() : null
     applyWindowShape()
-    mainWindow.setAlwaysOnTop(true, 'screen-saver')
+    syncBackgroundThrottling()
+    if (!isDemoStage) mainWindow.setAlwaysOnTop(true, 'screen-saver')
     const display = notchDisplay()
-    const focusMode = getState().settings.focusMode !== false
     if (notify) {
-      if (focusMode && cached) mainWindow.webContents.send('notch:backdrop', { image: cached })
-      mainWindow.webContents.send('notch:expanded', {
+      // The blurred desktop behind focus mode is the last snapshot taken while
+      // the notch was collapsed, so opening never waits for a capture.
+      if (focusBackdrop) sendToRenderer('notch:backdrop', { image: focusBackdrop })
+      sendToRenderer('notch:expanded', {
         expanded: true,
         viewport: { width: display.bounds.width, height: display.bounds.height }
       })
     }
-    mainWindow.showInactive()
-    mainWindow.setSkipTaskbar(true)
+    if (!isDemoStage) {
+      mainWindow.showInactive()
+      mainWindow.setSkipTaskbar(true)
+    } else if (!mainWindow.isVisible()) {
+      if (isDemoCapture) mainWindow.showInactive()
+      else mainWindow.show()
+    }
     syncEscapeShortcut()
     expanding = null
     logLine(`open dispatched in ${(performance.now() - started).toFixed(1)}ms`)
-
-    if (notify && focusMode && !cached) {
-      const target = mainWindow
-      void backdrop
-        .captureDesktopBackdrop(true)
-        .then((image) => {
-          if (!image || token !== expandToken || !expanded) return
-          if (!target.isDestroyed()) target.webContents.send('notch:backdrop', { image })
-        })
-        .catch(() => undefined)
-    }
     return true
   }
 
   clearCloseFallback()
   const started = performance.now()
-  expandToken += 1
   expanding = null
   expanded = false
-  if (explicitBrowserOpen) {
-    explicitBrowserOpen = false
+  if (explicitUserOpen) {
+    explicitUserOpen = false
     applyPresence()
   }
   expandedShape = null
   syncEscapeShortcut()
+  // No refresh right after a close: the user often opens it again within a
+  // few seconds, and a capture freezes the main process for a second or two.
   backdrop.resumeBackdropCapture()
-  if (currentMetrics) collapsedShape = tabHit(currentMetrics)
+  if (currentMetrics) collapsedShape = [tabHit(currentMetrics)]
   applyWindowShape()
+  assertTopmost()
+  syncBackgroundThrottling()
   if (notify && mainWindow) {
-    mainWindow.webContents.send('notch:expanded', { expanded: false })
+    sendToRenderer('notch:expanded', { expanded: false })
   }
   logLine(`close dispatched in ${(performance.now() - started).toFixed(1)}ms`)
-  setTimeout(() => {
-    if (!expanded) backdrop.refreshBackdrop()
-  }, 400)
-  setTimeout(() => nudgePointerHover(), 40)
+  if (!isDemoStage) setTimeout(() => nudgePointerHover(), 40)
   return false
 }
 
@@ -336,22 +546,24 @@ function nudgePointerHover(): void {
 // its hand cursor. Shaping the window to the tab lets the rest of the desktop
 // receive the mouse normally while the tab keeps working.
 function applyWindowShape(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!mainWindow || mainWindow.isDestroyed() || isDemoStage) return
   try {
     const bounds = mainWindow.getBounds()
     const full = { x: 0, y: 0, width: bounds.width + 2, height: bounds.height + 2 }
-    if (expanded) {
-      // Focus mode owns the whole screen so the backdrop can take a click.
-      // With focus mode off, the renderer sends only the panel (and any
-      // toast) so the rest of the desktop keeps the mouse.
-      mainWindow.setShape(expandedShape && expandedShape.length > 0 ? expandedShape : [full])
-      return
-    }
-    if (!collapsedShape) {
-      mainWindow.setShape([full])
-      return
-    }
-    mainWindow.setShape([collapsedShape])
+    const nextRects = expanded
+      ? expandedShape && expandedShape.length > 0
+        ? expandedShape
+        : [full]
+      : collapsedShape
+        ? collapsedShape
+        : [full]
+    const key = nextRects.map((r) => `${r.x},${r.y},${r.width},${r.height}`).join(';')
+    if (key === lastShapeKey) return
+    lastShapeKey = key
+    // Focus mode owns the whole screen so the backdrop can take a click.
+    // With focus mode off, the renderer sends only the panel (and any
+    // toast) so the rest of the desktop keeps the mouse.
+    mainWindow.setShape(nextRects)
   } catch {
     // setShape is experimental; if it is unavailable the window still works,
     // it just keeps its rectangular input area.
@@ -365,11 +577,24 @@ function revealWindow(reason: string): void {
     clearTimeout(revealTimer)
     revealTimer = null
   }
+  if (userHidden || autoHidden) return
+  if (isDemoStage) {
+    if (isDemoCapture) mainWindow.showInactive()
+    else mainWindow.show()
+    applyBounds()
+    logLine(
+      `demo window shown (${reason}) bounds=${JSON.stringify(mainWindow.getBounds())} visible=${mainWindow.isVisible()}`
+    )
+    return
+  }
   mainWindow.showInactive()
+  mainWindow.setAlwaysOnTop(true, 'screen-saver')
   // Windows gives every visible top-level window a taskbar button. The option
   // flag alone does not survive the first show on some Electron versions, so
   // re-assert it after the window becomes visible.
   mainWindow.setSkipTaskbar(true)
+  lastShapeKey = ''
+  applyWindowShape()
   logLine(
     `window shown (${reason}) bounds=${JSON.stringify(mainWindow.getBounds())} visible=${mainWindow.isVisible()}`
   )
@@ -377,20 +602,30 @@ function revealWindow(reason: string): void {
 
 async function openFromUserAction(focus = true): Promise<void> {
   userHidden = false
-  explicitBrowserOpen = getState().settings.browserOnly === true && !foreground?.browserOpen
+  explicitUserOpen = shouldAutoHide(foreground, getState().settings, false)
   applyPresence()
   if (await setExpanded(true)) {
     if (focus) mainWindow?.focus()
   } else {
-    explicitBrowserOpen = false
+    explicitUserOpen = false
     applyPresence()
   }
 }
 
-function smartAppControlState(): 'on' | 'evaluation' | 'off' | 'unknown' {
-  if (process.platform !== 'win32') return 'unknown'
-  try {
-    const output = execFileSync(
+function parseSmartAppControl(output: string): 'on' | 'evaluation' | 'off' | 'unknown' {
+  const match = output.match(/VerifiedAndReputablePolicyState\s+REG_DWORD\s+0x([0-9a-f]+)/i)
+  if (!match) return 'unknown'
+  const value = Number.parseInt(match[1], 16)
+  if (value === 0) return 'off'
+  if (value === 1) return 'on'
+  if (value === 2) return 'evaluation'
+  return 'unknown'
+}
+
+function readSmartAppControlState(): Promise<'on' | 'evaluation' | 'off' | 'unknown'> {
+  if (process.platform !== 'win32') return Promise.resolve('unknown')
+  return new Promise((resolve) => {
+    execFile(
       'reg.exe',
       [
         'query',
@@ -398,29 +633,27 @@ function smartAppControlState(): 'on' | 'evaluation' | 'off' | 'unknown' {
         '/v',
         'VerifiedAndReputablePolicyState'
       ],
-      { encoding: 'utf8', windowsHide: true, timeout: 4000 }
+      { encoding: 'utf8', windowsHide: true, timeout: 4000 },
+      (error, stdout) => {
+        if (error || !stdout) {
+          resolve('unknown')
+          return
+        }
+        resolve(parseSmartAppControl(stdout))
+      }
     )
-    const match = output.match(/VerifiedAndReputablePolicyState\s+REG_DWORD\s+0x([0-9a-f]+)/i)
-    if (!match) return 'unknown'
-    const value = Number.parseInt(match[1], 16)
-    if (value === 0) return 'off'
-    if (value === 1) return 'on'
-    if (value === 2) return 'evaluation'
-    return 'unknown'
-  } catch {
-    // Older Windows builds do not have the key at all.
-    return 'unknown'
-  }
+  })
 }
 
 function syncEscapeShortcut(): void {
+  if (isDemoStage) return
   // Esc must close the notch even when the window never got focus, which is the
   // normal case: the notch opens on hover via showInactive(), so keyboard focus
   // stays in whatever app the user was in. Grab Esc globally only while the
   // notch is expanded and unfocused; a focused window handles Esc itself, which
   // keeps "Esc leaves a text field" working inside the notch.
   if (!mainWindow || mainWindow.isDestroyed()) return
-  const want = expanded && !mainWindow.isFocused()
+  const want = expanded && !mainWindow.isFocused() && nativeDialogs === 0
   const registered = globalShortcut.isRegistered('Escape')
   try {
     if (want && !registered) {
@@ -436,11 +669,11 @@ function syncEscapeShortcut(): void {
   }
 }
 
-function showRendererFailure(details: Electron.RenderProcessGoneDetails): void {
+async function showRendererFailure(details: Electron.RenderProcessGoneDetails): Promise<void> {
   if (failureDialogOpen) return
   failureDialogOpen = true
   const logPath = path.join(app.getPath('userData'), 'notch.log')
-  const sac = smartAppControlState()
+  const sac = await readSmartAppControlState()
   const sacBlocked = sac === 'on' || sac === 'evaluation'
   logLine(`renderer failure dialog sac=${sac}`)
   const detail = sacBlocked
@@ -507,6 +740,7 @@ function showRendererFailure(details: Electron.RenderProcessGoneDetails): void {
       if (response === 0 && mainWindow && !mainWindow.isDestroyed()) {
         rendererRecoveries = 0
         windowShown = false
+        armRevealTimer()
         mainWindow.webContents.reload()
         return
       }
@@ -528,6 +762,10 @@ function showRendererFailure(details: Electron.RenderProcessGoneDetails): void {
 }
 
 function createWindow(): void {
+  const work = screen.getPrimaryDisplay().workArea
+  const stageWidth = isDemoCapture ? 1280 : Math.min(1280, Math.max(960, work.width - 48))
+  const stageHeight = isDemoCapture ? 720 : Math.min(720, Math.max(600, work.height - 64))
+  if (isDemoStage) setDemoStageSize(stageWidth, stageHeight)
   const initial = refreshCollapsedLayout()
   windowShown = false
   rendererRecoveries = 0
@@ -536,48 +774,98 @@ function createWindow(): void {
     revealTimer = null
   }
   const iconPath = path.join(__dirname, '../../resources/icon.png')
-  mainWindow = new BrowserWindow({
-    ...initial,
-    show: false,
-    frame: false,
-    transparent: true,
-    backgroundColor: '#00000000',
-    resizable: false,
-    movable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    skipTaskbar: true,
-    // 'toolbar' maps to WS_EX_TOOLWINDOW on Windows, so the shell never gives
-    // this window a taskbar button, Alt-Tab entry or Task View tile. The
-    // skipTaskbar flag alone calls ITaskbarList::DeleteTab, which the taskbar
-    // silently undoes the next time the window is activated (e.g. clicking
-    // into the notch to type).
-    ...(process.platform === 'win32' ? { type: 'toolbar' } : {}),
-    hasShadow: false,
-    alwaysOnTop: true,
-    acceptFirstMouse: true,
-    title: 'Notch',
-    icon: iconPath,
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      spellcheck: true,
-      backgroundThrottling: false
-    }
-  })
+  mainWindow = new BrowserWindow(
+    isDemoStage
+      ? {
+          width: stageWidth,
+          height: stageHeight,
+          ...(isDemoCapture ? { x: 0, y: 0 } : { center: true }),
+          useContentSize: true,
+          show: false,
+          frame: !isDemoCapture,
+          transparent: false,
+          backgroundColor: '#050507',
+          resizable: !isDemoCapture,
+          movable: !isDemoCapture,
+          minimizable: !isDemoCapture,
+          maximizable: !isDemoCapture,
+          fullscreenable: false,
+          skipTaskbar: isDemoCapture,
+          hasShadow: !isDemoCapture,
+          alwaysOnTop: false,
+          acceptFirstMouse: true,
+          title: 'Hero Notch',
+          icon: iconPath,
+          webPreferences: {
+            preload: path.join(__dirname, '../preload/index.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            spellcheck: false,
+            backgroundThrottling: false
+          }
+        }
+      : {
+          ...initial,
+          show: false,
+          frame: false,
+          transparent: true,
+          backgroundColor: '#00000000',
+          resizable: false,
+          movable: false,
+          minimizable: false,
+          maximizable: false,
+          fullscreenable: false,
+          skipTaskbar: true,
+          // 'toolbar' maps to WS_EX_TOOLWINDOW on Windows, so the shell never gives
+          // this window a taskbar button, Alt-Tab entry or Task View tile. The
+          // skipTaskbar flag alone calls ITaskbarList::DeleteTab, which the taskbar
+          // silently undoes the next time the window is activated (e.g. clicking
+          // into the notch to type).
+          ...(process.platform === 'win32' ? { type: 'toolbar' } : {}),
+          hasShadow: false,
+          alwaysOnTop: true,
+          acceptFirstMouse: true,
+          title: isDemoMode ? 'Hero Notch' : 'Notch',
+          icon: iconPath,
+          webPreferences: {
+            preload: path.join(__dirname, '../preload/index.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            spellcheck: !isDemoMode,
+            backgroundThrottling: false
+          }
+        }
+  )
 
-  mainWindow.setAlwaysOnTop(true, 'screen-saver')
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-  // Windows/Electron otherwise clamps the collapsed window to ~40px high,
-  // leaving a strip below the tab that swallowed hover from the window
-  // underneath. The tab only needs 26.
-  mainWindow.setMinimumSize(1, 1)
+  if (!isDemoStage) {
+    mainWindow.setAlwaysOnTop(true, 'screen-saver')
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    // Windows/Electron otherwise clamps the collapsed window to ~40px high,
+    // leaving a strip below the tab that swallowed hover from the window
+    // underneath. The tab only needs 26.
+    mainWindow.setMinimumSize(1, 1)
+  } else {
+    mainWindow.setMenuBarVisibility(false)
+    mainWindow.on('resize', () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      const [w, h] = mainWindow.getContentSize()
+      setDemoStageSize(w, h)
+      applyBounds()
+      if (expanded) {
+        sendToRenderer('notch:expanded', {
+          expanded: true,
+          viewport: { width: w, height: h }
+        })
+      }
+    })
+  }
+  lastShapeKey = ''
   presenceApplied = null
   applyPresence()
   applyBounds()
+  syncBackgroundThrottling()
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) void shell.openExternal(url)
@@ -593,7 +881,10 @@ function createWindow(): void {
   })
 
   mainWindow.once('ready-to-show', () => revealWindow('ready-to-show'))
-  mainWindow.webContents.on('did-finish-load', () => revealWindow('did-finish-load'))
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (currentMetrics) sendToRenderer('notch:metrics', currentMetrics)
+    revealWindow('did-finish-load')
+  })
 
   mainWindow.webContents.on('did-fail-load', (_event, code, description, url) => {
     logLine(`did-fail-load code=${code} ${description} url=${url}`)
@@ -613,47 +904,71 @@ function createWindow(): void {
     rendererRecoveries += 1
     if (rendererRecoveries === 1) {
       windowShown = false
+      if (rendererRecoveryResetTimer) clearTimeout(rendererRecoveryResetTimer)
+      rendererRecoveryResetTimer = setTimeout(() => {
+        rendererRecoveryResetTimer = null
+        rendererRecoveries = 0
+      }, 60_000)
+      rendererRecoveryResetTimer.unref?.()
       setTimeout(() => {
         if (!mainWindow || mainWindow.isDestroyed()) return
         logLine('retrying renderer after crash')
+        armRevealTimer()
         mainWindow.webContents.reload()
       }, 700)
       return
     }
-    showRendererFailure(details)
+    void showRendererFailure(details)
   })
 
   // Some GPUs and remote sessions never emit ready-to-show. Reveal the notch
   // anyway so the app cannot end up running with no visible window.
-  revealTimer = setTimeout(() => revealWindow('timeout'), 1800)
+  armRevealTimer()
 
   // Windows can drop the notch out of the top of the z-order (a fullscreen app
-  // closing, the shell restarting, display changes). A buried tab cannot be
-  // clicked, so it would never raise itself again and the notch would simply
-  // look gone. Re-assert topmost on a slow timer; this only raises the window,
-  // it never steals focus or moves it.
+  // closing, the shell restarting, display changes) or hide tool windows (Win+D).
+  // Re-assert topmost on a fast timer; this only raises/restores without focus.
   if (topmostTimer) {
     clearInterval(topmostTimer)
     topmostTimer = null
   }
   topmostTimer = setInterval(() => {
-    if (quitting || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return
-    if (userHidden || autoHidden || sessionLocked) return
-    mainWindow.setAlwaysOnTop(true, 'screen-saver')
-  }, 15000)
+    if (expanded) return
+    assertTopmost()
+  }, 3_000)
+  topmostTimer.unref?.()
+
+  // A stalled main process is felt as a slow open: the click waits in the
+  // queue. Log any stall so a slow open can be traced to its cause.
+  if (!eventLoopWatch) {
+    let last = Date.now()
+    eventLoopWatch = setInterval(() => {
+      const now = Date.now()
+      const late = now - last - 100
+      last = now
+      if (late > 200) logLine(`main event loop stalled ${late}ms`)
+    }, 100)
+    eventLoopWatch.unref?.()
+  }
 
   mainWindow.on('close', (event) => {
     if (quitting) return
     event.preventDefault()
     requestAnimatedClose()
-    mainWindow?.showInactive()
-    mainWindow?.setSkipTaskbar(true)
+    if (!isDemoStage) {
+      if (!userHidden && !autoHidden) mainWindow?.showInactive()
+      mainWindow?.setSkipTaskbar(true)
+    }
   })
 
   mainWindow.on('closed', () => {
     if (revealTimer) {
       clearTimeout(revealTimer)
       revealTimer = null
+    }
+    if (rendererRecoveryResetTimer) {
+      clearTimeout(rendererRecoveryResetTimer)
+      rendererRecoveryResetTimer = null
     }
     if (topmostTimer) {
       clearInterval(topmostTimer)
@@ -663,6 +978,16 @@ function createWindow(): void {
   })
   mainWindow.on('blur', () => {
     syncEscapeShortcut()
+    // Focus mode has its own backdrop click. With focus mode off the window is
+    // shaped to the panel, so a click on the desktop never reaches the page.
+    // Once the notch has focus (the user typed or clicked a control), losing
+    // that focus is the outside click: close instead of staying open.
+    if (isDemoStage) return
+    if (!expanded || Date.now() - expandedAt < 400) return
+    if (getState().settings.pinOnOpen) return
+    if (closeFallback) return
+    if (nativeDialogs > 0) return
+    requestAnimatedClose()
   })
 
   mainWindow.on('focus', () => {
@@ -685,10 +1010,10 @@ function createWindow(): void {
         if (page) {
           let sent = 0
           const navTimer = setInterval(() => {
-            mainWindow?.webContents.send('navigate', page)
+            sendToRenderer('navigate', page)
             if (++sent >= 12) clearInterval(navTimer)
           }, 1200)
-          mainWindow?.webContents.send('navigate', page)
+          sendToRenderer('navigate', page)
         }
         const frames = (process.env.NOTCH_CAPTURE_FRAMES || '')
           .split(',')
@@ -763,6 +1088,17 @@ function createTray(): void {
       },
       { label: 'Collapse Notch', click: () => requestAnimatedClose() },
       {
+        label: 'Check for updates…',
+        click: () => {
+          if (!mainWindow) createWindow()
+          revealWindow('tray-menu')
+          void openFromUserAction(false).then(() => {
+            sendToRenderer('navigate', 'settings:about')
+            void checkForUpdates({ manual: true })
+          })
+        }
+      },
+      {
         label: 'Open log file',
         click: () => {
           void shell.openPath(path.join(app.getPath('userData'), 'notch.log'))
@@ -810,12 +1146,19 @@ function fireReminder(taskId: string): void {
   const task = state.tasks.find((item) => item.id === taskId)
   if (!task || task.done || task.notifiedAt) return
   updateTask(taskId, { notifiedAt: Date.now() })
-  showNotification('Reminder', task.time ? `${task.title} · ${task.time}` : task.title)
-  mainWindow?.webContents.send('reminder:fired', {
+  const systemTz = resolveSystemTimeZone()
+  const converted = task.time
+    ? convertTaskSchedule(task.date, task.time, task.timeZone || systemTz, systemTz)
+    : null
+  const labelTime =
+    converted?.time ? formatTaskClock(converted.date, converted.time, systemTz, false) : task.time
+  showNotification('Reminder', labelTime ? `${task.title} · ${labelTime}` : task.title)
+  sendToRenderer('reminder:fired', {
     taskId: task.id,
     title: task.title,
     date: task.date,
-    time: task.time
+    time: task.time,
+    timeZone: task.timeZone
   })
 }
 
@@ -861,7 +1204,7 @@ function refreshVaultWatcher(force = false): void {
   if (!force && vaultPath === lastWatchedVault) return
   lastWatchedVault = vaultPath
   obsidian.watchVault(vaultPath, () => {
-    mainWindow?.webContents.send('vault:changed', getState().settings.vaultPath)
+    sendToRenderer('vault:changed', getState().settings.vaultPath)
   })
 }
 
@@ -875,76 +1218,52 @@ function requireVault(requested?: string): string {
 }
 
 function registerIpc(): void {
-  let transfer: Awaited<ReturnType<typeof startTransfer>> | null = null
-  let qr = ''
-  let starting = false
-  ipcMain.handle('agent:status',()=>agentSnapshot())
-  ipcMain.handle('agent:setup',(_event,tool:'claude'|'codex'|'cursor')=>setupSnippet(tool,agentPort||getState().settings.agentStatusPort||7432,agentToken))
-  ipcMain.handle('agent:decide',(_event,id:string,reply:'allow'|'deny')=>agentDecide(id,reply))
-  ipcMain.handle('approvals:list',()=>approvalClient(getState().settings.openCodeApprovalPort || 0).list())
-  ipcMain.handle('approvals:decide',(_event,key,reply,port)=>{
-    if(port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
-    return approvalClient(port).decide(key,reply)
-  })
-  ipcMain.handle('phone:start', async (_event, file:Parcel|null, options?:{clipboard?:boolean;text?:string}) => {
-    if(starting || (transfer && transfer.expires>Date.now())) throw new Error('A transfer is already open.')
-    starting = true
-    try {
-      const typed = options?.text ?? ''
-      let parcel:Parcel|null = file
-      if(typed.trim()) parcel = {name:'note.txt',bytes:Buffer.from(typed,'utf8'),text:true}
-      else if(options?.clipboard) parcel = {name:'clipboard.txt',bytes:Buffer.from(await clipboard.readText()),text:true}
-      transfer = await startTransfer(phoneHost(), parcel)
-      qr = qrImage(transfer.url,app.getAppPath())
-    } catch(error){transfer?.stop();transfer=null;throw error} finally {starting=false}
-  })
-  ipcMain.handle('phone:status',()=>{
-    if(!transfer || transfer.expires<=Date.now()){transfer=null;return null}
-    const item=transfer.peek()
-    return {qr,received:item?{name:item.name,text:item.text}:null}
-  })
-  ipcMain.handle('phone:collect',async ()=>{
-    const current=transfer
-    const item=current?.peek()
-    if(!item || !current || current.expires<=Date.now()) throw new Error('Transfer expired.')
-    if(item.text) await clipboard.writeText(Buffer.from(item.bytes).toString('utf8'))
-    else {
-      const choice=await dialog.showSaveDialog({defaultPath:path.join(app.getPath('downloads'), /^\.+$/.test(item.name) ? 'received' : item.name)})
-      if(choice.canceled || !choice.filePath)return
-      await fs.writeFile(choice.filePath,item.bytes)
-    }
-    current.collected(item)
-  })
-  ipcMain.handle('phone:stop',()=>{transfer?.stop();transfer=null})
-  app.once('before-quit',()=>transfer?.stop())
   ipcMain.handle('app:get-state', () => getState())
   ipcMain.handle('app:version', () => app.getVersion())
+  ipcMain.handle('updater:get-state', () => getUpdateState())
+  ipcMain.handle('updater:check', (_event, options?: { manual?: boolean }) =>
+    checkForUpdates({ manual: options?.manual !== false })
+  )
+  ipcMain.handle('updater:download', () => downloadUpdate())
+  ipcMain.handle('updater:install', () => installUpdate())
+  ipcMain.on('updater:open-release', () => openUpdateRelease())
+  ipcMain.handle('license:get-state', () => getLicenseState())
+  ipcMain.handle('license:activate', (_event, key: string) => activateLicenseKey(String(key || '')))
+  ipcMain.handle('license:validate', () => validateStoredLicense(true))
+  ipcMain.handle('license:deactivate', () => deactivateStoredLicense())
 
   ipcMain.handle('app:set-state', (_event, patch: AppStatePatch) => {
     const before = getState()
     const next = setState(patch)
+    // Turning the posture coach on or off is the user's standing choice. Write it
+    // now instead of waiting for the save timer, so a quick exit cannot lose it.
+    if (patch.posture?.enabled !== undefined) void persistNow()
 
     if (
-      patch.settings?.spotifyClientId !== undefined ||
-      patch.settings?.spotifyRedirectPort !== undefined
+      !isDemoMode &&
+      (patch.settings?.spotifyClientId !== undefined ||
+        patch.settings?.spotifyRedirectPort !== undefined)
     ) {
       const clientId = next.settings.spotifyClientId.trim()
       if (clientId) void spotify.saveCredentials(clientId, next.settings.spotifyRedirectPort)
     }
 
     if (
-      app.isPackaged &&
       patch.settings?.launchAtLogin !== undefined &&
       patch.settings.launchAtLogin !== before.settings.launchAtLogin
     ) {
-      app.setLoginItemSettings({
-        openAtLogin: patch.settings.launchAtLogin,
-        path: process.execPath
-      })
+      syncLoginItem(next.settings.launchAtLogin)
+    }
+
+    if (
+      patch.settings?.autoCheckUpdates !== undefined &&
+      patch.settings.autoCheckUpdates !== before.settings.autoCheckUpdates
+    ) {
+      syncAutoUpdateChecks(next.settings.autoCheckUpdates !== false)
     }
 
     const browserModeChanged = before.settings.browserOnly !== next.settings.browserOnly
-    if (browserModeChanged) explicitBrowserOpen = false
+    if (browserModeChanged) explicitUserOpen = false
     if (
       patch.settings?.notchPosition !== undefined ||
       patch.settings?.notchStyle !== undefined ||
@@ -953,16 +1272,19 @@ function registerIpc(): void {
     ) {
       applyBounds()
     }
-    if (browserModeChanged || patch.settings?.notchDisplay !== undefined) {
+    if (isDemoMode) {
+      syncDemoPlatformFromDisplay(patch.settings?.notchDisplay, sendToRenderer)
+    } else if (browserModeChanged || patch.settings?.notchDisplay !== undefined) {
       setForegroundTarget(displayPhysicalSize(notchDisplay()), next.settings.browserOnly === true)
     }
     if (patch.tasks) scheduleRemindersSoon()
     // Enabling browser detection starts a fresh watcher. Its first sample
     // decides visibility, so an already-open browser doesn't cause a flash.
     if (
-      (browserModeChanged && !next.settings.browserOnly) ||
-      patch.settings?.autoHideFullscreen !== undefined ||
-      patch.settings?.neverOver !== undefined
+      !isDemoStage &&
+      ((browserModeChanged && !next.settings.browserOnly) ||
+        patch.settings?.autoHideFullscreen !== undefined ||
+        patch.settings?.neverOver !== undefined)
     ) {
       applyPresence()
     }
@@ -978,8 +1300,6 @@ function registerIpc(): void {
   ipcMain.handle('notch:get-expanded', () => expanded)
   ipcMain.handle('notch:get-presence', () => ({ hidden: userHidden || autoHidden }))
   ipcMain.handle('notch:get-metrics', () => currentMetrics)
-  ipcMain.handle('notch:displays', () => listDisplays())
-  ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())
   ipcMain.on(
     'notch:shape',
     (
@@ -991,9 +1311,6 @@ function registerIpc(): void {
         | null
     ) => {
       if (payload && typeof payload === 'object' && 'focusOff' in payload) {
-        // Only the open, focus-off panel may clip the full-screen window.
-        // A collapsed-tab report that arrives during the open animation must
-        // not shrink that window down to the tab.
         if (!expanded) return
         const list = Array.isArray(payload.rects) ? payload.rects : []
         const usable = list.filter((item) => item && item.width > 0 && item.height > 0)
@@ -1002,8 +1319,11 @@ function registerIpc(): void {
         return
       }
       if (expanded) return
-      const rect = Array.isArray(payload) ? payload[0] : payload
-      if (rect && rect.width > 0 && rect.height > 0) collapsedShape = rect
+      // The tab and a corner notice are far apart, so the collapsed shape is a
+      // list of regions. One box around both would block the whole desktop.
+      const rects = Array.isArray(payload) ? payload : payload ? [payload] : []
+      const usable = rects.filter((item) => item && item.width > 0 && item.height > 0)
+      if (usable.length > 0) collapsedShape = usable
       applyWindowShape()
     }
   )
@@ -1018,39 +1338,32 @@ function registerIpc(): void {
   })
 
   ipcMain.on('app:notify', (_event, title: string, body: string, silent?: boolean) => {
-    showNotification(title, body, silent === true)
+    if (!isDemoMode) showNotification(title, body, silent === true)
   })
 
   ipcMain.on('app:open-external', (_event, url: string) => {
-    if (/^(https?:|obsidian:)/i.test(url)) void shell.openExternal(url)
+    if (!isDemoMode && /^(https?:|obsidian:)/i.test(url)) void shell.openExternal(url)
   })
 
   ipcMain.on('app:copy-text', (_event, text: string) => {
     clipboard.writeText(text)
   })
 
+  ipcMain.handle('posture:trace-enabled', () => Boolean(process.env.NOTCH_POSTURE_TRACE))
+
+  // The posture coach releases the camera when nobody is in frame for a while and
+  // wakes on any keyboard or mouse activity, which only the OS can report.
+  ipcMain.handle('system:idle-seconds', () => powerMonitor.getSystemIdleTime())
+  ipcMain.handle('posture:away-override', () => Number(process.env.NOTCH_POSTURE_AWAY_MS) || 0)
+
   ipcMain.on('posture:trace', (_event, sample: unknown) => {
     const target = process.env.NOTCH_POSTURE_TRACE
     if (!target) return
     try {
-      appendFileSync(target, `${JSON.stringify(sample)}\n`)
+      void fs.appendFile(target, `${JSON.stringify(sample)}\n`)
     } catch {
       // Diagnostics must never disturb posture tracking.
     }
-  })
-
-  ipcMain.handle('obsidian:choose-vault', async () => {
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Choose a notes folder',
-      properties: ['openDirectory', 'createDirectory'],
-      buttonLabel: 'Use this folder'
-    })
-    if (result.canceled || !result.filePaths[0]) return null
-    const chosen = result.filePaths[0]
-    setState({ settings: { vaultPath: chosen } })
-    refreshVaultWatcher(true)
-    return chosen
   })
 
   ipcMain.handle('obsidian:tree', async (_event, vaultPath: string) => {
@@ -1097,16 +1410,152 @@ function registerIpc(): void {
     await obsidian.trashEntry(requireVault(vaultPath), relativePath)
   })
 
+  ipcMain.handle('obsidian:search', async (_event, vaultPath: string, query: string) => {
+    return obsidian.searchNotes(requireVault(vaultPath), query)
+  })
+
+  if (isDemoMode) {
+    registerDemoIpc({
+      getMainWindow: () => mainWindow,
+      sendToRenderer,
+      applyStatePatch: (patch) => setState(patch),
+      resetAppState: (next) => {
+        replaceState(next)
+        expanded = false
+        applyBounds()
+        sendToRenderer('state:updated', getState())
+      },
+      onChaptersDone: (chapters) => {
+        logLine(`demo:done chapters=${chapters.length}`)
+        if (process.env.NOTCH_DEMO_DONE_FILE) {
+          void fs.writeFile(process.env.NOTCH_DEMO_DONE_FILE, JSON.stringify(chapters, null, 2), 'utf8').catch(() => {})
+        }
+      }
+    })
+    return
+  }
+
+  let transfer: Awaited<ReturnType<typeof startTransfer>> | null = null
+  let qr = ''
+  let starting = false
+  ipcMain.handle('agent:status',()=>agentSnapshot())
+  const agentConnections = async (): Promise<import('../shared/types').AgentConnection[]> => {
+    const rows = await toolConnections()
+    // Claude approvals ride hooks, but messaging from Sessions goes through the
+    // Claude Code command line, which keeps its own sign-in.
+    const claudeRow = rows.find((row) => row.tool === 'claude')
+    if (claudeRow && claudeRow.state !== 'missing') {
+      const auth = await sessions.claudeSignInStatus()
+      if (auth === 'signed-out') {
+        claudeRow.state = 'attention'
+        claudeRow.detail =
+          'Approvals work, but Notch cannot message Claude sessions until Claude Code is signed in.'
+        claudeRow.action = 'claude-login'
+      } else if (auth === 'signed-in' && claudeRow.state === 'ready') {
+        claudeRow.detail = 'Approvals, questions and messages from Sessions all work.'
+      }
+    }
+    // OpenCode is read through its own server, so its row is built here.
+    const port = getState().settings.openCodeApprovalPort || (await detectOpenCodePort().catch(() => null))
+    rows.push(
+      port
+        ? { tool: 'opencode', label: 'OpenCode', state: 'ready', detail: 'Connected. Approvals and questions work.' }
+        : { tool: 'opencode', label: 'OpenCode', state: 'idle', detail: 'Open OpenCode to connect.' }
+    )
+    return rows
+  }
+  ipcMain.handle('agent:connections',()=>agentConnections())
+  ipcMain.handle('agent:claude-login',()=>sessions.startClaudeSignIn())
+  ipcMain.handle('agent:reconnect',async()=>{
+    if(agentPort>0&&agentToken) await syncInstalledToolHooks(agentPort,agentToken)
+    return agentConnections()
+  })
+  ipcMain.handle('agent:setup',(_event,tool:import('../shared/types').AgentTool)=>setupSnippet(tool,agentPort||getState().settings.agentStatusPort||7432,agentToken))
+  ipcMain.handle('agent:decide',(_event,id:string,reply:'allow'|'deny')=>agentDecide(id,reply))
+  ipcMain.handle('agent:questionDecide',(_event,id:string,choices:number[] | number[][])=>agentDecideQuestion(id,choices))
+  ipcMain.handle('agent:questionRelease',(_event,id:string)=>agentReleaseQuestion(id))
+  ipcMain.handle('approvals:list',()=>approvalClient(getState().settings.openCodeApprovalPort || 0).list())
+  ipcMain.handle('approvals:decide',(_event,key,reply,port)=>{
+    if(port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
+    return approvalClient(port).decide(key,reply)
+  })
+  ipcMain.handle('approvals:questions',()=>approvalClient(getState().settings.openCodeApprovalPort || 0).listQuestions())
+  ipcMain.handle('approvals:questionReply',(_event,id:string,answers:string[][],port:number)=>{
+    if(port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
+    return approvalClient(port).replyQuestion(id,answers)
+  })
+  ipcMain.handle('approvals:questionReject',(_event,id:string,port:number)=>{
+    if(port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
+    return approvalClient(port).rejectQuestion(id)
+  })
+  ipcMain.handle('phone:start', async (_event, file:Parcel|null, options?:{clipboard?:boolean;text?:string}) => {
+    if(starting || (transfer && transfer.expires>Date.now())) throw new Error('A transfer is already open.')
+    starting = true
+    try {
+      const typed = options?.text ?? ''
+      let parcel:Parcel|null = file
+      if(typed.trim()) parcel = {name:'note.txt',bytes:Buffer.from(typed,'utf8'),text:true}
+      else if(options?.clipboard) parcel = {name:'clipboard.txt',bytes:Buffer.from(await clipboard.readText()),text:true}
+      transfer = await startTransfer(phoneHost(), parcel)
+      qr = qrImage(transfer.url,app.getAppPath())
+    } catch(error){transfer?.stop();transfer=null;throw error} finally {starting=false}
+  })
+  ipcMain.handle('phone:status',()=>{
+    if(!transfer || transfer.expires<=Date.now()){transfer=null;return null}
+    const item=transfer.peek()
+    return {qr,received:item?{name:item.name,text:item.text}:null}
+  })
+  ipcMain.handle('phone:collect',async ()=>{
+    const current=transfer
+    const item=current?.peek()
+    if(!item || !current || current.expires<=Date.now()) throw new Error('Transfer expired.')
+    if(item.text) await clipboard.writeText(Buffer.from(item.bytes).toString('utf8'))
+    else {
+      const choice=await withNativeDialog(()=>dialog.showSaveDialog({defaultPath:path.join(app.getPath('downloads'), /^\.+$/.test(item.name) ? 'received' : item.name)}))
+      if(choice.canceled || !choice.filePath)return
+      await fs.writeFile(choice.filePath,item.bytes)
+    }
+    current.collected(item)
+  })
+  ipcMain.handle('phone:stop',()=>{transfer?.stop();transfer=null;qr=''})
+  app.once('before-quit',()=>transfer?.stop())
+  ipcMain.handle('calendar:snapshot', () => calendar.calendarSnapshot())
+  ipcMain.handle('calendar:status', () => calendar.calendarStatus())
+  ipcMain.handle('calendar:connect', () => calendar.connectCalendar())
+  ipcMain.handle('calendar:cancel-connect', () => calendar.cancelCalendarConnect())
+  ipcMain.handle('calendar:disconnect', () => calendar.disconnectCalendar())
+  ipcMain.handle('calendar:list', () => calendar.listCalendars())
+  ipcMain.handle('calendar:events', (_event, calendarId, date, timeZone) =>
+    calendar.calendarEvents(calendarId, date, timeZone)
+  )
+  ipcMain.handle('calendar:save', (_event, calendarId, draft, editing) => calendar.saveCalendarEvent(calendarId, draft, editing))
+  ipcMain.handle('calendar:delete', (_event, calendarId, eventId) => calendar.deleteCalendarEvent(calendarId, eventId))
+
+  ipcMain.handle('notch:displays', () => listDisplays())
+  ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())
+
+  ipcMain.handle('obsidian:choose-vault', async () => {
+    if (!mainWindow) return null
+    const result = await withNativeDialog(() =>
+      dialog.showOpenDialog(mainWindow!, {
+        title: 'Choose a notes folder',
+        properties: ['openDirectory', 'createDirectory'],
+        buttonLabel: 'Use this folder'
+      })
+    )
+    if (result.canceled || !result.filePaths[0]) return null
+    const chosen = result.filePaths[0]
+    setState({ settings: { vaultPath: chosen } })
+    refreshVaultWatcher(true)
+    return chosen
+  })
+
   ipcMain.handle('obsidian:reveal', async (_event, vaultPath: string, relativePath: string | null) => {
     await obsidian.revealEntry(requireVault(vaultPath), relativePath)
   })
 
   ipcMain.handle('obsidian:open-in-app', async (_event, vaultPath: string, relativePath: string) => {
     await obsidian.openFile(requireVault(vaultPath), relativePath)
-  })
-
-  ipcMain.handle('obsidian:search', async (_event, vaultPath: string, query: string) => {
-    return obsidian.searchNotes(requireVault(vaultPath), query)
   })
 
   ipcMain.handle('spotify:status', async () => {
@@ -1136,9 +1585,10 @@ function registerIpc(): void {
 
   ipcMain.handle('spotify:player', async () => {
     const settings = getState().settings
+    const preference = normalizeMediaPreference(settings.mediaSource)
     const status = await spotify.getStatus(settings.spotifyRedirectPort)
-    const sessionId = localMedia.currentMediaId(settings.mediaSource)
-    if (followWithSpotifyApi(settings.mediaSource, sessionId, status.connected)) {
+    const sessionId = localMedia.currentMediaId(preference)
+    if (followWithSpotifyApi(preference, sessionId, status.connected)) {
       try {
         const playback = await spotify.getPlayback(settings.spotifyClientId)
         if (sessionId) {
@@ -1148,78 +1598,159 @@ function registerIpc(): void {
           if (!local.track || local.track.name !== playback.track?.name ||
               local.track.artists !== playback.track?.artists) return local
         }
-        if (playback.track || !localMedia.isLocalAvailable(settings.mediaSource)) {
+        if (playback.track || !localMedia.isLocalAvailable(preference)) {
           return { ...playback, localSessionId: sessionId || undefined }
         }
       } catch {
         // Fall through to the Windows media session.
       }
     }
-    return localMedia.getLocalPlayback(settings.mediaSource)
+    return localMedia.getLocalPlayback(preference)
   })
 
   ipcMain.handle('spotify:queue', async () => {
     const settings = getState().settings
+    const preference = normalizeMediaPreference(settings.mediaSource)
     const status = await spotify.getStatus(settings.spotifyRedirectPort)
-    if (!followWithSpotifyApi(settings.mediaSource, localMedia.currentMediaId(settings.mediaSource), status.connected)) return []
+    if (!followWithSpotifyApi(preference, localMedia.currentMediaId(preference), status.connected)) return []
     return spotify.getQueue(settings.spotifyClientId)
   })
 
   ipcMain.handle('spotify:library', async () => {
     const settings = getState().settings
+    const preference = normalizeMediaPreference(settings.mediaSource)
     const status = await spotify.getStatus(settings.spotifyRedirectPort)
-    if (!followWithSpotifyApi(settings.mediaSource, localMedia.currentMediaId(settings.mediaSource), status.connected)) return { recent: [], playlists: [] }
+    if (!followWithSpotifyApi(preference, localMedia.currentMediaId(preference), status.connected)) return { recent: [], playlists: [] }
     return spotify.getLibrary(settings.spotifyClientId)
   })
+
+/**
+ * The real Store package binary. `WindowsApps\Spotify.exe` is only an app
+ * execution alias and can return without starting the music app, so prefer
+ * the package's own executable when it exists.
+ */
+function spotifyStoreExe(localAppData: string): string | null {
+  const root = path.join(localAppData, 'Microsoft', 'WindowsApps')
+  try {
+    for (const entry of readdirSync(root)) {
+      if (!entry.startsWith('SpotifyAB.SpotifyMusic_')) continue
+      const candidate = path.join(root, entry, 'Spotify.exe')
+      if (existsSync(candidate)) return candidate
+    }
+  } catch {
+    // WindowsApps is not readable here; the other paths may still work.
+  }
+  return null
+}
+
+function findSpotifyDesktopExe(): string | null {
+  const username = process.env.USERNAME || ''
+  const localAppData = process.env.LOCALAPPDATA || `C:\\Users\\${username}\\AppData\\Local`
+  const appData = process.env.APPDATA || `C:\\Users\\${username}\\AppData\\Roaming`
+  const candidates = [
+    path.join(appData, 'Spotify', 'Spotify.exe'),
+    spotifyStoreExe(localAppData),
+    path.join(localAppData, 'Microsoft', 'WindowsApps', 'Spotify.exe'),
+    'C:\\Program Files\\Spotify\\Spotify.exe',
+    'C:\\Program Files (x86)\\Spotify\\Spotify.exe'
+  ].filter((value): value is string => Boolean(value))
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) return candidate
+    } catch {
+      // try next
+    }
+  }
+  return null
+}
+
+function spotifyUriToWebUrl(target = 'spotify:'): string {
+  const match = /^spotify:(track|episode|album|playlist):([A-Za-z0-9]+)$/.exec(target)
+  if (match) return `https://open.spotify.com/${match[1]}/${match[2]}`
+  return 'https://open.spotify.com'
+}
+
+/**
+ * Windows denies reads inside `WindowsApps`, so a Store install cannot be
+ * found with existsSync. Asking Windows which app owns `spotify:` works for
+ * both the classic installer and the Microsoft Store build.
+ */
+function spotifyDesktopAvailable(): boolean {
+  if (findSpotifyDesktopExe()) return true
+  try {
+    return Boolean(app.getApplicationNameForProtocol('spotify:'))
+  } catch {
+    return false
+  }
+}
 
 async function openSpotifyApp(target = 'spotify:'): Promise<boolean> {
   const uri =
     target === 'spotify:' || /^spotify:(track|episode|album|playlist):[A-Za-z0-9]+$/.test(target)
       ? target
       : 'spotify:'
+  if (spotifyDesktopAvailable()) {
+    // Windows protocol activation is the reliable way into the Store app.
+    // Spawning the WindowsApps alias could exit without starting anything,
+    // which is why "Open Spotify" sometimes looked like it did nothing.
+    try {
+      await shell.openExternal(uri)
+      return true
+    } catch {
+      // Fall through to spawning the executable directly.
+    }
+    const exe = findSpotifyDesktopExe()
+    if (exe) {
+      try {
+        spawn(exe, [], { detached: true, stdio: 'ignore' }).unref()
+        return true
+      } catch {
+        // Fall through to web player if spawning fails.
+      }
+    }
+  }
+  // Desktop app is not installed: open Spotify Web Player in the browser
+  // instead of triggering Windows' broken "Look for an app in the Store" dialog.
   try {
-    await shell.openExternal(uri)
+    await shell.openExternal(spotifyUriToWebUrl(uri))
     return true
   } catch {
-    // Fall back to common install locations. Those only start the app.
+    return false
   }
-  const candidates = [
-    'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Roaming\\Spotify\\Spotify.exe',
-    'C:\\Program Files\\Spotify\\Spotify.exe',
-    'C:\\Program Files (x86)\\Spotify\\Spotify.exe'
-  ]
-  const fileSystem = await import('node:fs')
-  for (const candidate of candidates) {
+}
+
+/**
+ * Plain words for the one case a person can act on: there is no Spotify player
+ * for Notch to send the song to. Say what happened, then what to do.
+ */
+function spotifyDeviceMessage(): string {
+  if (!spotifyDesktopAvailable()) {
+    return 'Spotify is not installed on this PC. Install it from spotify.com, or play in the Spotify web player, then try again.'
+  }
+  return 'Notch opened Spotify, but it is still starting. Give it a few seconds, then press Play again.'
+}
+
+async function recoverSpotifyDevice(clientId: string): Promise<boolean> {
+  const hasDesktop = spotifyDesktopAvailable()
+  const opened = await openSpotifyApp('spotify:')
+  // A cold Store install can take far longer than a warm one to report itself
+  // as a device, so wait for it instead of failing while it is still loading.
+  if (opened && (await spotify.waitForDevice(clientId, hasDesktop ? 18000 : 8000))) return true
+  if (hasDesktop) {
     try {
-      if (fileSystem.existsSync(candidate)) {
-        spawn(candidate, [], { detached: true, stdio: 'ignore' }).unref()
-        return true
-      }
+      await shell.openExternal('https://open.spotify.com')
     } catch {
-      // try next
+      return false
     }
+    return spotify.waitForDevice(clientId, 8000)
   }
   return false
 }
 
-async function recoverSpotifyDevice(clientId: string): Promise<boolean> {
-  const opened = await openSpotifyApp('spotify:')
-  if (opened && (await spotify.waitForDevice(clientId, 12000))) return true
-  try {
-    await shell.openExternal('https://open.spotify.com')
-  } catch {
-    return false
-  }
-  return spotify.waitForDevice(clientId, 8000)
-}
-
 async function startTrackOnDesktop(clientId: string, uri: string) {
   if (!/^spotify:(track|episode):[A-Za-z0-9]+$/.test(uri)) return null
-  try {
-    await shell.openExternal(uri)
-  } catch {
-    return null
-  }
+  const opened = await openSpotifyApp(uri)
+  if (!opened) return null
   const targetId = uri.split(':').pop() || ''
   const deadline = Date.now() + 8000
   while (Date.now() < deadline) {
@@ -1235,33 +1766,42 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
   ipcMain.handle('spotify:action', (_event, action, target?: MediaControlTarget) => {
     // Freeze the displayed session before entering the queue. A closed player
     // must never redirect a queued command to another Windows session.
-    const preference = getState().settings.mediaSource || 'auto'
+    const preference = normalizeMediaPreference(getState().settings.mediaSource)
     const sessionId = target ? target.sessionId : localMedia.currentMediaId(preference)
     const requestedPreference = target?.preference ?? preference
     const run = spotifyActionQueue.then(async () => {
       const settings = getState().settings
-      if (requestedPreference !== (settings.mediaSource || 'auto') ||
+      if (requestedPreference !== normalizeMediaPreference(settings.mediaSource) ||
           (preference !== 'auto' && sessionId !== preference)) {
-        throw new Error('The selected player changed. Try the control again.')
+        throw new Error('The player changed. Choose the song again.')
       }
-      if (sessionId && !localMedia.isLocalAvailable(sessionId)) {
-        throw new Error('The selected player is unavailable. Start playback in that player.')
+      // A browser video session is never a transport target, even if one was
+      // saved before music apps were the only supported sources.
+      if (sessionId && !isMusicSourceId(sessionId)) {
+        throw new Error('Notch controls Spotify and YouTube Music only. Open one of those and try again.')
+      }
+      const localAvailable = Boolean(sessionId && localMedia.isLocalAvailable(sessionId))
+      const canRecoverSpotify =
+        action?.type === 'play' &&
+        Boolean(sessionId && sessionId.toLowerCase().includes('spotify'))
+      if (sessionId && !localAvailable && !canRecoverSpotify) {
+        throw new Error('That player is not playing right now. Start a song in it, then try again.')
       }
       if (target && !sessionId && localMedia.currentMediaId(preference)) {
-        throw new Error('The player changed. Wait for its track to appear before using the control.')
+        throw new Error('The player changed. Wait for the song to appear, then try again.')
       }
-      if (sessionId && ['play', 'pause', 'next', 'previous', 'seek'].includes(action?.type)) {
+      if (localAvailable && sessionId && ['play', 'pause', 'next', 'previous', 'seek'].includes(action?.type)) {
         return localMedia.performLocalAction(action, sessionId)
       }
       const status = await spotify.getStatus(settings.spotifyRedirectPort)
-      if (requestedPreference !== (getState().settings.mediaSource || 'auto')) {
-        throw new Error('The selected player changed. Try the control again.')
+      if (requestedPreference !== normalizeMediaPreference(getState().settings.mediaSource)) {
+        throw new Error('The player changed. Choose the song again.')
       }
       const enhanced = followWithSpotifyApi(settings.mediaSource, sessionId, status.connected)
       const recoverable =
         action?.type === 'play' || action?.type === 'play-track' || action?.type === 'play-context'
       if ((action?.type === 'play-track' || action?.type === 'play-context') && !status.connected) {
-        throw new Error('Connect your Spotify account to choose what plays. Opening the Spotify app still works.')
+        throw new Error('Spotify is not linked to Notch yet. Connect it in Settings, or press play in the Spotify app instead.')
       }
       if (enhanced && recoverable) {
         const memory = getState().spotifyMemory
@@ -1279,7 +1819,7 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
             const recovered = await startTrackOnDesktop(settings.spotifyClientId, action.uri)
             if (recovered) return recovered
           }
-          throw new Error('No Spotify device yet. Open Spotify, then press play again.')
+          throw new Error(spotifyDeviceMessage())
         }
       }
       if (enhanced) {
@@ -1297,7 +1837,11 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
   })
 
   ipcMain.handle('spotify:launch', async (_event, target?: string) => {
-    return openSpotifyApp(typeof target === 'string' ? target : 'spotify:')
+    const ok = await openSpotifyApp(typeof target === 'string' ? target : 'spotify:')
+    logLine(
+      `spotify launch ok=${ok} registered=${spotifyDesktopAvailable()} target=${typeof target === 'string' ? target : 'spotify:'}`
+    )
+    return ok
   })
   ipcMain.handle('sessions:scan', () => sessions.scanSessions())
   ipcMain.handle('sessions:open-project', (_event, directory: string) => {
@@ -1305,6 +1849,9 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
   })
   ipcMain.handle('sessions:send', (_event, sessionId: string, message: string) => {
     return sessions.sendSessionMessage(sessionId, message)
+  })
+  ipcMain.handle('sessions:verify', (_event, sessionId: string, message: string) => {
+    return sessions.verifySessionMessage(sessionId, message)
   })
   ipcMain.handle('sessions:codex-lock', (_event, sessionId: string) => {
     return sessions.codexThreadLock(sessionId)
@@ -1334,6 +1881,7 @@ function registerGlobalShortcuts(): void {
     })
     globalShortcut.register('CommandOrControl+Alt+Space', () => {
       userHidden = !userHidden
+      logLine(`user toggle hidden=${userHidden}`)
       applyPresence()
     })
   } catch {
@@ -1344,7 +1892,8 @@ function registerGlobalShortcuts(): void {
 // Capture runs (NOTCH_CAPTURE) are throwaway verification instances that read
 // a synthetic state file and quit after writing their PNG. Let them start next
 // to the live notch instead of refusing, so a capture never has to close it.
-const gotLock = Boolean(process.env.NOTCH_CAPTURE) || app.requestSingleInstanceLock()
+const gotLock =
+  isDemoMode || Boolean(process.env.NOTCH_CAPTURE) || app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
@@ -1355,6 +1904,10 @@ if (!gotLock) {
   })
 
   app.on('second-instance', () => {
+    if (!appInitialized) {
+      revealPending = true
+      return
+    }
     if (!mainWindow) createWindow()
     logLine('second instance: revealing existing window')
     void openFromUserAction()
@@ -1367,9 +1920,13 @@ if (!gotLock) {
     // with near-white option labels.
     nativeTheme.themeSource = 'dark'
     logLine(
-      `start v${app.getVersion()} packaged=${app.isPackaged} exe=${process.execPath} userData=${app.getPath('userData')}`
+      `start v${app.getVersion()} packaged=${app.isPackaged} exe=${process.execPath} userData=${app.getPath('userData')} demo=${isDemoMode}`
     )
-    logLine(`smart app control=${smartAppControlState()}`)
+    if (!isDemoMode) {
+      void readSmartAppControlState().then((sac) => {
+        logLine(`smart app control=${sac}`)
+      })
+    }
     const primaryDisplay = screen.getPrimaryDisplay()
     logLine(
       `display bounds=${JSON.stringify(primaryDisplay.bounds)} workArea=${JSON.stringify(primaryDisplay.workArea)} scale=${primaryDisplay.scaleFactor}`
@@ -1382,77 +1939,147 @@ if (!gotLock) {
     })
     await initState()
 
-    // The state file and the Spotify token file are separate. If the state was
-    // reset, recover the saved Client ID so the user does not have to paste it
-    // again and the refresh token can keep working.
-    const storedCredentials = await spotify.loadCredentials()
-    const loadedSettings = getState().settings
-    if (storedCredentials?.clientId && !loadedSettings.spotifyClientId.trim()) {
-      setState({
-        settings: {
-          spotifyClientId: storedCredentials.clientId,
-          ...(storedCredentials.redirectPort
-            ? { spotifyRedirectPort: storedCredentials.redirectPort }
-            : {})
+    syncLoginItem(getState().settings.launchAtLogin)
+    registerIpc()
+    await initLicense({
+      isDemoMode,
+      isCapture: Boolean(process.env.NOTCH_CAPTURE),
+      log: logLine,
+      onStateChange: (next) => sendToRenderer('license:state', next)
+    })
+    initUpdater({
+      isDemoMode,
+      isCapture: Boolean(process.env.NOTCH_CAPTURE),
+      autoCheck: getState().settings.autoCheckUpdates !== false,
+      log: logLine,
+      onStateChange: (next) => sendToRenderer('updater:state', next),
+      onBeforeQuitForUpdate: () => {
+        quitting = true
+        flushState()
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.hide()
+        }
+      }
+    })
+    if (!isDemoMode) {
+      agentToken = loadAgentToken()
+      syncAgentBridge()
+      agentStatusEvents.on('change', (value) => {
+        sendToRenderer('agent:update', value)
+      })
+      // OpenCode only shows approvals/questions when its server port is known.
+      // Find it automatically so nobody has to type it into settings.
+      let detectingOpenCode = false
+      const autoDetectOpenCode = (): void => {
+        if (detectingOpenCode) return
+        detectingOpenCode = true
+        void detectOpenCodePort()
+          .then((found) => {
+            if (found && getState().settings.openCodeApprovalPort !== found) {
+              const next = setState({ settings: { openCodeApprovalPort: found } })
+              sendToRenderer('state:updated', next)
+              logLine(`opencode port auto-detected ${found}`)
+            }
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            detectingOpenCode = false
+          })
+      }
+      autoDetectOpenCode()
+      setInterval(autoDetectOpenCode, 12_000).unref()
+    }
+    createWindow()
+    if (!isDemoStage) createTray()
+    appInitialized = true
+    if (revealPending) {
+      revealPending = false
+      void openFromUserAction()
+    }
+    logLine(`window created bounds=${JSON.stringify(mainWindow?.getBounds())} tray=${Boolean(tray)}`)
+    if (!isDemoMode) {
+      // Recover/sync saved Spotify Client ID without blocking initial window creation.
+      void spotify
+        .loadCredentials()
+        .then(async (storedCredentials) => {
+          const loadedSettings = getState().settings
+          if (storedCredentials?.clientId && !loadedSettings.spotifyClientId.trim()) {
+            setState({
+              settings: {
+                spotifyClientId: storedCredentials.clientId,
+                ...(storedCredentials.redirectPort
+                  ? { spotifyRedirectPort: storedCredentials.redirectPort }
+                  : {})
+              }
+            })
+          } else if (loadedSettings.spotifyClientId.trim()) {
+            await spotify.saveCredentials(
+              loadedSettings.spotifyClientId,
+              loadedSettings.spotifyRedirectPort
+            )
+          }
+        })
+        .catch(() => undefined)
+      localMedia.startLocalMediaMonitor()
+      startForegroundWatch(
+        handleForegroundSample,
+        displayPhysicalSize(notchDisplay()),
+        getState().settings.browserOnly === true
+      )
+      sessions.sessionSendEvents.on('result', (result) => {
+        sendToRenderer('session:send-result', result)
+      })
+      sessions.sessionReplyEvents.on('reply', (event) => {
+        sendToRenderer('session:reply', event)
+      })
+    }
+    if (!isDemoMode) {
+      backdrop.setBackdropNearZone(() => {
+        if (!currentMetrics) return null
+        const bounds = notchDisplay().bounds
+        const { tab } = currentMetrics
+        return {
+          x: bounds.x + tab.x - 240,
+          y: bounds.y,
+          width: tab.width + 480,
+          height: tab.y + tab.height + 140
         }
       })
-    } else if (loadedSettings.spotifyClientId.trim()) {
-      await spotify.saveCredentials(
-        loadedSettings.spotifyClientId,
-        loadedSettings.spotifyRedirectPort
-      )
+      backdrop.scheduleBackdropRefresh()
+      setInterval(() => {
+        if (expanded || userHidden || autoHidden || sessionLocked) return
+        backdrop.refreshBackdrop()
+      }, 120_000).unref()
     }
-
-    if (app.isPackaged) {
-      app.setLoginItemSettings({
-        openAtLogin: getState().settings.launchAtLogin,
-        path: process.execPath
-      })
-    }
-    registerIpc()
-    agentToken = loadAgentToken()
-    syncAgentBridge()
-    agentStatusEvents.on('change', (value) => {
-      mainWindow?.webContents.send('agent:update', value)
-    })
-    localMedia.startLocalMediaMonitor()
-    startForegroundWatch(
-      handleForegroundSample,
-      displayPhysicalSize(notchDisplay()),
-      getState().settings.browserOnly === true
-    )
-    createWindow()
-    createTray()
-    logLine(`window created bounds=${JSON.stringify(mainWindow?.getBounds())} tray=${Boolean(tray)}`)
-    sessions.sessionSendEvents.on('result', (result) => {
-      mainWindow?.webContents.send('session:send-result', result)
-    })
-    sessions.sessionReplyEvents.on('reply', (event) => {
-      mainWindow?.webContents.send('session:reply', event)
-    })
-    backdrop.scheduleBackdropRefresh()
-    setInterval(() => {
-      if (expanded || userHidden || autoHidden || sessionLocked) return
-      backdrop.refreshBackdrop()
-    }, 60_000)
     refreshVaultWatcher(true)
     scheduleReminders()
-    registerGlobalShortcuts()
+    if (!isDemoStage) registerGlobalShortcuts()
 
     stateEvents.on('change', (next: AppState) => {
-      mainWindow?.webContents.send('state:updated', next)
+      sendToRenderer('state:updated', next)
       scheduleRemindersSoon()
       refreshVaultWatcher()
-      syncAgentBridge()
+      if (!isDemoMode) syncAgentBridge()
+      syncBackgroundThrottling()
     })
 
     const handleDisplayChange = (): void => {
       applyBounds()
-      setForegroundTarget(displayPhysicalSize(notchDisplay()))
+      if (!isDemoMode) setForegroundTarget(displayPhysicalSize(notchDisplay()))
+      if (
+        !isDemoStage &&
+        mainWindow &&
+        !mainWindow.isDestroyed() &&
+        !userHidden &&
+        !autoHidden &&
+        !sessionLocked
+      ) {
+        mainWindow.setAlwaysOnTop(true, 'screen-saver')
+      }
       // A monitor that went away can leave the panel parked off-screen.
       if (expanded) {
         const display = notchDisplay()
-        mainWindow?.webContents.send('notch:expanded', {
+        sendToRenderer('notch:expanded', {
           expanded: true,
           viewport: { width: display.bounds.width, height: display.bounds.height }
         })
@@ -1462,35 +2089,41 @@ if (!gotLock) {
     screen.on('display-metrics-changed', handleDisplayChange)
     screen.on('display-added', handleDisplayChange)
     screen.on('display-removed', handleDisplayChange)
-    powerMonitor.on('suspend', () => {
-      sessionLocked = true
-      localMedia.pauseLocalMediaMonitor()
-      pauseForegroundWatch()
-      logLine('system suspend')
-    })
-    powerMonitor.on('resume', () => {
-      sessionLocked = false
-      scheduleReminders()
-      applyBounds()
-      localMedia.resumeLocalMediaMonitor()
-      resumeForegroundWatch()
-      if (!expanded) backdrop.refreshBackdrop()
-      logLine('system resume')
-    })
-    powerMonitor.on('lock-screen', () => {
-      sessionLocked = true
-      logLine('session locked')
-    })
-    powerMonitor.on('unlock-screen', () => {
-      sessionLocked = false
-      applyBounds()
-      if (!expanded && !userHidden && !autoHidden) backdrop.refreshBackdrop()
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setAlwaysOnTop(true, 'screen-saver')
-        mainWindow.setSkipTaskbar(true)
-      }
-      logLine('session unlocked')
-    })
+    if (!isDemoMode) {
+      powerMonitor.on('suspend', () => {
+        sessionLocked = true
+        localMedia.pauseLocalMediaMonitor()
+        pauseForegroundWatch()
+        logLine('system suspend')
+      })
+      powerMonitor.on('resume', () => {
+        sessionLocked = false
+        scheduleReminders()
+        applyBounds()
+        localMedia.resumeLocalMediaMonitor()
+        if (!userHidden) resumeForegroundWatch()
+        presenceApplied = null
+        applyPresence()
+        assertTopmost()
+        logLine('system resume')
+      })
+      powerMonitor.on('lock-screen', () => {
+        sessionLocked = true
+        localMedia.pauseLocalMediaMonitor()
+        pauseForegroundWatch()
+        logLine('session locked')
+      })
+      powerMonitor.on('unlock-screen', () => {
+        sessionLocked = false
+        applyBounds()
+        localMedia.resumeLocalMediaMonitor()
+        if (!userHidden) resumeForegroundWatch()
+        presenceApplied = null
+        applyPresence()
+        assertTopmost()
+        logLine('session unlocked')
+      })
+    }
 
     app.on('activate', () => {
       if (!mainWindow) createWindow()
@@ -1504,14 +2137,27 @@ if (!gotLock) {
       clearTimeout(revealTimer)
       revealTimer = null
     }
-    logLine('quitting')
+    if (rendererRecoveryResetTimer) {
+      clearTimeout(rendererRecoveryResetTimer)
+      rendererRecoveryResetTimer = null
+    }
+    logLineSync('quitting')
+    disposeUpdater()
     flushState()
-    agentStatusStop()
-    localMedia.stopLocalMediaMonitor()
-    stopForegroundWatch()
+    calendar.flushCalendarCache()
+    if (!isDemoMode) {
+      agentStatusStop()
+      sessions.stopSessionActivity()
+      calendar.cancelCalendarConnect()
+      localMedia.stopLocalMediaMonitor()
+      stopForegroundWatch()
+    }
     obsidian.closeVaultWatcher()
     clearReminderTimers()
     globalShortcut.unregisterAll()
+    tray?.destroy()
+    tray = null
+    if (isDemoMode) cleanupDemoSandbox()
   })
 
   app.on('window-all-closed', () => {

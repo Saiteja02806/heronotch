@@ -1,9 +1,18 @@
-import { Minus, Plus, Undo2 } from 'lucide-react'
+import { ArrowUpRight, Bell, BellOff, BellRing, Droplet, Minus, Plus, Undo2 } from 'lucide-react'
 import { type CSSProperties } from 'react'
 import { WATER_GOAL_MAX, WATER_GOAL_MIN } from '../../../shared/types'
-import { useApp } from '../state/AppContext'
+import { useApp, useWaterReminderClock } from '../state/AppContext'
+import { playWaterRing } from '../lib/alertSound'
 import { formatTime } from '../lib/time'
-import { formatWaterMl, waterFill, waterToday } from '../lib/water'
+import {
+  WATER_REMINDER_PRESETS,
+  formatWaterCountdown,
+  formatWaterMl,
+  formatWaterReminderLong,
+  formatWaterReminderShort,
+  waterFill,
+  waterToday
+} from '../lib/water'
 
 function MeasuringGlass({
   fill,
@@ -11,6 +20,7 @@ function MeasuringGlass({
   label,
   tiny = false,
   shelf = false,
+  card = false,
   decorative = false
 }: {
   fill: number
@@ -18,13 +28,14 @@ function MeasuringGlass({
   label: string
   tiny?: boolean
   shelf?: boolean
+  card?: boolean
   decorative?: boolean
 }) {
   const level = Math.max(0, Math.min(1, fill))
   const steps = Math.max(1, Math.min(WATER_GOAL_MAX, marks))
   return (
     <div
-      className={`vessel ${tiny ? 'is-tiny' : ''} ${shelf ? 'is-shelf' : ''} ${level === 0 ? 'is-empty' : ''}`}
+      className={`vessel ${tiny ? 'is-tiny' : ''} ${shelf ? 'is-shelf' : ''} ${card ? 'is-card' : ''} ${level === 0 ? 'is-empty' : ''}`}
       style={{ '--fill': `${level * 100}%` } as CSSProperties}
       role={decorative ? undefined : 'img'}
       aria-label={decorative ? undefined : label}
@@ -39,48 +50,201 @@ function MeasuringGlass({
             ))}
           </div>
         )}
-        <div className="vessel-shine" />
       </div>
     </div>
   )
 }
 
-export function WaterGlance() {
-  const { state, addGlass, setPage } = useApp()
+export function WaterCard() {
+  const { state, addGlass, undoGlass, setPage } = useApp()
+  const { active, intervalMinutes, remainingMs, remindAt } = useWaterReminderClock()
   const water = waterToday(state.water)
   const count = water.pours.length
   const goal = water.goalGlasses
   const fill = waterFill(count, goal)
+  const reached = count >= goal && goal > 0
+  const lastPour = water.pours.at(-1)
 
   return (
-    <div className="water-glance">
-      <button type="button" className="water-glance-open" onClick={() => setPage('water')}>
-        <MeasuringGlass
-          tiny
-          fill={fill}
-          marks={goal}
-          label={`${count} of ${goal} glasses`}
-        />
-        <span className="water-glance-copy">
-          <span className="eyebrow">Water</span>
-          <strong>
-            {count} of {goal}
-          </strong>
+    <article className="card water-card" onClick={() => setPage('water')}>
+      <div className="card-heading">
+        <span className="eyebrow">
+          <Droplet size={11} className="is-water-icon" />
+          Water
         </span>
-        <span className="water-glance-track" aria-hidden="true">
-          <span style={{ width: `${fill * 100}%` }} />
+        <span className="mini-badge">
+          {active ? (
+            <>
+              <Bell size={11} />
+              Every {formatWaterReminderShort(intervalMinutes)}
+            </>
+          ) : (
+            formatWaterMl(count, water.glassMl)
+          )}
         </span>
-      </button>
-      <button type="button" className="water-glance-add" onClick={addGlass}>
-        <Plus size={13} />
-        Add a glass
-      </button>
-    </div>
+      </div>
+
+      <div className="water-card-body">
+        <div className="water-card-vessel">
+          <MeasuringGlass
+            card
+            fill={fill}
+            marks={goal}
+            label={`${count} of ${goal} glasses`}
+          />
+        </div>
+        <div className="water-card-info">
+          <h2>
+            {count} of {goal} {goal === 1 ? 'glass' : 'glasses'}
+          </h2>
+          <p>
+            {reached
+              ? `Daily goal reached · ${formatWaterMl(count, water.glassMl)} poured today.`
+              : active && remindAt
+                ? `Next reminder in ${formatWaterCountdown(remainingMs)} · rings at ${formatTime(remindAt)}.`
+                : lastPour
+                  ? `Last glass at ${formatTime(lastPour)} · ${formatWaterMl(count, water.glassMl)} today.`
+                  : `Daily goal: ${goal} ${goal === 1 ? 'glass' : 'glasses'} (${formatWaterMl(goal, water.glassMl)}).`}
+          </p>
+
+          <div className="water-glance-track" aria-hidden="true">
+            <span style={{ width: `${fill * 100}%` }} />
+          </div>
+          <div className="seek-times">
+            <span>{formatWaterMl(count, water.glassMl)}</span>
+            <span>{formatWaterMl(goal, water.glassMl)}</span>
+          </div>
+
+          <div className="water-card-controls">
+            <button
+              type="button"
+              className="water-glance-add"
+              onClick={(event) => {
+                event.stopPropagation()
+                addGlass()
+              }}
+            >
+              <Plus size={13} />
+              Add a glass
+            </button>
+            <button
+              type="button"
+              className="soft-button compact water-undo"
+              disabled={count === 0}
+              onClick={(event) => {
+                event.stopPropagation()
+                undoGlass()
+              }}
+            >
+              <Undo2 size={12} />
+              Undo
+            </button>
+            <span className="music-open">
+              Open water <ArrowUpRight size={11} />
+            </span>
+          </div>
+        </div>
+      </div>
+    </article>
   )
 }
 
 export function WaterPreview({ fill }: { fill: number }) {
   return <MeasuringGlass shelf decorative fill={fill} marks={8} label="" />
+}
+
+function WaterReminderControl() {
+  const { setWaterReminder, addGlass, showToast } = useApp()
+  const { active, intervalMinutes, remainingMs, remindAt } = useWaterReminderClock()
+
+  const chooseInterval = (minutes: number): void => {
+    setWaterReminder(minutes)
+    if (minutes <= 0) {
+      showToast('Water reminder off', 'Automatic drink reminders paused.', 'default', {
+        category: 'water',
+        section: 'water'
+      })
+      return
+    }
+    playWaterRing()
+    showToast(
+      `Water reminder · every ${formatWaterReminderLong(minutes)}`,
+      'It will ring when time is up, and resets whenever you log a glass.',
+      'success',
+      {
+        category: 'water',
+        section: 'water'
+      }
+    )
+  }
+
+  return (
+    <div className="water-reminder" role="group" aria-label="Water drink reminder">
+      <div className="water-reminder-head">
+        <span className="water-reminder-label">
+          {active ? <Bell size={12} /> : <BellOff size={12} />}
+          <span>Drink reminder</span>
+        </span>
+        {active && remindAt ? (
+          <span className="water-reminder-status is-active" aria-live="off">
+            Rings in <strong>{formatWaterCountdown(remainingMs)}</strong> · {formatTime(remindAt)}
+          </span>
+        ) : (
+          <span className="water-reminder-status">Off</span>
+        )}
+      </div>
+      <div className="water-reminder-pills">
+        {WATER_REMINDER_PRESETS.map((minutes) => {
+          const selected = intervalMinutes === minutes
+          return (
+            <button
+              key={minutes}
+              type="button"
+              className={`water-reminder-pill ${selected ? 'is-active' : ''}`}
+              onClick={() => chooseInterval(minutes)}
+              aria-pressed={selected}
+              title={
+                minutes === 0
+                  ? 'Turn off water reminder'
+                  : `Remind me to drink water every ${formatWaterReminderLong(minutes)}`
+              }
+            >
+              {formatWaterReminderShort(minutes)}
+            </button>
+          )
+        })}
+        {active && (
+          <button
+            type="button"
+            className="water-reminder-test"
+            onClick={() => {
+              playWaterRing()
+              showToast(
+                'Water reminder · Time to drink water',
+                `Every ${formatWaterReminderLong(intervalMinutes)} reminder preview.`,
+                'default',
+                {
+                  category: 'water',
+                  section: 'water',
+                  actions: [
+                    {
+                      label: 'Add a glass',
+                      variant: 'primary',
+                      onClick: () => addGlass()
+                    }
+                  ]
+                }
+              )
+            }}
+            title="Test reminder ring"
+            aria-label="Test reminder ring"
+          >
+            <BellRing size={12} />
+          </button>
+        )}
+      </div>
+    </div>
+  )
 }
 
 export function WaterPage() {
@@ -154,6 +318,8 @@ export function WaterPage() {
             Undo last
           </button>
         </div>
+
+        <WaterReminderControl />
 
         <div className="water-log">
           <span className="eyebrow">Today</span>

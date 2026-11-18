@@ -17,8 +17,16 @@
     "noUnusedParameters": false,
     "paths": {
       "@renderer/*": ["./src/renderer/src/*"],
-      "@shared/*": ["./src/shared/*"]
+      "@shared/*": ["./src/shared/*"],
+      "@demo/*": ["./demo/*"]
     }
   },
-  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/shared/**/*.ts"]
+  "include": [
+    "src/renderer/src/**/*.ts",
+    "src/renderer/src/**/*.tsx",
+    "src/shared/**/*.ts",
+    "demo/renderer/**/*.ts",
+    "demo/renderer/**/*.tsx",
+    "demo/shared/**/*.ts"
+  ]
 }

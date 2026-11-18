@@ -1,3 +1,26 @@
+import {
+  clockRangeInZone,
+  clockSortKeyInZone,
+  formatClockInZone,
+  resolveSystemTimeZone,
+  zonedDateTimeToTimestamp
+} from '../../../shared/timeZone'
+
+export {
+  PLANNER_TIME_ZONES,
+  canonicalTimeZone,
+  convertTaskSchedule,
+  formatDateKeyInZone,
+  formatOffsetBadge,
+  formatTaskClock,
+  friendlyTimeZoneLabel,
+  resolvePlannerTimeZone,
+  resolveSystemTimeZone,
+  sameTimeZoneOffset,
+  shortTimeZoneLabel,
+  todayKeyInZone
+} from '../../../shared/timeZone'
+
 export function pad(value: number, length = 2): string {
   return String(value).padStart(length, '0')
 }
@@ -44,8 +67,27 @@ export function formatDuration(ms: number): string {
   return `${minutes}:${pad(seconds)}`
 }
 
-export function formatTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+export function formatTime(timestamp: number, timeZone?: string): string {
+  return new Date(timestamp).toLocaleTimeString([], {
+    ...(timeZone ? { timeZone } : {}),
+    hour: 'numeric',
+    minute: '2-digit'
+  })
+}
+
+/** A clock time from an ISO timestamp; whole hours drop their zero minutes. */
+export function clockLabel(value: string, timeZone?: string): string {
+  return formatClockInZone(value, timeZone || resolveSystemTimeZone(), true)
+}
+
+/** "10 am – 10:15 am" reads twice as long as "10 – 10:15 am" in a narrow card. */
+export function clockRangeLabel(start: string, end: string, timeZone?: string): string {
+  return clockRangeInZone(start, end, timeZone || resolveSystemTimeZone())
+}
+
+/** Sort key for a timed item; untimed items sort after everything timed. */
+export function clockSortKey(value: string, timeZone?: string): string {
+  return clockSortKeyInZone(value, timeZone || resolveSystemTimeZone())
 }
 
 export function formatDateLong(key: string): string {
@@ -60,8 +102,11 @@ export function formatDateShort(key: string): string {
   return parseDateKey(key).toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
-export function timeToTimestamp(date: string, time?: string): number | null {
+export function timeToTimestamp(date: string, time?: string, timeZone?: string): number | null {
   if (!time) return null
+  if (timeZone) {
+    return zonedDateTimeToTimestamp(date, time, timeZone, { allowDstGap: true })
+  }
   const parsed = parseDateKey(date)
   const [hours, minutes] = time.split(':').map(Number)
   parsed.setHours(hours || 0, minutes || 0, 0, 0)

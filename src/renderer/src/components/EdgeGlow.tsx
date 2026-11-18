@@ -40,29 +40,33 @@ function outlinePath(width: number, height: number, radius: number, flatTop: boo
       `L ${round(right)} ${round(top)}`
     ].join(' ')
   }
-  const mid = (left + right) / 2
+  // Start on the left edge (mid-height) so the light enters from the side edges,
+  // runs down and around the bottom, up the right edge, then across the top.
+  const midY = (top + bottom) / 2
   return [
-    `M ${round(mid)} ${round(top)}`,
-    `H ${round(right - r)}`,
-    `A ${round(r)} ${round(r)} 0 0 1 ${round(right)} ${round(top + r)}`,
+    `M ${round(left)} ${round(midY)}`,
     `V ${round(bottom - r)}`,
-    `A ${round(r)} ${round(r)} 0 0 1 ${round(right - r)} ${round(bottom)}`,
-    `H ${round(left + r)}`,
-    `A ${round(r)} ${round(r)} 0 0 1 ${round(left)} ${round(bottom - r)}`,
+    `A ${round(r)} ${round(r)} 0 0 0 ${round(left + r)} ${round(bottom)}`,
+    `H ${round(right - r)}`,
+    `A ${round(r)} ${round(r)} 0 0 0 ${round(right)} ${round(bottom - r)}`,
     `V ${round(top + r)}`,
-    `A ${round(r)} ${round(r)} 0 0 1 ${round(left + r)} ${round(top)}`,
+    `A ${round(r)} ${round(r)} 0 0 0 ${round(right - r)} ${round(top)}`,
+    `H ${round(left + r)}`,
+    `A ${round(r)} ${round(r)} 0 0 0 ${round(left)} ${round(top + r)}`,
     'Z'
   ].join(' ')
 }
 
 export function EdgeGlow({ tick, ready }: { tick: number; ready: boolean }) {
   const probe = useRef<HTMLSpanElement>(null)
+  const lastTick = useRef(0)
   const [play, setPlay] = useState(0)
   const [box, setBox] = useState<Outline | null>(null)
 
   useEffect(() => {
-    if (!ready || tick === 0 || tick === claimedTick) return
-    claimedTick = tick
+    if (tick === 0 || tick === lastTick.current) return
+    lastTick.current = tick
+    if (!ready) return
     setPlay(tick)
   }, [tick, ready])
 
@@ -107,7 +111,7 @@ export function EdgeGlow({ tick, ready }: { tick: number; ready: boolean }) {
             <linearGradient id={gradient} gradientUnits="userSpaceOnUse" x1="0" y1="0" x2={box.w} y2={box.h}>
               <stop offset="0" stopColor="var(--accent)" stopOpacity="0.15" />
               <stop offset="0.42" stopColor="var(--accent)" />
-              <stop offset="1" stopColor="#fff6ea" />
+              <stop offset="1" stopColor="#ffffff" />
             </linearGradient>
           </defs>
           <path className="edge-glow-halo" d={path} pathLength={100} stroke={`url(#${gradient})`} />

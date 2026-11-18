@@ -1,6 +1,25 @@
 import type { SectionPrefs } from './sections'
+import type { HomeLayoutPrefs } from './homeLayout'
+import type { CalendarApi } from './calendar'
+import type { UpdateState } from './updates'
+import type { LicenseState } from './license'
 
-export type Accent = 'coral' | 'mint' | 'violet' | 'ice' | 'gold'
+export type { UpdateInstallKind, UpdateState, UpdateStatus } from './updates'
+export type { LicenseState, LicenseStatus } from './license'
+
+export type Accent =
+  | 'obsidian'
+  | 'blue'
+  | 'orange'
+  | 'red'
+  | 'coral'
+  | 'mint'
+  | 'violet'
+  | 'ice'
+  | 'gold'
+  | 'rose'
+  | 'emerald'
+  | 'custom'
 
 export type TimerMode = 'focus' | 'short' | 'long'
 
@@ -25,6 +44,7 @@ export interface Settings {
   agentStatus?: boolean
   agentStatusPort?: number
   accent: Accent
+  customAccent?: string
   vaultPath: string | null
   hoverDelay: number
   openTrigger: 'hover' | 'click'
@@ -57,11 +77,24 @@ export interface Settings {
   neverOver?: string[]
   /** Turn off motion in the notch, in addition to the system setting. */
   reduceMotion?: boolean
+  /** Quietly check GitHub Releases for newer versions on startup and periodically. */
+  autoCheckUpdates?: boolean
+  /**
+   * Time zone used in the Plan section (`local`, `calendar`, or an IANA zone).
+   */
+  plannerTimeZone?: string
+  /** Whether the first-run collapsed bar welcome intro has already been shown. */
+  welcomeSeen?: boolean
   /**
    * Which header sections are on the notch, and in what order.
    * Absent on older saves; filled in from the water switch on load.
    */
   sections?: SectionPrefs
+  /**
+   * Where the home cards sit. Absent on older saves; the default order is
+   * filled in on load.
+   */
+  homeLayout?: HomeLayoutPrefs
 }
 
 export interface NotchDisplay {
@@ -91,12 +124,17 @@ export interface Task {
   notes?: string
   date: string
   time?: string
+  /** IANA time zone in which `date` and `time` were entered. */
+  timeZone?: string
   done: boolean
   createdAt: number
   completedAt?: number
   remindAt?: number | null
   notifiedAt?: number | null
   priority: TaskPriority
+  /** Google Calendar event this task is mirrored to, when connected. */
+  eventId?: string
+  eventEtag?: string
 }
 
 export interface NotesState {
@@ -116,11 +154,37 @@ export interface PostureBaseline {
   version?: number
 }
 
+/** The six signals the 3-step setup records for one pose. */
+export interface PostureProfilePose {
+  neck: number
+  forwardHead: number
+  headOffset: number
+  tilt: number
+  headTilt: number
+  scale: number
+}
+
+/**
+ * What the person's own good, bad and close-to-screen sitting look like to the
+ * camera. The score is how far along the line from `good` toward `bad` (or
+ * `close`) they are right now, measured in units of their own spread.
+ */
+export interface PostureProfile {
+  version: 1
+  good: PostureProfilePose
+  bad: PostureProfilePose
+  close: PostureProfilePose
+  /** Natural wobble of each signal while sitting the good way. */
+  spread: PostureProfilePose
+  capturedAt: number
+}
+
 export interface PostureState {
   enabled: boolean
   notifications: boolean
   threshold: number
   baseline: PostureBaseline | null
+  profile: PostureProfile | null
   dayKey: string
   goodSeconds: number
   badSeconds: number
@@ -130,6 +194,8 @@ export interface PostureState {
 export const WATER_GOAL_MIN = 1
 export const WATER_GOAL_MAX = 16
 export const WATER_GLASS_ML = 250
+export const WATER_REMINDER_MIN = 0
+export const WATER_REMINDER_MAX = 480
 
 export interface WaterState {
   enabled: boolean
@@ -137,6 +203,10 @@ export interface WaterState {
   glassMl: number
   dayKey: string
   pours: number[]
+  /** Reminder interval in minutes (0 = off, e.g. 60 for 1h, 120 for 2h). */
+  reminderMinutes?: number
+  /** Timestamp (ms) when the next water reminder will ring. */
+  remindAt?: number | null
 }
 
 export interface FocusSession {
@@ -184,10 +254,13 @@ export type SessionProvider =
   | 'copilot'
   | 'aider'
   | 'cline'
+  | 'grok'
   | 'other'
 
-/** Tools that can report their state to Notch through the local hook bridge. */
-export type AgentTool = 'claude' | 'codex' | 'cursor'
+/** AI coding tools that can report status, approvals and questions via Notch's local hook bridge or native store poller. */
+export type AgentTool = 'antigravity' | 'claude' | 'codex' | 'cursor' | 'gemini' | 'cline' | 'copilot' | 'deepai' | 'grok'
+/** Tools that can show interactive multiple-choice questions in Notch (hook/native tools plus OpenCode). */
+export type QuestionTool = AgentTool | 'opencode'
 export type AgentState = 'working' | 'waiting' | 'done'
 
 export interface AgentStatus {
@@ -206,9 +279,50 @@ export interface AgentPermission {
   at: number
 }
 
+/** One selectable answer a session is offering, e.g. an AskUserQuestion option. */
+export interface AgentQuestionOption {
+  label: string
+  description: string
+}
+
+/** One question step inside a single- or multi-step question prompt. */
+export interface AgentQuestionStep {
+  id?: string
+  title: string
+  detail?: string
+  options: AgentQuestionOption[]
+  multiSelect: boolean
+}
+
+/** A session asking the user to pick from options instead of approve or deny. */
+export interface AgentQuestion {
+  id: string
+  tool: QuestionTool
+  title: string
+  detail: string
+  options: AgentQuestionOption[]
+  multiSelect: boolean
+  steps?: AgentQuestionStep[]
+  at: number
+}
+
+/** How well one coding tool is wired to the notch right now. */
+export interface AgentConnection {
+  tool: QuestionTool
+  label: string
+  /** ready: approvals work · idle: installed, open it to connect · attention: Notch needs a fix
+   *  limited: shows questions only · missing: not on this PC */
+  state: 'ready' | 'idle' | 'attention' | 'limited' | 'missing'
+  /** What the user can do or expect, in a short sentence. */
+  detail: string
+  /** A fix the row can run for the user. */
+  action?: 'claude-login'
+}
+
 export interface AgentSnapshot {
   statuses: AgentStatus[]
   pending: AgentPermission[]
+  questions: AgentQuestion[]
   port: number
   token: string
   running: boolean
@@ -228,6 +342,8 @@ export interface CodingSession {
   active: boolean
   subagent: boolean
   origin: string | null
+  /** Messages held back because this session was mid-turn when they were sent. */
+  queued?: number
 }
 
 export interface AppPresence {
@@ -254,9 +370,12 @@ export interface SessionSendResult {
   sessionId: string
   provider: SessionProvider
   label: string
-  /** True only when the message was found afterwards in that session. */
+  /** True only when the message was found afterwards in that session. A queued
+   * message is accepted, not delivered. */
   ok: boolean
-  status: 'delivered' | 'unconfirmed' | 'failed'
+  status: 'delivered' | 'unconfirmed' | 'failed' | 'queued'
+  /** 1-based place in that session's queue, for a queued result. */
+  position?: number
   error?: string
   code?: string
 }
@@ -398,6 +517,8 @@ export interface NotchMetrics {
   noticeAbove: boolean
   /** Style actually drawn. Differs from the setting on a secondary display. */
   style?: NotchStyle
+  /** Space the taskbar takes at the right and bottom of this display, so corner notices clear it. */
+  inset?: { right: number; bottom: number }
 }
 
 export interface BackdropEvent {
@@ -409,6 +530,7 @@ export interface ReminderEvent {
   title: string
   date: string
   time?: string
+  timeZone?: string
 }
 
 export interface MediaControlTarget {
@@ -430,12 +552,36 @@ export type SpotifyAction =
   | { type: 'transfer'; deviceId: string }
 
 export interface PendingApproval { id:string; session:string; operation:string; details:string; fingerprint:string }
+export interface OpenCodeQuestion {
+  id: string
+  sessionID: string
+  title: string
+  detail: string
+  options: AgentQuestionOption[]
+  multiSelect: boolean
+  steps?: AgentQuestionStep[]
+}
 export interface NotchApi {
-  approvals:{list():Promise<PendingApproval[]>;decide(fingerprint:string,reply:'once'|'reject',port:number):Promise<void>}
+  calendar: CalendarApi
+  approvals: {
+    list(): Promise<PendingApproval[]>
+    decide(fingerprint: string, reply: 'once' | 'reject', port: number): Promise<void>
+    questions(): Promise<OpenCodeQuestion[]>
+    replyQuestion(id: string, answers: string[][], port: number): Promise<void>
+    rejectQuestion(id: string, port: number): Promise<void>
+  }
   agent: {
     status(): Promise<AgentSnapshot>
     setup(tool: AgentTool): Promise<string>
+    connections(): Promise<AgentConnection[]>
+    /** Re-write Notch's hooks, then report each tool again. */
+    reconnect(): Promise<AgentConnection[]>
+    /** Open Claude Code's own sign-in so Notch can message Claude sessions. */
+    claudeLogin(): Promise<{ ok: boolean; error?: string }>
     decide(id: string, reply: 'allow' | 'deny'): Promise<void>
+    decideQuestion: (id: string, choices: number[] | number[][]) => Promise<void>
+    /** Let the tool show the question itself; Notch drops its hold. */
+    releaseQuestion: (id: string) => Promise<void>
     onUpdate(listener: (snapshot: AgentSnapshot) => void): () => void
   }
   phone: {
@@ -450,6 +596,21 @@ export interface NotchApi {
   getState: () => Promise<AppState>
   getVersion: () => Promise<string>
   setState: (patch: AppStatePatch) => Promise<AppState>
+  updater: {
+    getState: () => Promise<UpdateState>
+    check: (options?: { manual?: boolean }) => Promise<UpdateState>
+    download: () => Promise<UpdateState>
+    install: () => Promise<boolean>
+    openRelease: () => void
+    onState: (callback: (state: UpdateState) => void) => () => void
+  }
+  license: {
+    getState: () => Promise<LicenseState>
+    activate: (licenseKey: string) => Promise<LicenseState>
+    validate: () => Promise<LicenseState>
+    deactivate: () => Promise<LicenseState>
+    onState: (callback: (state: LicenseState) => void) => () => void
+  }
   setExpanded: (expanded: boolean) => Promise<boolean>
   setShape: (
     rect:
@@ -464,6 +625,11 @@ export interface NotchApi {
   notify: (title: string, body: string, silent?: boolean) => void
   openExternal: (url: string) => void
   copyText: (text: string) => void
+  postureTraceEnabled: () => Promise<boolean>
+  /** Seconds since the last keyboard or mouse input anywhere in Windows. */
+  systemIdleSeconds: () => Promise<number>
+  /** Test-only: shortens the away wait, in ms, when NOTCH_POSTURE_AWAY_MS is set. 0 otherwise. */
+  postureAwayOverrideMs: () => Promise<number>
   postureTrace: (sample: unknown) => void
   onExpanded: (callback: (event: NotchToggleEvent) => void) => () => void
   onBackdrop: (callback: (event: BackdropEvent) => void) => () => void
@@ -510,7 +676,19 @@ export interface NotchApi {
     send: (
       sessionId: string,
       message: string
-    ) => Promise<{ ok: boolean; pending?: boolean; error?: string; code?: string }>
+    ) => Promise<{
+      ok: boolean
+      pending?: boolean
+      queued?: boolean
+      position?: number
+      /** The chat is owned by the Claude app: Notch copied the message and
+       * opened that chat there for the user to paste. Nothing was sent. */
+      handedOff?: boolean
+      note?: string
+      error?: string
+      code?: string
+    }>
+    verify: (sessionId: string, message: string) => Promise<{ ok: boolean; error?: string }>
     focusCodex: () => Promise<boolean>
     codexLock: (
       sessionId: string

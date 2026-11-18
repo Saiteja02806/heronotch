@@ -1,0 +1,3 @@
+[functions.notch-calendar]
+# Authentication is checked with Supabase Auth before every operation.
+verify_jwt = false

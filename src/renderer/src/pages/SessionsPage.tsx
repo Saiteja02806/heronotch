@@ -5,6 +5,7 @@ import {
   Cpu,
   FolderOpen,
   Loader2,
+  LogIn,
   MessageSquare,
   RefreshCw,
   Search,
@@ -14,17 +15,21 @@ import {
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { CodingSession, SessionProvider } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
-import { useNow } from '../state/clock'
+import { useNowWhen } from '../state/clock'
 import { SESSION_META, SessionBadge, sessionAge } from '../components/SessionBits'
 import { OpenCodeApprovals } from '../components/OpenCodeApprovals'
 import { AgentStatus } from '../components/AgentStatus'
-const SENDABLE = new Set(['codex', 'opencode', 'antigravity', 'claude'])
+// 'deepai' is included so the Message option exists for DeepAI Code sessions.
+// DeepAI Code owns its threads and exposes no local delivery channel yet; if a
+// send is attempted, the main process refuses it with code 'deepai-external'
+// and the composer's status line explains, so no always-on notice is needed.
+const SENDABLE = new Set(['codex', 'opencode', 'antigravity', 'claude', 'deepai'])
 
 type DeliveryPhase = 'idle' | 'sending' | 'delivered' | 'unconfirmed' | 'failed'
 
 export function SessionsPage() {
-  const { sessions, sessionsLoading, refreshSessions, showToast, repliedSessionId, state } = useApp()
-  const now = useNow()
+  const { sessions, sessionsLoading, refreshSessions, showToast, repliedSessionId, state, expanded } = useApp()
+  const now = useNowWhen(expanded)
   const compact = state.settings.panelSize === 'compact'
   const [query, setQuery] = useState('')
   const [appFilter, setAppFilter] = useState<SessionProvider | null>(null)
@@ -39,7 +44,52 @@ export function SessionsPage() {
   const [watching, setWatching] = useState(false)
   const composerRef = useRef<CodingSession | null>(null)
   composerRef.current = composer
+  const noteTimer = useRef<number | null>(null)
+  const phaseRef = useRef<DeliveryPhase>('idle')
+  // The message is cleared the moment it goes out, so keep it for restoring on
+  // a failure.
+  const lastSentRef = useRef('')
+  // Row-level feedback for a message that was handed to the queue or delivered
+  // later, while its composer was already closed.
+  const [rowFlash, setRowFlash] = useState<Record<string, { text: string; tone: 'ok' | 'wait' }>>({})
+  const rowTimers = useRef(new Map<string, number>())
   const sending = phase === 'sending'
+  phaseRef.current = phase
+
+  const flashRow = (sessionId: string, text: string, tone: 'ok' | 'wait', hold = 2600): void => {
+    const running = rowTimers.current.get(sessionId)
+    if (running) window.clearTimeout(running)
+    setRowFlash((current) => ({ ...current, [sessionId]: { text, tone } }))
+    rowTimers.current.set(
+      sessionId,
+      window.setTimeout(() => {
+        rowTimers.current.delete(sessionId)
+        setRowFlash((current) => {
+          const next = { ...current }
+          delete next[sessionId]
+          return next
+        })
+      }, hold)
+    )
+  }
+
+  const stopNoteTimer = (): void => {
+    if (noteTimer.current) window.clearTimeout(noteTimer.current)
+    noteTimer.current = null
+  }
+
+  const flashNote = (text: string, hold = 2400): void => {
+    stopNoteTimer()
+    setSendNote(text)
+    noteTimer.current = window.setTimeout(() => {
+      noteTimer.current = null
+      setSendNote(null)
+    }, hold)
+  }
+
+  useEffect(() => () => {
+    if (noteTimer.current) window.clearTimeout(noteTimer.current)
+  }, [])
 
   const all = sessions?.sessions || []
   const subagentCount = all.filter((session) => session.subagent).length
@@ -68,6 +118,12 @@ export function SessionsPage() {
     [filtered]
   )
 
+  // The heading names what is actually here instead of a fixed tool list.
+  const toolCount = useMemo(
+    () => new Set((sessions?.sessions || []).map((session) => session.provider)).size,
+    [sessions]
+  )
+
   const openProject = async (directory: string | null): Promise<void> => {
     if (!directory) return
     try {
@@ -87,8 +143,9 @@ export function SessionsPage() {
     setWatching(false)
   }
 
+  // A send keeps running in the main process, so closing the composer never
+  // waits for it.
   const closeComposer = (): void => {
-    if (sending) return
     setComposer(null)
     setMessage('')
     setPhase('idle')
@@ -130,24 +187,48 @@ export function SessionsPage() {
 
   useEffect(() => {
     return window.notch.sessions.onSendResult((result) => {
+      // A queued message is delivered later, long after its composer closed, so
+      // the row itself has to report it.
+      if (result.status === 'queued') {
+        flashRow(result.sessionId, `Queued · ${result.position ?? 1}`, 'wait')
+        void refreshSessions()
+        return
+      }
+      if (result.status === 'delivered') {
+        flashRow(result.sessionId, window.notchDemo ? 'Delivered' : 'Sent', 'ok')
+        void refreshSessions()
+      }
       const current = composerRef.current
       if (!current || current.id !== result.sessionId) return
       if (result.status === 'delivered') {
-        setPhase('delivered')
-        setSendNote(`Delivered to this ${result.label} session.`)
+        // The composer already said "Sent" when the command started.
+        if (phaseRef.current === 'sending') {
+          setPhase('delivered')
+          flashNote(window.notchDemo ? 'Delivered' : 'Sent')
+        }
         setSendErrorCode(null)
         setMessage('')
         return
       }
       if (result.status === 'unconfirmed') {
         setPhase('unconfirmed')
-        setSendNote(result.error || 'The command finished, but that message was not found in this session.')
+        stopNoteTimer()
+        setSendNote('Not visible in the session yet')
+        setMessage((current) => (current.trim() ? current : lastSentRef.current))
         return
       }
       setPhase('failed')
-      setSendNote(result.error || 'The agent command failed.')
+      stopNoteTimer()
+      setMessage((current) => (current.trim() ? current : lastSentRef.current))
+      setSendNote(
+        result.code === 'codex-open'
+          ? 'Codex has this thread open, so Notch keeps the message and sends it as soon as you close the thread.'
+          : result.error || 'The agent command failed.'
+      )
+      if (result.code === 'codex-open') setWatching(true)
+      if (result.code === 'session-gone') void refreshSessions()
     })
-  }, [])
+  }, [refreshSessions])
 
   const toggleWatch = (): void => {
     if (watching) {
@@ -164,18 +245,80 @@ export function SessionsPage() {
   const send = async (): Promise<void> => {
     if (!composer || !message.trim() || sending) return
     const text = message
+    lastSentRef.current = text
     setPhase('sending')
+    stopNoteTimer()
     setSendNote(null)
     setSendErrorCode(null)
     try {
       const result = await window.notch.sessions.send(composer.id, text)
-      if (result.pending) return
+      if (result.queued) {
+        // The session is mid-turn: the message is held and delivered when it
+        // goes quiet. Close the composer — the queue owns the text now.
+        setPhase('idle')
+        setMessage('')
+        setSendNote(null)
+        setSendErrorCode(null)
+        flashRow(composer.id, `Queued · ${result.position ?? 1}`, 'wait')
+        setComposer(null)
+        void refreshSessions()
+        return
+      }
+      if (result.handedOff) {
+        // The Claude app owns this chat, so Notch opened it there with the
+        // message on the clipboard. Nothing was sent; say what to do next.
+        setPhase('unconfirmed')
+        setSendNote(result.note || 'Notch copied your message. Paste it into the chat in the Claude app.')
+        setSendErrorCode(result.code || null)
+        flashRow(composer.id, 'Copied', 'wait')
+        return
+      }
+      if (result.pending) {
+        // The command is running. Delivery is verified in the background, so the
+        // composer only says "Sent".
+        setPhase('delivered')
+        setMessage('')
+        flashNote(window.notchDemo ? 'Delivered' : 'Sent')
+        return
+      }
       setPhase('failed')
-      setSendNote(result.error || 'The agent command could not be started.')
+      stopNoteTimer()
+      setSendNote(
+        result.code === 'codex-open'
+          ? 'Codex has this thread open, so Notch keeps the message and sends it as soon as you close the thread.'
+          : result.error || 'The agent command could not be started.'
+      )
       setSendErrorCode(result.code || null)
+      if (result.code === 'codex-open') setWatching(true)
+      if (result.code === 'session-gone') void refreshSessions()
     } catch (error) {
       setPhase('failed')
       setSendNote(error instanceof Error ? error.message : 'Could not send the message.')
+    }
+  }
+
+  // Provider commands can exit before their store is flushed; re-reading it is
+  // how an "unconfirmed" send becomes a confirmed one without sending twice.
+  const checkDelivery = async (): Promise<void> => {
+    if (!composer || !message.trim() || sending) return
+    const text = message
+    setPhase('sending')
+    setSendNote('Reading that session’s local store…')
+    setSendErrorCode(null)
+    try {
+      const result = await window.notch.sessions.verify(composer.id, text)
+      if (composerRef.current?.id !== composer.id) return
+      if (result.ok) {
+        setPhase('delivered')
+        setMessage('')
+        flashNote(window.notchDemo ? 'Delivered' : 'Sent')
+        return
+      }
+      setPhase('unconfirmed')
+      setSendNote(result.error || 'That message is still not in the session’s store.')
+    } catch (error) {
+      setPhase('unconfirmed')
+      setSendNote(error instanceof Error ? error.message : 'Could not read the session store.')
     }
   }
 
@@ -195,7 +338,6 @@ export function SessionsPage() {
 
   return (
     <div className="sessions-page">
-      <OpenCodeApprovals />
       <aside className="sessions-apps-column">
         <div className="sessions-apps-head">
           <span className="eyebrow">Running locally</span>
@@ -260,6 +402,7 @@ export function SessionsPage() {
       </aside>
 
       <section className="sessions-list-panel">
+        <OpenCodeApprovals />
         <AgentStatus />
         <header className="sessions-head">
           <div>
@@ -269,7 +412,9 @@ export function SessionsPage() {
             </span>
             <h1>{grouped.active.length ? `${grouped.active.length} live` : 'Session board'}</h1>
             <p>
-              Codex, OpenCode and Anti Gravity conversations on this machine.
+              {toolCount > 1
+                ? `Conversations from ${toolCount} coding tools on this machine.`
+                : 'Conversations on this machine.'}
               {subagentCount > 0 ? ` ${subagentCount} subagent${subagentCount === 1 ? '' : 's'} tucked away.` : ''}
             </p>
           </div>
@@ -439,6 +584,7 @@ export function SessionsPage() {
         note={open ? sendNote : null}
         errorCode={open ? sendErrorCode : null}
         replied={repliedSessionId === session.id}
+        flash={rowFlash[session.id]}
         onMessage={() => openComposer(session)}
         onOpen={() => void openProject(session.directory)}
         onDraft={(value) => {
@@ -450,6 +596,7 @@ export function SessionsPage() {
           }
         }}
         onSend={() => void send()}
+        onCheck={() => void checkDelivery()}
         onCancel={closeComposer}
         onCopy={() => void copyAndOpenChatGpt()}
         watching={watching}
@@ -472,10 +619,12 @@ function SessionRow({
   onOpen,
   onDraft,
   onSend,
+  onCheck,
   onCancel,
   onCopy,
   watching,
-  onWatch
+  onWatch,
+  flash
 }: {
   session: CodingSession
   now: number
@@ -489,22 +638,32 @@ function SessionRow({
   onOpen: () => void
   onDraft: (value: string) => void
   onSend: () => void
+  onCheck: () => void
   onCancel: () => void
   onCopy: () => void
   watching: boolean
   onWatch: () => void
+  flash?: { text: string; tone: 'ok' | 'wait' }
 }) {
   const meta = SESSION_META[session.provider]
   const canSend = SENDABLE.has(session.provider) && !session.subagent
   const sending = phase === 'sending'
   const inputRef = useRef<HTMLInputElement>(null)
+  const noteRef = useRef<HTMLParagraphElement>(null)
   useEffect(() => {
     if (!open) return
     inputRef.current?.focus({ preventScroll: true })
     inputRef.current?.closest('.session-row')?.scrollIntoView({ block: 'nearest' })
   }, [open])
+  // A status line ("Sent", an error) can land below the fold in compact mode.
+  // Keep the feedback the user is waiting for in view.
+  useEffect(() => {
+    if (!open || !note) return
+    noteRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [open, note])
   return (
     <div
+      data-session-id={session.id}
       className={`session-row ${session.active ? 'is-live' : ''} ${open ? 'is-composing' : ''} ${
         replied ? 'is-replied' : ''
       }`}
@@ -529,6 +688,13 @@ function SessionRow({
           </span>
         </button>
         <div className="session-row-side">
+          {session.queued ? (
+            <span className="session-queued" title="Held until this session finishes its current turn">
+              <Clock3 size={10} /> {session.queued} queued
+            </span>
+          ) : flash ? (
+            <span className={`session-flash is-${flash.tone}`}>{flash.text}</span>
+          ) : null}
           {session.active ? (
             <span className="session-live"><i /> live</span>
           ) : (
@@ -536,6 +702,7 @@ function SessionRow({
           )}
           {canSend && (
             <button
+              data-demo-message-btn={session.id}
               className={`session-send ${open ? 'is-on' : ''}`}
               onClick={onMessage}
               title={`Send a message to ${meta.label}`}
@@ -580,15 +747,44 @@ function SessionRow({
               disabled={sending}
               aria-label={`Message this ${meta.label} session`}
             />
-            <button type="button" className="soft-button compact session-inline-cancel" onClick={onCancel} disabled={sending}>
+            <button type="button" className="soft-button compact session-inline-cancel" onClick={onCancel}>
               Cancel
             </button>
-            <button type="submit" className="primary-button compact session-inline-send" disabled={!message.trim() || sending}>
+            <button
+              type="submit"
+              className="primary-button compact session-inline-send"
+              disabled={!message.trim() || sending}
+            >
               {sending ? <Loader2 size={12} className="spin" /> : <MessageSquare size={12} />}
               {sending ? 'Sending' : 'Send'}
             </button>
           </div>
-          {note && <p className={`session-inline-status is-${phase}`}>{note}</p>}
+          {note && <p ref={noteRef} className={`session-inline-status is-${phase}`}>{note}</p>}
+          {/* Only an unconfirmed send can be settled by reading the store again;
+              a failed command never wrote anything. */}
+          {phase === 'unconfirmed' && (
+            <div className="session-inline-codex">
+              <button
+                type="button"
+                className="soft-button compact session-inline-copy"
+                onClick={onCheck}
+                disabled={sending || !message.trim()}
+              >
+                <RefreshCw size={12} /> Check again
+              </button>
+            </div>
+          )}
+          {errorCode === 'claude-signin' && (
+            <div className="session-inline-codex">
+              <button
+                type="button"
+                className="primary-button compact session-inline-copy"
+                onClick={() => void window.notch.agent.claudeLogin()}
+              >
+                <LogIn size={12} /> Sign in to Claude Code
+              </button>
+            </div>
+          )}
           {errorCode === 'codex-open' && (
             <div className="session-inline-codex">
               <button

@@ -15,7 +15,7 @@ export function PhoneTransfer({
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState('')
   const fileInput = useRef<HTMLInputElement>(null)
-  const { showToast } = useApp()
+  const { showToast, expanded } = useApp()
 
   useEffect(() => {
     let active = true
@@ -27,12 +27,17 @@ export function PhoneTransfer({
         })
         .catch(() => {})
     void refresh()
-    const timer = setInterval(refresh, 2000)
+    if (!expanded) {
+      return () => {
+        active = false
+      }
+    }
+    const timer = setInterval(refresh, window.notchDemo ? 350 : 2000)
     return () => {
       active = false
       clearInterval(timer)
     }
-  }, [])
+  }, [expanded])
 
   async function run(task: () => Promise<unknown>) {
     setBusy(true)
@@ -130,11 +135,53 @@ export function PhoneTransfer({
                 Transfer is running — scan the code with your phone. Files or text your phone sends
                 appear here when it is done.
               </p>
+              {window.notchDemo && (
+                <div className={`demo-phone-card ${session.received ? 'is-received' : ''}`}>
+                  <div className="demo-phone-steps">
+                    <span className={!session.received ? 'is-active' : 'is-done'}>1. Scan QR</span>
+                    <span className={session.received ? 'is-active' : ''}>2. Send on phone</span>
+                    <span>3. Paste on Mac/PC</span>
+                  </div>
+                  <div className="demo-phone-card-head">
+                    <span>
+                      {session.received ? 'iPhone → Laptop · Same Wi-Fi' : 'Local Wi-Fi · 192.168.1.42:7482'}
+                    </span>
+                    <strong>{session.received ? 'Received · 0 Cloud' : 'Ready to scan'}</strong>
+                  </div>
+                  {session.received ? (
+                    <div className="demo-phone-rx-box">
+                      <p className="demo-phone-file">
+                        <strong>{session.received.name}</strong> · 4.2 KB markdown drop over LAN
+                      </p>
+                      <code className="demo-phone-snippet">
+                        "Ship Hero Notch v1.0 · verify macOS notch &amp; Win11 top edge"
+                      </code>
+                    </div>
+                  ) : (
+                    <p className="demo-phone-file">
+                      Point your phone camera at the QR code — opens a local browser drop page with no app install.
+                    </p>
+                  )}
+                </div>
+              )}
               {session.received && (
                 <button
                   className="primary-button"
+                  data-demo-phone-collect="true"
                   disabled={busy}
-                  onClick={() => void run(() => window.notch.phone.collect())}
+                  onClick={() =>
+                    void run(async () => {
+                      const rx = session.received!
+                      await window.notch.phone.collect()
+                      if (window.notchDemo) {
+                        showToast(
+                          'Received from phone',
+                          rx.text ? `${rx.name} copied to clipboard` : `Saved ${rx.name}`,
+                          'success'
+                        )
+                      }
+                    })
+                  }
                 >
                   {session.received.text ? 'Copy received text' : `Save ${session.received.name}`}
                 </button>
@@ -149,6 +196,14 @@ export function PhoneTransfer({
           {session ? (
             <div className="phone-session is-large">
               <img className="phone-qr is-large" src={session.qr} alt="Scan to transfer on the same Wi-Fi" />
+              {window.notchDemo && (
+                <span className={`demo-phone-status-pill ${session.received ? 'is-done' : ''}`}>
+                  <Wifi size={11} />
+                  {session.received
+                    ? '✓ Sent from iPhone Safari · Same Wi-Fi (0 cloud)'
+                    : 'Scan with iPhone / Android camera · Same Wi-Fi only'}
+                </span>
+              )}
               <p className="phone-copy">
                 Scan with your phone camera. Your phone must be on the same Wi-Fi as this laptop —
                 mobile data or another network will not reach it. The link lasts five minutes.

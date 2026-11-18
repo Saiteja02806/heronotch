@@ -155,12 +155,19 @@ export function dockedPanelSize(
     // second column. Keep this in step with the compact rules in styles.css.
     return {
       width: Math.max(1, Math.round(Math.min(520, viewportWidth - 40))),
-      height: Math.max(1, Math.round(Math.min(360, Math.max(320, viewportHeight * 0.4))))
+      height: Math.max(
+        1,
+        Math.round(Math.min(360, Math.max(280, viewportHeight * 0.45), Math.max(240, viewportHeight - 24)))
+      )
     }
   }
   return {
-    width: Math.round(Math.min(1120, Math.max(900, viewportWidth * 0.76), viewportWidth - 40)),
-    height: Math.round(Math.min(600, Math.max(560, viewportHeight * 0.72)))
+    width: Math.round(
+      Math.min(1120, Math.max(900, viewportWidth * 0.84), Math.max(320, viewportWidth - 40))
+    ),
+    height: Math.round(
+      Math.min(600, Math.max(460, viewportHeight * 0.78), Math.max(320, viewportHeight - 24))
+    )
   }
 }
 

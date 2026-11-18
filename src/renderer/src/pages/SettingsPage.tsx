@@ -2,14 +2,19 @@ import {
   ArrowUpRight,
   Bell,
   Blocks,
+  Bot,
+  CalendarDays,
   Check,
   ChevronRight,
   Copy,
   ExternalLink,
+  FileText,
   FolderOpen,
   GripVertical,
   Info,
   Keyboard,
+  LayoutGrid,
+  ListChecks,
   Loader2,
   LogOut,
   Music2,
@@ -22,6 +27,7 @@ import {
   SlidersHorizontal,
   Smartphone,
   Sparkles,
+  Timer,
   Wifi
 } from 'lucide-react'
 import { motion } from 'framer-motion'
@@ -34,10 +40,11 @@ import {
 } from 'react'
 import type { Accent, NotchDisplay, NotchPosition, NotchStyle } from '../../../shared/types'
 import { placementPreview } from '../../../shared/notchLayout'
+import { friendlyMediaName, normalizeMediaPreference } from '../../../shared/mediaFollow'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
 import { useVaultPicker } from '../hooks/useVaultPicker'
-import { ACCENTS } from '../lib/theme'
+import { ACCENTS, PRESET_ACCENTS, resolveAccent } from '../lib/theme'
 import {
   SECTION_META,
   moveSection,
@@ -49,12 +56,25 @@ import {
 } from '../lib/sections'
 import { formatTime } from '../lib/time'
 import { PhoneTransfer } from '../components/PhoneTransfer'
+import { LicenseCard } from '../components/LicenseCard'
+import { AgentConnections } from '../components/AgentConnections'
+import { UpdatesCard } from '../components/UpdatesCard'
+import {
+  HOME_CARD_IDS,
+  HOME_GRID_COLUMNS,
+  homeSlotLabel,
+  moveHomeCard,
+  normalizeHomeLayout,
+  type HomeCardId
+} from '../../../shared/homeLayout'
 
-type Section = 'appearance' | 'notch' | 'sections' | 'obsidian' | 'spotify' | 'phone' | 'about'
+type Section = 'appearance' | 'notch' | 'behavior' | 'home' | 'sections' | 'obsidian' | 'spotify' | 'phone' | 'about'
 
 const SECTIONS: { id: Section; label: string; icon: typeof Palette }[] = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'notch', label: 'Notch', icon: PanelTop },
+  { id: 'behavior', label: 'Behavior', icon: SlidersHorizontal },
+  { id: 'home', label: 'Home', icon: LayoutGrid },
   { id: 'sections', label: 'Sections', icon: Blocks },
   { id: 'obsidian', label: 'Notes', icon: NotebookPen },
   { id: 'spotify', label: 'Spotify', icon: Music2 },
@@ -144,6 +164,7 @@ function SectionManager() {
         return (
           <div
             key={id}
+            data-demo-section-row={id}
             className={`section-row ${on ? 'is-on' : ''} ${dragId === id ? 'is-dragging' : ''} ${overId === id && dragId !== id ? 'is-over' : ''}`}
             onDragOver={(event) => {
               event.preventDefault()
@@ -186,6 +207,7 @@ function SectionManager() {
             <span className="section-shortcut">{shortcut >= 0 ? <kbd>{shortcut + 1}</kbd> : ''}</span>
             <button
               type="button"
+              data-demo-section-toggle={id}
               className={`switch ${on ? 'is-on' : ''}`}
               role="switch"
               aria-checked={on}
@@ -204,6 +226,169 @@ function SectionManager() {
           </div>
         )
       })}
+    </div>
+  )
+}
+
+const HOME_CARD_META: Record<HomeCardId, { label: string; note: string; icon: typeof Palette }> = {
+  timer: { label: 'Focus', note: 'Timer, modes and start controls.', icon: Timer },
+  music: { label: 'Now playing', note: 'Player, album art and queue.', icon: Music2 },
+  tasks: { label: 'Today', note: 'Today’s tasks and quick add.', icon: ListChecks },
+  notes: { label: 'Notes', note: 'Recent notes from your folder.', icon: FileText },
+  sessions: { label: 'Coding sessions', note: 'Live agent activity and recent runs.', icon: Bot },
+  calendar: { label: 'Calendar', note: 'Month grid and what is next.', icon: CalendarDays }
+}
+
+/**
+ * Moves the home cards. The map mirrors the three-column home grid, so dropping
+ * a card is the same as choosing its X-Y spot. Cards keep their size; the saved
+ * order becomes the grid order.
+ */
+function HomeLayoutManager() {
+  const { state, updateSettings, showToast } = useApp()
+  const layout = normalizeHomeLayout(state.settings.homeLayout)
+  const showMusic = sectionVisible(state, 'music')
+  const showPlan = sectionVisible(state, 'planner')
+  const showWater = sectionVisible(state, 'water')
+  const showNotes = sectionVisible(state, 'notes')
+  const showSessions = sectionVisible(state, 'sessions')
+  // Water borrows the now-playing slot when music is off, exactly as Home does.
+  const waterTakesMusicSlot = !showMusic && showWater
+  const available: Record<HomeCardId, boolean> = {
+    timer: true,
+    music: showMusic || waterTakesMusicSlot,
+    tasks: showPlan,
+    notes: showNotes,
+    sessions: showSessions,
+    calendar: showPlan
+  }
+  const shown = layout.order.filter((id) => available[id])
+  const hidden = layout.order.filter((id) => !available[id])
+  const [dragId, setDragId] = useState<HomeCardId | null>(null)
+  const [overIndex, setOverIndex] = useState<number | null>(null)
+
+  const labelFor = (id: HomeCardId): string =>
+    id === 'music' && waterTakesMusicSlot ? 'Water' : HOME_CARD_META[id].label
+
+  const saveOrder = (visibleOrder: HomeCardId[]): void => {
+    // Cards whose section is off wait at the end, so turning one back on never
+    // reshuffles spots that are already set.
+    updateSettings({ homeLayout: { order: [...visibleOrder, ...hidden] } })
+  }
+
+  const place = (id: HomeCardId, index: number): void => {
+    saveOrder(moveHomeCard(shown, id, index))
+    setDragId(null)
+    setOverIndex(null)
+  }
+
+  const moveBy = (id: HomeCardId, index: number, delta: number): void => {
+    const target = Math.max(0, Math.min(shown.length - 1, index + delta))
+    if (target !== index) saveOrder(moveHomeCard(shown, id, target))
+  }
+
+  const reset = (): void => {
+    updateSettings({ homeLayout: { order: [...HOME_CARD_IDS] } })
+    setDragId(null)
+    setOverIndex(null)
+    showToast('Home layout reset', 'The cards are back in their original spots.', 'success')
+  }
+
+  return (
+    <div className="home-layout">
+      <div className="home-layout-map" role="list" aria-label="Home card positions">
+        {Array.from({ length: HOME_CARD_IDS.length }).map((_, index) => {
+          const id = shown[index]
+          if (!id) {
+            return (
+              <div
+                key={`empty-${index}`}
+                role="listitem"
+                aria-label={`Empty spot, ${homeSlotLabel(index)}`}
+                className={`home-layout-slot is-empty ${dragId && overIndex === index ? 'is-over' : ''}`}
+                onDragOver={(event) => {
+                  if (!dragId) return
+                  event.preventDefault()
+                  if (overIndex !== index) setOverIndex(index)
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  if (dragId) place(dragId, shown.length - 1)
+                }}
+              >
+                <span className="home-layout-empty-label">{homeSlotLabel(index)}</span>
+              </div>
+            )
+          }
+          const meta = HOME_CARD_META[id]
+          const Icon = meta.icon
+          return (
+            <div
+              key={id}
+              role="listitem"
+              className={`home-layout-slot ${dragId === id ? 'is-dragging' : ''} ${
+                overIndex === index && dragId !== id ? 'is-over' : ''
+              }`}
+              onDragOver={(event) => {
+                event.preventDefault()
+                if (overIndex !== index) setOverIndex(index)
+              }}
+              onDrop={(event) => {
+                event.preventDefault()
+                if (dragId) place(dragId, index)
+              }}
+            >
+              <button
+                type="button"
+                className="home-layout-card"
+                draggable
+                onDragStart={(event) => {
+                  event.dataTransfer.effectAllowed = 'move'
+                  event.dataTransfer.setData('text/plain', id)
+                  setDragId(id)
+                }}
+                onDragEnd={() => {
+                  setDragId(null)
+                  setOverIndex(null)
+                }}
+                onKeyDown={(event) => {
+                  const deltas: Record<string, number> = {
+                    ArrowLeft: -1,
+                    ArrowRight: 1,
+                    ArrowUp: -HOME_GRID_COLUMNS,
+                    ArrowDown: HOME_GRID_COLUMNS
+                  }
+                  const delta = deltas[event.key]
+                  if (delta === undefined) return
+                  event.preventDefault()
+                  moveBy(id, index, delta)
+                }}
+                aria-label={`${labelFor(id)}, ${homeSlotLabel(index)}. Drag it, or use the arrow keys to move it.`}
+                title={meta.note}
+              >
+                <span className="home-layout-icon" aria-hidden="true">
+                  <Icon size={14} />
+                </span>
+                <span className="home-layout-copy">
+                  <strong>{labelFor(id)}</strong>
+                  <small>{homeSlotLabel(index)}</small>
+                </span>
+                <GripVertical size={13} className="home-layout-grip" aria-hidden="true" />
+              </button>
+            </div>
+          )
+        })}
+      </div>
+      <div className="home-layout-footer">
+        <span>
+          {hidden.length > 0
+            ? `Off the home panel: ${hidden.map((id) => labelFor(id)).join(', ')}. Turn a section back on in Sections and it lands in the last spot.`
+            : 'All six cards are on the home panel.'}
+        </span>
+        <button className="soft-button compact" onClick={reset}>
+          Reset layout
+        </button>
+      </div>
     </div>
   )
 }
@@ -244,8 +429,11 @@ export function SettingsPage() {
     setExpanded,
     setPage,
     settingsSection,
-    setSettingsSection
+    setSettingsSection,
+    updateState
   } = useApp()
+  const hasUpdateNotice =
+    updateState?.status === 'available' || updateState?.status === 'downloaded'
   const { status, connecting, connect, disconnect, playerName } = useMedia()
   const { chooseVault } = useVaultPicker()
   const [version, setVersion] = useState('')
@@ -257,7 +445,6 @@ export function SettingsPage() {
   useEffect(() => {
     mainRef.current?.scrollTo({ top: 0 })
   }, [section])
-  const [name, setName] = useState(state.settings.userName)
   const [clientId, setClientId] = useState(state.settings.spotifyClientId)
   const [port, setPort] = useState(String(state.settings.spotifyRedirectPort))
   const [position, setPosition] = useState<NotchPosition>(
@@ -303,9 +490,6 @@ export function SettingsPage() {
   useEffect(() => {
     setPort(String(state.settings.spotifyRedirectPort))
   }, [state.settings.spotifyRedirectPort])
-  useEffect(() => {
-    setName(state.settings.userName)
-  }, [state.settings.userName])
 
   useEffect(() => {
     if (!draggingPlacement) {
@@ -314,14 +498,14 @@ export function SettingsPage() {
   }, [state.settings.notchPosition, draggingPlacement])
   const active = SECTIONS.find((item) => item.id === section) || SECTIONS[0]
   const ActiveIcon = active.icon
-  const accent = ACCENTS[state.settings.accent]
+  const accent = resolveAccent(state.settings.accent, state.settings.customAccent)
+  const customHex = state.settings.customAccent || '#7ec8e3'
   const vaultName = state.settings.vaultPath?.split(/[\\/]/).filter(Boolean).pop()
   const redirectUri = status?.redirectUri || `http://127.0.0.1:${state.settings.spotifyRedirectPort}/callback`
-
-  const saveName = (): void => {
-    updateSettings({ userName: name.trim() })
-    showToast('Saved', name.trim() ? `Calling you ${name.trim()}.` : 'Name cleared.', 'success')
-  }
+  const mediaPreference = normalizeMediaPreference(state.settings.mediaSource)
+  const savedSourceMissing =
+    mediaPreference !== 'auto' &&
+    !(status?.mediaSources || []).some((source) => source.id === mediaPreference)
 
   const saveSpotify = async (): Promise<void> => {
     setSavingSpotify(true)
@@ -359,20 +543,6 @@ export function SettingsPage() {
     window.notch.copyText(redirectUri)
     setCopied(true)
     setTimeout(() => setCopied(false), 1800)
-  }
-
-  const copyAgentSetup = async (tool: 'claude' | 'codex' | 'cursor'): Promise<void> => {
-    try {
-      const snippet = await window.notch.agent.setup(tool)
-      window.notch.copyText(snippet)
-      showToast(
-        `${tool === 'claude' ? 'Claude Code' : tool === 'codex' ? 'Codex' : 'Cursor'} setup copied`,
-        'Paste it into that tool’s hooks config, then restart the tool.',
-        'success'
-      )
-    } catch (cause) {
-      showToast('Could not copy setup', cause instanceof Error ? cause.message : String(cause), 'error')
-    }
   }
 
   const commitPosition = (next: NotchPosition): void => {
@@ -449,6 +619,7 @@ export function SettingsPage() {
             return (
               <button
                 key={item.id}
+                data-demo-settings-nav={item.id}
                 className={`settings-nav ${section === item.id ? 'is-active' : ''}`}
                 onClick={() => setSection(item.id)}
               >
@@ -456,14 +627,24 @@ export function SettingsPage() {
                   <motion.span layoutId="settings-active" className="settings-nav-bg" transition={{ type: 'spring', stiffness: 430, damping: 34 }} />
                 )}
                 <Icon size={14} />
-                {item.label}
+                <span>{item.label}</span>
+                {item.id === 'about' && hasUpdateNotice && (
+                  <span className="settings-nav-pill">
+                    {updateState?.status === 'downloaded' ? 'Ready' : 'New'}
+                  </span>
+                )}
               </button>
             )
           })}
         </nav>
         <div className="settings-rail-foot">
-          <span className="status-dot online" />
-          Notch {version}
+          <span className={`status-dot ${hasUpdateNotice ? 'update' : 'online'}`} />
+          <span>{window.notchDemo ? `Hero Notch ${version}` : `Notch ${version}`}</span>
+          {hasUpdateNotice && (
+            <button type="button" className="settings-rail-update" onClick={() => setSection('about')}>
+              {updateState?.status === 'downloaded' ? 'Restart' : `v${updateState?.availableVersion}`}
+            </button>
+          )}
         </div>
       </aside>
 
@@ -475,7 +656,9 @@ export function SettingsPage() {
                 key={item.id}
                 type="button"
                 role="tab"
-                className={section === item.id ? 'is-active' : ''}
+                className={`${section === item.id ? 'is-active' : ''} ${
+                  item.id === 'about' && hasUpdateNotice ? 'has-update' : ''
+                }`}
                 aria-selected={section === item.id}
                 onClick={() => setSection(item.id)}
               >
@@ -496,6 +679,8 @@ export function SettingsPage() {
             <h1>
               {section === 'appearance' && 'A little more you.'}
               {section === 'notch' && 'Tune the notch.'}
+              {section === 'behavior' && 'Decide how it behaves.'}
+              {section === 'home' && 'Put every card where you want it.'}
               {section === 'sections' && 'Choose what stays on the notch.'}
               {section === 'obsidian' && 'Your notes, connected.'}
               {section === 'spotify' && 'Let the music in.'}
@@ -508,11 +693,11 @@ export function SettingsPage() {
             <div className="settings-sections">
               <section className="setting-group">
                 <div className="setting-group-head">
-                  <h3>Accent</h3>
-                  <p>The thread of color across timer, tasks and controls.</p>
+                  <h3>Finish</h3>
+                  <p>Default Obsidian black glass, rich presets, or your own custom color across timer, tasks, notifications and controls.</p>
                 </div>
                 <div className="accent-picker">
-                  {(Object.keys(ACCENTS) as Accent[]).map((key) => {
+                  {PRESET_ACCENTS.map((key) => {
                     const value = ACCENTS[key]
                     return (
                       <button
@@ -527,44 +712,89 @@ export function SettingsPage() {
                       </button>
                     )
                   })}
+                  <label
+                    className={`accent-swatch ${state.settings.accent === 'custom' ? 'is-active' : ''}`}
+                    title="Pick your own custom color"
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <span
+                      style={{
+                        background: customHex,
+                        position: 'relative',
+                        overflow: 'hidden'
+                      }}
+                    >
+                      <input
+                        type="color"
+                        value={customHex}
+                        onChange={(event) =>
+                          updateSettings({ accent: 'custom', customAccent: event.target.value })
+                        }
+                        aria-label="Custom accent color"
+                        style={{
+                          position: 'absolute',
+                          inset: -4,
+                          width: 'calc(100% + 8px)',
+                          height: 'calc(100% + 8px)',
+                          opacity: 0,
+                          cursor: 'pointer'
+                        }}
+                      />
+                    </span>
+                    <small>Custom</small>
+                    {state.settings.accent === 'custom' && <Check size={11} />}
+                  </label>
                 </div>
                 <div className="accent-preview" style={{ '--preview-accent': accent.color } as CSSProperties}>
-                  <div className="preview-notch">
-                    <span className="preview-dot" />
-                    <span className="preview-lines">
-                      <i /><i />
-                    </span>
-                    <span className="preview-time">24:18</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div className="preview-notch">
+                      <span className="preview-dot" />
+                      <span className="preview-lines">
+                        <i /><i />
+                      </span>
+                      <span className="preview-time">24:18</span>
+                    </div>
+                    <div
+                      className="notch-notice notice-default is-preview"
+                      style={
+                        {
+                          '--notice-tint': accent.color,
+                          position: 'relative',
+                          top: 0,
+                          left: 0,
+                          transform: 'none',
+                          width: 268,
+                          margin: 0,
+                          pointerEvents: 'none',
+                          borderColor: `color-mix(in srgb, ${accent.color} 28%, rgba(255,255,255,0.12))`
+                        } as CSSProperties
+                      }
+                    >
+                      <span className="notice-orb" aria-hidden="true">
+                        <Bell size={13} strokeWidth={2.1} />
+                      </span>
+                      <div className="notice-copy">
+                        <div className="notice-eyebrow-row">
+                          <span className="notice-badge">Reminder</span>
+                          <span className="notice-jump">Plan</span>
+                        </div>
+                        <strong>Deep work block</strong>
+                        <span>Today at 3:30 PM</span>
+                      </div>
+                      <div className="notice-rail">
+                        <span className="notice-action-btn is-primary">Done</span>
+                      </div>
+                    </div>
                   </div>
                   <div className="preview-caption">
-                    <span>Live preview</span>
-                    <strong>{accent.label} mood</strong>
+                    <span>Live notch &amp; notification preview</span>
+                    <strong>
+                      {accent.label} finish{state.settings.accent === 'custom' ? ` · ${accent.color}` : ''}
+                    </strong>
                   </div>
                 </div>
               </section>
 
-              <section className="setting-group">
-                <div className="setting-group-head">
-                  <h3>Personal</h3>
-                  <p>A name for the small moments.</p>
-                </div>
-                <label className="setting-field">
-                  <span>What should Notch call you?</span>
-                  <div className="inline-field">
-                    <input
-                      value={name}
-                      onChange={(event) => setName(event.target.value)}
-                      placeholder="Your name"
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') saveName()
-                      }}
-                    />
-                    <button className="soft-button compact" onClick={saveName}>
-                      <Save size={12} /> Save
-                    </button>
-                  </div>
-                </label>
-              </section>
             </div>
           )}
 
@@ -584,6 +814,23 @@ export function SettingsPage() {
             </div>
           )}
 
+          {section === 'home' && (
+            <div className="settings-sections">
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Home cards</h3>
+                  <p>Drag a card to another spot.</p>
+                </div>
+                <p className="section-manager-note">
+                  The home panel is three across and two down. Pick a card and drop it in the spot you
+                  want, or tab to it and use the arrow keys. Cards keep their size, and the compact
+                  panel stacks the same order into one column.
+                </p>
+                <HomeLayoutManager />
+              </section>
+            </div>
+          )}
+
           {section === 'notch' && (
             <div className="settings-sections">
               <section className="setting-group">
@@ -593,12 +840,14 @@ export function SettingsPage() {
                   label="Show only when a browser is open"
                   description="A minimized browser counts. When the last browser window closes, the notch hides. Use the tray icon to open it at any time."
                 />
-                <Toggle
-                  checked={state.settings.focusMode !== false}
-                  onChange={(value) => updateSettings({ focusMode: value })}
-                  label="Focus mode"
-                  description="Blur the screen behind the notch. When this is off, the panel stands alone and clicks outside it reach the desktop."
-                />
+                <div data-demo-focus-toggle="true">
+                  <Toggle
+                    checked={state.settings.focusMode !== false}
+                    onChange={(value) => updateSettings({ focusMode: value })}
+                    label="Focus mode"
+                    description="Dim the desktop behind the notch. When this is off, the panel stands alone and clicks outside it reach the desktop."
+                  />
+                </div>
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">
@@ -609,6 +858,7 @@ export function SettingsPage() {
                   {NOTCH_STYLES.map((style) => (
                     <button
                       key={style.id}
+                      data-demo-notch-style={style.id}
                       className={`notch-style-card ${
                         state.settings.notchStyle === style.id ? 'is-active' : ''
                       }`}
@@ -658,6 +908,7 @@ export function SettingsPage() {
                     </small>
                   </span>
                   <select
+                    data-demo-display-select="true"
                     className="setting-select"
                     value={savedDisplay}
                     onChange={(event) => {
@@ -701,6 +952,7 @@ export function SettingsPage() {
                   <p>Drag the notch anywhere on the screen map.</p>
                 </div>
                 <div
+                  data-demo-placement-map="true"
                   className={`placement-map ${draggingPlacement ? 'is-dragging' : ''}`}
                   onPointerDown={startPlacementDrag}
                   onPointerMove={movePlacementDrag}
@@ -752,85 +1004,40 @@ export function SettingsPage() {
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">
-                  <h3>Behavior</h3>
-                  <p>How the notch opens, sits and stays out of the way.</p>
+                  <h3>Focus lengths</h3>
+                  <p>Set the three timer presets to match the way you work.</p>
                 </div>
-                <Toggle
-                  checked={state.settings.pinOnOpen}
-                  onChange={setPinned}
-                  label="Keep the notch pinned"
-                  description="Stays open when the pointer leaves. Collapse and Esc still close it."
-                />
-                <Toggle
-                  checked={state.settings.launchAtLogin}
-                  onChange={(value) => updateSettings({ launchAtLogin: value })}
-                  label="Launch at login"
-                  description="Have the notch waiting after you sign in."
-                />
-                <Toggle
-                  checked={state.settings.reduceMotion === true}
-                  onChange={(value) => updateSettings({ reduceMotion: value })}
-                  label="Reduce motion"
-                  description="Opens and closes in place, and turns off the other animations in the notch."
-                />
-                <label className="setting-row">OpenCode local server port
-                  <input type="number" min={1} max={65535} placeholder="Off" defaultValue={state.settings.openCodeApprovalPort || ''}
-                    onBlur={event=>{if(event.target.validity.valid)updateSettings({openCodeApprovalPort:Number(event.target.value)||0})}} />
-                </label>
-                <Toggle
-                  checked={state.settings.agentStatus !== false}
-                  onChange={(value) => updateSettings({ agentStatus: value })}
-                  label="Coding tool status"
-                  description="Local hooks let Claude Code, Codex and Cursor show waiting and done in Sessions, with approve buttons."
-                />
-                <label className="setting-row">Status bridge port
-                  <input
-                    type="number"
-                    min={1024}
-                    max={65535}
-                    defaultValue={state.settings.agentStatusPort || 7432}
-                    onBlur={(event) => {
-                      const value = Number(event.target.value)
-                      if (event.target.validity.valid && value >= 1024 && value <= 65535)
-                        updateSettings({ agentStatusPort: value })
-                    }}
-                  />
-                </label>
-                <div className="setting-row agent-setup-row">
-                  <span className="setting-copy">
-                    <strong>Connect a coding tool</strong>
-                    <small>Copy its hook config once, paste it into that tool’s settings, then restart the tool.</small>
-                  </span>
-                  <div className="agent-setup-buttons">
-                    {(['claude', 'codex', 'cursor'] as const).map((tool) => (
-                      <button
-                        key={tool}
-                        type="button"
-                        onClick={() => void copyAgentSetup(tool)}
-                      >
-                        {tool === 'claude' ? 'Claude Code' : tool === 'codex' ? 'Codex' : 'Cursor'}
-                      </button>
-                    ))}
-                  </div>
+                <div className="number-grid three">
+                  <label>
+                    <span>Focus (min)</span>
+                    <input type="number" min={1} max={180} value={focusMin} onChange={(event) => setFocusMin(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>Break (min)</span>
+                    <input type="number" min={1} max={60} value={shortMin} onChange={(event) => setShortMin(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>Long focus (min)</span>
+                    <input type="number" min={1} max={180} value={longMin} onChange={(event) => setLongMin(event.target.value)} />
+                  </label>
                 </div>
-                <Toggle
-                  checked={state.settings.codingReplySound === true}
-                  onChange={(value) => updateSettings({codingReplySound:value})}
-                  label="Coding reply sound"
-                  description="Chime when a coding tool finishes or asks for approval."
-                />
-                <Toggle
-                  checked={state.settings.notifications}
-                  onChange={(value) => updateSettings({ notifications: value })}
-                  label="Reminder notifications"
-                  description="Notch notices for reminders, and Windows alerts for reminders, finished focus sessions, and posture nudges."
-                />
-                <Toggle
-                  checked={state.settings.timerNotifications ?? true}
-                  onChange={(value) => updateSettings({ timerNotifications: value })}
-                  label="Focus session alerts"
-                  description="Chime and notification when a focus session or break ends."
-                />
+                <div className="button-row">
+                  <button className="soft-button" onClick={saveRhythm}>
+                    <Save size={13} /> Save focus lengths
+                  </button>
+                  <span className="settings-note">Saving resets the timer to the new focus length.</span>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {section === 'behavior' && (
+            <div className="settings-sections">
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Opening</h3>
+                  <p>How the notch opens and how long it stays.</p>
+                </div>
                 <div className="setting-row">
                   <span className="setting-copy">
                     <strong>Open with</strong>
@@ -869,6 +1076,24 @@ export function SettingsPage() {
                     <option value={400}>400 ms</option>
                   </select>
                 </div>
+                <Toggle
+                  checked={state.settings.pinOnOpen}
+                  onChange={setPinned}
+                  label="Keep the notch pinned"
+                  description="Stays open when the pointer leaves. Collapse and Esc still close it."
+                />
+                <Toggle
+                  checked={state.settings.launchAtLogin}
+                  onChange={(value) => updateSettings({ launchAtLogin: value })}
+                  label="Launch at login"
+                  description="Have the notch waiting after you sign in."
+                />
+                <Toggle
+                  checked={state.settings.reduceMotion === true}
+                  onChange={(value) => updateSettings({ reduceMotion: value })}
+                  label="Reduce motion"
+                  description="Opens and closes in place, and turns off the other animations in the notch."
+                />
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">
@@ -899,29 +1124,57 @@ export function SettingsPage() {
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">
-                  <h3>Focus lengths</h3>
-                  <p>Set the three timer presets to match the way you work.</p>
+                  <h3>Coding tools</h3>
+                  <p>Local ports the notch listens on to show agent status and approvals. Most people never need to change them.</p>
                 </div>
-                <div className="number-grid three">
-                  <label>
-                    <span>Focus (min)</span>
-                    <input type="number" min={1} max={180} value={focusMin} onChange={(event) => setFocusMin(event.target.value)} />
-                  </label>
-                  <label>
-                    <span>Break (min)</span>
-                    <input type="number" min={1} max={60} value={shortMin} onChange={(event) => setShortMin(event.target.value)} />
-                  </label>
-                  <label>
-                    <span>Long focus (min)</span>
-                    <input type="number" min={1} max={180} value={longMin} onChange={(event) => setLongMin(event.target.value)} />
-                  </label>
+                <Toggle
+                  checked={state.settings.agentStatus !== false}
+                  onChange={(value) => updateSettings({ agentStatus: value })}
+                  label="Coding tool status"
+                  description="Approve, deny and answer questions from Claude Code, Cursor, Codex, OpenCode and Anti Gravity right in the notch."
+                />
+                <label className="setting-row">Status bridge port
+                  <input
+                    type="number"
+                    min={1024}
+                    max={65535}
+                    defaultValue={state.settings.agentStatusPort || 7432}
+                    onBlur={(event) => {
+                      const value = Number(event.target.value)
+                      if (event.target.validity.valid && value >= 1024 && value <= 65535)
+                        updateSettings({ agentStatusPort: value })
+                    }}
+                  />
+                </label>
+                <label className="setting-row">OpenCode local server port
+                  <input type="number" min={1} max={65535} placeholder="Off" defaultValue={state.settings.openCodeApprovalPort || ''}
+                    onBlur={event=>{if(event.target.validity.valid)updateSettings({openCodeApprovalPort:Number(event.target.value)||0})}} />
+                </label>
+                <AgentConnections />
+              </section>
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Alerts</h3>
+                  <p>Reminders, finished focus sessions and coding tool chimes.</p>
                 </div>
-                <div className="button-row">
-                  <button className="soft-button" onClick={saveRhythm}>
-                    <Save size={13} /> Save focus lengths
-                  </button>
-                  <span className="settings-note">Saving resets the timer to the new focus length.</span>
-                </div>
+                <Toggle
+                  checked={state.settings.notifications}
+                  onChange={(value) => updateSettings({ notifications: value })}
+                  label="Reminder notifications"
+                  description="Notch notices for reminders, and Windows alerts for reminders, finished focus sessions, and posture nudges."
+                />
+                <Toggle
+                  checked={state.settings.timerNotifications ?? true}
+                  onChange={(value) => updateSettings({ timerNotifications: value })}
+                  label="Focus session alerts"
+                  description="Chime and notification when a focus session or break ends."
+                />
+                <Toggle
+                  checked={state.settings.codingReplySound === true}
+                  onChange={(value) => updateSettings({codingReplySound:value})}
+                  label="Coding reply sound"
+                  description="Chime when a coding tool finishes or asks for approval."
+                />
               </section>
             </div>
           )}
@@ -931,7 +1184,7 @@ export function SettingsPage() {
               <section className="setting-group">
                 <div className="setting-group-head">
                   <h3>Notes folder</h3>
-                  <p>Notch edits your local Markdown files directly. No sync layer, no account.</p>
+                  <p>{window.notchDemo ? 'Hero Notch' : 'Notch'} edits your local Markdown files directly. No sync layer, no account.</p>
                 </div>
                 {state.settings.vaultPath ? (
                   <div className="vault-connected">
@@ -940,6 +1193,11 @@ export function SettingsPage() {
                       <strong>{vaultName}</strong>
                       <span>{state.settings.vaultPath}</span>
                     </div>
+                    {window.notchDemo && (
+                      <span className="vault-ignored-pill" title="Ignored folders">
+                        .obsidian · .trash · .git ignored
+                      </span>
+                    )}
                     <span className="connected-pill"><ShieldCheck size={11} /> Connected</span>
                   </div>
                 ) : (
@@ -952,7 +1210,11 @@ export function SettingsPage() {
                   </div>
                 )}
                 <div className="button-row">
-                  <button className="primary-button" onClick={() => void chooseVault()}>
+                  <button
+                    className="primary-button"
+                    data-demo-choose-vault="true"
+                    onClick={() => void chooseVault({ stay: Boolean(window.notchDemo) })}
+                  >
                     <FolderOpen size={14} />
                     {state.settings.vaultPath ? 'Change folder' : 'Open folder'}
                   </button>
@@ -962,7 +1224,11 @@ export function SettingsPage() {
                         <ExternalLink size={13} /> Show in Explorer
                       </button>
                       {sectionVisible(state, 'notes') && (
-                        <button className="soft-button" onClick={() => setPage('notes')}>
+                        <button
+                          className="soft-button"
+                          data-demo-open-notes="true"
+                          onClick={() => setPage('notes')}
+                        >
                           <NotebookPen size={13} /> Open notes
                         </button>
                       )}
@@ -991,31 +1257,30 @@ export function SettingsPage() {
                   <h3>Connection</h3>
                   <p>
                     {status?.connected
-                      ? 'Full Spotify control is connected. Other players still use the Windows media session.'
+                      ? 'Full Spotify control is connected. YouTube Music still follows through Windows.'
                       : status?.localAvailable
-                        ? 'A player on this PC is detected — no setup needed for basic controls.'
-                        : 'Start playback in any app to control it from the notch.'}
+                        ? 'Spotify is playing on this PC — no setup needed for basic controls.'
+                        : 'Play in Spotify and it shows up here, with no setup.'}
                   </p>
                 </div>
                 <label className="setting-field">
-                  <span>Follow</span>
+                  <span>Player</span>
                   <select
                     className="setting-select"
-                    value={state.settings.mediaSource || 'auto'}
+                    value={mediaPreference}
                     onChange={(event) => updateSettings({ mediaSource: event.target.value })}
                   >
-                    <option value="auto">Automatic — whichever app is playing</option>
+                    <option value="auto">Spotify (preferred)</option>
                     {(status?.mediaSources || []).map((source) => (
                       <option key={source.id} value={source.id}>
                         {source.label}
                       </option>
                     ))}
-                    {state.settings.mediaSource &&
-                      state.settings.mediaSource !== 'auto' &&
-                      !(status?.mediaSources || []).some((source) => source.id === state.settings.mediaSource) && (
-                        <option value={state.settings.mediaSource}>{state.settings.mediaSource}</option>
-                      )}
+                    {savedSourceMissing && (
+                      <option value={mediaPreference}>{friendlyMediaName(mediaPreference)} (not running)</option>
+                    )}
                   </select>
+                  <small>Notch follows Spotify and YouTube Music only. Other apps and browser videos are ignored.</small>
                 </label>
                 {status?.connected ? (
                   <>
@@ -1173,7 +1438,7 @@ export function SettingsPage() {
                   <span className="about-dot" />
                 </div>
                 <div>
-                  <span className="eyebrow">Notch {version}</span>
+                  <span className="eyebrow">{window.notchDemo ? `Hero Notch ${version}` : `Notch ${version}`}</span>
                   <h3>A calmer top of screen.</h3>
                   <p>
                     Notes, music, focus, coding sessions and the day ahead — folded into the
@@ -1182,6 +1447,8 @@ export function SettingsPage() {
                   </p>
                 </div>
               </section>
+              <LicenseCard />
+              <UpdatesCard version={version} />
               <section className="setting-group">
                 <div className="setting-group-head">
                   <h3>Keyboard</h3>
@@ -1203,7 +1470,7 @@ export function SettingsPage() {
                     <ExternalLink size={13} /> Spotify
                   </button>
                   <button className="soft-button danger-text" onClick={() => window.notch.quit()}>
-                    <Power size={13} /> Quit Notch
+                    <Power size={13} /> {window.notchDemo ? 'Quit Hero Notch' : 'Quit Notch'}
                   </button>
                 </div>
               </section>

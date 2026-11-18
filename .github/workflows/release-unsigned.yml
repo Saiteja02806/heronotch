@@ -46,6 +46,25 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # The installer is named after package.json, the updater compares the
+      # release tag with the installed version, and latest.yml carries the
+      # package.json version. If the tag and package.json disagree, the release
+      # looks fine but the in-app updater loops or never offers it. Stop early.
+      - name: Check the tag matches package.json
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v\d+\.\d+\.\d+') {
+            throw "'$tag' is not a version tag. Push a tag such as v$version, or give the tag input when running this by hand."
+          }
+          if ($tag -ne "v$version") {
+            throw "Tag $tag does not match package.json version $version. Bump package.json to $($tag.TrimStart('v')) and push a new tag, or delete this tag and tag v$version."
+          }
+          Write-Host "Tag $tag matches package.json $version."
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -114,12 +133,14 @@ jobs:
             - If Windows says *"An Application Control policy has blocked this file"*, this PC has **Smart App Control** enabled. It cannot be bypassed per app, and Notch will not run there until it is code-signed. See the install notes in `docs/INSTALL.md`.
             - Verify your download against `SHA256SUMS.txt` (SHA-256, lower-case hex, two spaces, then the file name).
 
-            Reminders, Spotify, notes, posture and session shortcuts all run locally. The app makes no request to us.
+            Reminders, Spotify, notes, posture and session shortcuts all run locally. Update checks query GitHub Releases only (and can be turned off in Settings → About).
           files: |
             release/Notch-Setup-*.exe
+            release/Notch-Setup-*.exe.blockmap
             release/Notch-Portable-*.exe
             release/Notch-Setup.exe
             release/Notch-Portable.exe
+            release/latest.yml
             release/SHA256SUMS.txt
 
       - name: Upload workflow artifacts
@@ -128,9 +149,11 @@ jobs:
           name: notch-unsigned-${{ github.run_number }}
           path: |
             release/Notch-Setup-*.exe
+            release/Notch-Setup-*.exe.blockmap
             release/Notch-Portable-*.exe
             release/Notch-Setup.exe
             release/Notch-Portable.exe
+            release/latest.yml
             release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30

@@ -4,6 +4,7 @@ import '@fontsource-variable/inter'
 import '@fontsource/instrument-serif/400.css'
 import '@fontsource-variable/jetbrains-mono'
 import './styles.css'
+import './liquid.css'
 import { App } from './App'
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(

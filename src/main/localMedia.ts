@@ -4,7 +4,7 @@ import { promises as fsPromises } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
-import { friendlyMediaName, pickMediaSession, type MediaSessionInfo } from '../shared/mediaFollow'
+import { friendlyMediaName, musicAppFor, musicAppLabel, normalizeMediaPreference, pickMediaSession, type MediaSessionInfo } from '../shared/mediaFollow'
 import { getState } from './state'
 import type { SpotifyAction, SpotifyPlayback } from '../shared/types'
 
@@ -65,16 +65,24 @@ function Get-Art([string]$sessionKey, $session, $props) {
   if (-not $artLoaded) { return $null }
   $key = -join ($sessionKey, '|', $props.Title, '|', $props.Artist)
   $cached = $artMap[$key]
-  if ($cached) { return $cached }
+  if ($cached) {
+    if ([System.IO.File]::Exists($cached)) { return $cached }
+    $artMap.Remove($key)
+  }
   try {
     $bytes = [NotchMediaArt]::Read([object]$session)
     if (-not $bytes -or $bytes.Length -eq 0) { return $null }
     $sha = [System.Security.Cryptography.SHA256]::Create()
-    $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($key))
+    try {
+      $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($key))
+    } finally {
+      $sha.Dispose()
+    }
     $name = ([System.BitConverter]::ToString($digest)).Replace('-', '').Substring(0, 24).ToLower()
     $isPng = $bytes.Length -gt 4 -and $bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50
     $file = Join-Path $artDir ($name + $(if ($isPng) { '.png' } else { '.jpg' }))
     [System.IO.File]::WriteAllBytes($file, $bytes)
+    if ($artMap.Count -ge 128) { $artMap.Clear() }
     $artMap[$key] = $file
     return $file
   } catch {}
@@ -82,7 +90,78 @@ function Get-Art([string]$sessionKey, $session, $props) {
 }
 `
 
+// Windows only hands out media metadata through WinRT, which PowerShell 5.1
+// cannot project from a compiled helper, so this monitor lives in a single
+// persistent shell and handles control commands over stdin instead of cold-
+// spawning a fresh powershell.exe per click.
+const MONITOR_INTERVAL_MS = 1500
 const MONITOR_SCRIPT = `${WINRT_PREAMBLE}${ART_SCRIPT}
+function Invoke-ControlLine([string]$raw) {
+  try {
+    $cmd = ConvertFrom-Json $raw
+    $cmdId = $cmd.cmdId
+    $session = Get-TargetSession ([string]$cmd.target)
+    if (-not $session) {
+      [Console]::Out.WriteLine((ConvertTo-Json ([ordered]@{ cmdId = $cmdId; ok = $false; error = 'no-session' }) -Compress))
+      [Console]::Out.Flush()
+      return
+    }
+    $beforeTitle = ''
+    try {
+      $beforeProps = Await ($session.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+      $beforeTitle = $beforeProps.Title
+    } catch {}
+    $op = $null
+    switch ([string]$cmd.type) {
+      'play' { $op = $session.TryPlayAsync() }
+      'pause' { $op = $session.TryPauseAsync() }
+      'next' { $op = $session.TrySkipNextAsync() }
+      'previous' { $op = $session.TrySkipPreviousAsync() }
+      'seek' {
+        $ticks = [long]([Math]::Max(0, [Math]::Round([double]$cmd.position)) * 10000)
+        $op = $session.TryChangePlaybackPositionAsync($ticks)
+      }
+      default {
+        [Console]::Out.WriteLine((ConvertTo-Json ([ordered]@{ cmdId = $cmdId; ok = $false }) -Compress))
+        [Console]::Out.Flush()
+        return
+      }
+    }
+    $ok = Await $op ([bool])
+    $result = [ordered]@{ cmdId = $cmdId; ok = [bool]$ok }
+    if ($ok) {
+      $waitForTitle = ($cmd.type -eq 'next' -or $cmd.type -eq 'previous')
+      $deadline = [DateTime]::UtcNow.AddMilliseconds($(if ($waitForTitle) { 2500 } else { 250 }))
+      do {
+        try {
+          $props = Await ($session.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+          $info = $session.GetPlaybackInfo()
+          $timeline = $session.GetTimelineProperties()
+          $result.available = $true
+          $result.source = [string]$session.SourceAppUserModelId
+          $result.title = $props.Title
+          $result.artist = $props.Artist
+          $result.album = $props.AlbumTitle
+          $result.status = [string]$info.PlaybackStatus
+          $result.position = [double]$timeline.Position.TotalMilliseconds
+          $result.end = [double]$timeline.EndTime.TotalMilliseconds
+          $result.canNext = $info.Controls.IsNextEnabled
+          $result.canPrevious = $info.Controls.IsPreviousEnabled
+          $result.canSeek = $info.Controls.IsPlaybackPositionEnabled
+          if (-not $waitForTitle -or $props.Title -ne $beforeTitle) { break }
+        } catch {}
+        Start-Sleep -Milliseconds 100
+      } while ([DateTime]::UtcNow -lt $deadline)
+    }
+    [Console]::Out.WriteLine((ConvertTo-Json $result -Compress))
+    [Console]::Out.Flush()
+  } catch {
+    [Console]::Out.WriteLine((ConvertTo-Json ([ordered]@{ cmdId = $(if ($cmd) { $cmd.cmdId } else { 0 }); ok = $false }) -Compress))
+    [Console]::Out.Flush()
+  }
+}
+
+$readTask = [Console]::In.ReadLineAsync()
 while ($true) {
   try {
     $currentId = ''
@@ -121,7 +200,17 @@ while ($true) {
     [Console]::Out.WriteLine((ConvertTo-Json ([ordered]@{ sessions = @(); error = $_.Exception.Message }) -Compress))
     [Console]::Out.Flush()
   }
-  Start-Sleep -Milliseconds 1100
+  $tickDeadline = [DateTime]::UtcNow.AddMilliseconds(${MONITOR_INTERVAL_MS})
+  while ($true) {
+    $remaining = [int]($tickDeadline - [DateTime]::UtcNow).TotalMilliseconds
+    if ($remaining -le 0) { break }
+    if ($readTask.Wait($remaining)) {
+      $line = $readTask.Result
+      if ($null -eq $line) { exit 0 }
+      $readTask = [Console]::In.ReadLineAsync()
+      if ($line.Trim()) { Invoke-ControlLine $line }
+    }
+  }
 }
 `
 
@@ -131,10 +220,13 @@ let sessions: MediaSessionInfo[] = []
 let sessionsAt = 0
 let positionClock = 0
 let buffer = ''
+let cmdSerial = 0
+const pendingControls = new Map<number, (result: ControlResult) => void>()
+let lineQueue: Promise<void> = Promise.resolve()
 
 function preference(): string {
   try {
-    return getState().settings.mediaSource || 'auto'
+    return normalizeMediaPreference(getState().settings.mediaSource)
   } catch {
     return 'auto'
   }
@@ -154,6 +246,14 @@ let artPrunedAt = 0
 const artByKey = new Map<string, string | null>()
 const artQueriedAt = new Map<string, number>()
 
+function setBoundedArt<T>(map: Map<string, T>, key: string, value: T, limit = 256): void {
+  if (map.size >= limit && !map.has(key)) {
+    const oldest = map.keys().next().value
+    if (oldest !== undefined) map.delete(oldest)
+  }
+  map.set(key, value)
+}
+
 function artKey(session: { id?: string; title?: string; artist?: string }): string {
   return `${session.id || ''}|${session.title || ''}|${session.artist || ''}`
 }
@@ -172,11 +272,24 @@ async function remoteArtFile(session: { id?: string; title?: string; artist?: st
   const key = artKey(session)
   const dir = mediaArtDir()
   if (!dir || !session.title) return null
-  if (artByKey.has(key)) return artByKey.get(key) || null
+  if (artByKey.has(key)) {
+    const cached = artByKey.get(key) || null
+    if (!cached) return null
+    if (cached.startsWith('file://')) {
+      try {
+        if (existsSync(new URL(cached))) return cached
+      } catch {
+        // Fall through and re-fetch if invalid/pruned.
+      }
+      artByKey.delete(key)
+    } else {
+      return cached
+    }
+  }
   const last = artQueriedAt.get(key) || 0
   if (Date.now() - last < 10 * 60_000) return null
-  artQueriedAt.set(key, Date.now())
-  artByKey.set(key, null)
+  setBoundedArt(artQueriedAt, key, Date.now())
+  setBoundedArt(artByKey, key, null)
   try {
     const term = [session.artist, session.title].filter(Boolean).join(' ')
     const query = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=song&limit=1`
@@ -192,7 +305,7 @@ async function remoteArtFile(session: { id?: string; title?: string; artist?: st
     const file = path.join(dir, `${artHash(key)}.jpg`)
     await fsPromises.writeFile(file, bytes)
     const url = pathToFileURL(file).href
-    artByKey.set(key, url)
+    setBoundedArt(artByKey, key, url)
     return url
   } catch {
     return null
@@ -212,16 +325,36 @@ function mediaArtDir(): string {
   }
 }
 
+/**
+ * Resolve `notch-media-art.dll` to a real unpacked Win32 file path.
+ * Electron patches `existsSync` inside `.asar`, so checking `app.asar` first would
+ * return a virtual archive path that `.NET Assembly.LoadFrom` cannot open.
+ */
+export function resolveMediaArtDll(
+  appPath: string,
+  resourcesPath = process.resourcesPath || '',
+  fileExists: (file: string) => boolean = existsSync
+): string {
+  const unpackedFromApp = appPath.replace(/([\\/])app\.asar(?=[\\/]|$)/i, '$1app.asar.unpacked')
+  const candidates = [
+    unpackedFromApp !== appPath ? path.join(unpackedFromApp, 'resources', 'notch-media-art.dll') : '',
+    resourcesPath ? path.join(resourcesPath, 'app.asar.unpacked', 'resources', 'notch-media-art.dll') : '',
+    resourcesPath ? path.join(resourcesPath, 'notch-media-art.dll') : '',
+    !/[\\/]app\.asar([\\/]|$)/i.test(appPath) ? path.join(appPath, 'resources', 'notch-media-art.dll') : ''
+  ].filter(Boolean)
+
+  for (const candidate of candidates) {
+    if (fileExists(candidate)) return candidate
+  }
+  return ''
+}
+
 /** The compiled WinRT helper. In a packaged build it is unpacked from the asar. */
 function mediaArtDll(): string {
   try {
     const app = process.versions.electron ? require('electron').app : null
     const appPath = app ? app.getAppPath() : process.cwd()
-    const candidate = path.join(appPath, 'resources', 'notch-media-art.dll')
-    if (existsSync(candidate)) return candidate
-    const unpacked = candidate.replace('app.asar', 'app.asar.unpacked')
-    if (existsSync(unpacked)) return unpacked
-    return ''
+    return resolveMediaArtDll(appPath, process.resourcesPath || '')
   } catch {
     return ''
   }
@@ -270,8 +403,107 @@ function scheduleRestart(): void {
   }, 3000)
 }
 
+function parseControlPayload(parsed: Partial<LocalSnapshot> & { ok?: boolean }): ControlResult {
+  if (!parsed.ok) return { ok: false }
+  return {
+    ok: true,
+    snapshot: parsed.available
+      ? {
+          available: true,
+          title: parsed.title,
+          artist: parsed.artist,
+          album: parsed.album,
+          status: parsed.status,
+          position: parsed.position,
+          end: parsed.end,
+          canNext: parsed.canNext,
+          canPrevious: parsed.canPrevious,
+          canSeek: parsed.canSeek,
+          source: parsed.source,
+          sampledAt: Date.now(),
+          positionSampledAt: Date.now()
+        }
+      : undefined
+  }
+}
+
+async function handleMonitorLine(line: string): Promise<void> {
+  try {
+    const parsed = JSON.parse(line) as {
+      cmdId?: number
+      sessions?: MediaSessionInfo[]
+    } & Partial<LocalSnapshot> & { ok?: boolean }
+    if (typeof parsed.cmdId === 'number') {
+      const resolve = pendingControls.get(parsed.cmdId)
+      if (resolve) {
+        pendingControls.delete(parsed.cmdId)
+        resolve(parseControlPayload(parsed))
+      }
+      return
+    }
+    if (!Array.isArray(parsed.sessions)) return
+    const nextSessions = parsed.sessions.filter((session) => session && typeof session.id === 'string')
+    for (const session of nextSessions) {
+      if (session.art && typeof session.art === 'string') {
+        const url = await resolveArtUrl(session.art)
+        session.art = url
+      } else {
+        session.art = null
+      }
+    }
+    const previous = pickMediaSession(sessions, preference())
+    const snapshot = pickMediaSession(nextSessions, preference())
+    sessions = nextSessions
+    sessionsAt = Date.now()
+    const sampledAt = Date.now()
+    const sameTrack =
+      Boolean(previous) &&
+      previous?.title === snapshot?.title &&
+      previous?.artist === snapshot?.artist &&
+      previous?.id === snapshot?.id
+    const sameStatus = previous?.status === snapshot?.status
+    const positionMoved =
+      !previous ||
+      !snapshot ||
+      Math.abs((Number(snapshot.position) || 0) - (Number(previous.position) || 0)) >= 100
+    positionClock =
+      !sameTrack || !sameStatus || positionMoved
+        ? sampledAt
+        : positionClock || sampledAt
+    latest = snapshot
+      ? {
+          available: true,
+          title: snapshot.title,
+          artist: snapshot.artist,
+          album: snapshot.album,
+          status: snapshot.status,
+          position: snapshot.position,
+          end: snapshot.end,
+          canNext: snapshot.canNext,
+          canPrevious: snapshot.canPrevious,
+          canSeek: snapshot.canSeek,
+          source: snapshot.id,
+          sampledAt,
+          positionSampledAt: positionClock
+        }
+      : { available: false, sampledAt }
+    const current = latest
+    if (current && current.available && current.title && current.source) {
+      const key = artKey({ id: current.source, title: current.title, artist: current.artist })
+      const smtcArt = nextSessions.find((session) => session.id === current.source)?.art || null
+      if (smtcArt) setBoundedArt(artByKey, key, smtcArt)
+      if (!smtcArt && !artByKey.has(key)) {
+        void remoteArtFile({ id: current.source, title: current.title, artist: current.artist })
+      }
+    }
+  } catch {
+    // Ignore partial or malformed status lines.
+  }
+}
+
 export function startLocalMediaMonitor(): void {
   if (process.platform !== 'win32' || monitor || stopping || paused) return
+  buffer = ''
   const artDir = mediaArtDir()
   const artDll = mediaArtDll()
   if (artDir) {
@@ -298,7 +530,7 @@ export function startLocalMediaMonitor(): void {
       ],
       {
         windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         env: {
           ...process.env,
           ...(artDir ? { NOTCH_MEDIA_ART_DIR: artDir } : {}),
@@ -314,84 +546,40 @@ export function startLocalMediaMonitor(): void {
   }
 
   child.stdout?.setEncoding('utf8')
-  child.stdout?.on('data', async (chunk: string) => {
+  child.stdout?.on('data', (chunk: string) => {
+    if (monitor !== child) return
     buffer += chunk
     let newline = buffer.indexOf('\n')
     while (newline !== -1) {
       const line = buffer.slice(0, newline).trim()
       buffer = buffer.slice(newline + 1)
       if (line) {
-        try {
-          const parsed = JSON.parse(line) as { sessions?: MediaSessionInfo[] }
-          if (!Array.isArray(parsed.sessions)) continue
-          const nextSessions = parsed.sessions.filter((session) => session && typeof session.id === 'string')
-          for (const session of nextSessions) {
-            if (session.art && typeof session.art === 'string') {
-              const url = await resolveArtUrl(session.art)
-              session.art = url
-            } else {
-              session.art = null
-            }
-          }
-          const previous = pickMediaSession(sessions, preference())
-          const snapshot = pickMediaSession(nextSessions, preference())
-          sessions = nextSessions
-          sessionsAt = Date.now()
-          const sampledAt = Date.now()
-          const sameTrack =
-            Boolean(previous) &&
-            previous?.title === snapshot?.title &&
-            previous?.artist === snapshot?.artist &&
-            previous?.id === snapshot?.id
-          const sameStatus = previous?.status === snapshot?.status
-          const positionMoved =
-            !previous ||
-            !snapshot ||
-            Math.abs((Number(snapshot.position) || 0) - (Number(previous.position) || 0)) >= 100
-          positionClock =
-            !sameTrack || !sameStatus || positionMoved
-              ? sampledAt
-              : positionClock || sampledAt
-          latest = snapshot
-            ? {
-                available: true,
-                title: snapshot.title,
-                artist: snapshot.artist,
-                album: snapshot.album,
-                status: snapshot.status,
-                position: snapshot.position,
-                end: snapshot.end,
-                canNext: snapshot.canNext,
-                canPrevious: snapshot.canPrevious,
-                canSeek: snapshot.canSeek,
-                source: snapshot.id,
-                sampledAt,
-                positionSampledAt: positionClock
-              }
-            : { available: false, sampledAt }
-          const current = latest
-          if (current && current.available && current.title && current.source) {
-            const key = artKey({ id: current.source, title: current.title, artist: current.artist })
-            const smtcArt = nextSessions.find((session) => session.id === current.source)?.art || null
-            if (smtcArt) artByKey.set(key, smtcArt)
-            if (!smtcArt && !artByKey.has(key)) {
-              void remoteArtFile({ id: current.source, title: current.title, artist: current.artist })
-            }
-          }
-        } catch {
-          // Ignore partial or malformed status lines.
-        }
+        lineQueue = lineQueue.then(() => handleMonitorLine(line)).catch(() => undefined)
       }
       newline = buffer.indexOf('\n')
     }
   })
   child.stderr?.on('data', () => undefined)
+  const flushPendingOnExit = (): void => {
+    for (const [id, resolve] of pendingControls.entries()) {
+      pendingControls.delete(id)
+      resolve({ ok: false })
+    }
+  }
   child.on('error', () => {
-    if (monitor === child) monitor = null
+    if (monitor === child) {
+      monitor = null
+      buffer = ''
+      flushPendingOnExit()
+    }
     scheduleRestart()
   })
   child.on('exit', () => {
-    if (monitor === child) monitor = null
+    if (monitor === child) {
+      monitor = null
+      buffer = ''
+      flushPendingOnExit()
+    }
     latest = null
     sessions = []
     if (!paused) scheduleRestart()
@@ -403,6 +591,11 @@ export function pauseLocalMediaMonitor(): void {
   if (restartTimer) {
     clearTimeout(restartTimer)
     restartTimer = null
+  }
+  buffer = ''
+  for (const [id, resolve] of pendingControls.entries()) {
+    pendingControls.delete(id)
+    resolve({ ok: false })
   }
   monitor?.kill()
   monitor = null
@@ -419,18 +612,31 @@ export function stopLocalMediaMonitor(): void {
     clearTimeout(restartTimer)
     restartTimer = null
   }
+  buffer = ''
+  for (const [id, resolve] of pendingControls.entries()) {
+    pendingControls.delete(id)
+    resolve({ ok: false })
+  }
   monitor?.kill()
   monitor = null
   latest = null
 }
 
 export function listMediaSources(): { id: string; label: string }[] {
+  // Only music apps are offered. A browser video session never reaches the
+  // picker, so it cannot be selected by accident.
   const seen = new Set<string>()
   const list: { id: string; label: string }[] = []
-  for (const session of freshSessions()) {
-    if (seen.has(session.id)) continue
-    seen.add(session.id)
-    list.push({ id: session.id, label: friendlyMediaName(session.id) })
+  const ordered = [...freshSessions()].sort(
+    (a, b) =>
+      Number(Boolean(b.current)) - Number(Boolean(a.current)) ||
+      Number(b.status === 'Playing') - Number(a.status === 'Playing')
+  )
+  for (const session of ordered) {
+    const app = musicAppFor(session)
+    if (!app || seen.has(app)) continue
+    seen.add(app)
+    list.push({ id: session.id, label: musicAppLabel(app) })
   }
   return list
 }
@@ -573,10 +779,44 @@ interface ControlResult {
   snapshot?: LocalSnapshot
 }
 
-function runControl(
+function runControlOverMonitor(
+  action: Extract<SpotifyAction, { type: 'play' | 'pause' | 'next' | 'previous' | 'seek' }>,
+  sessionId: string
+): Promise<ControlResult | null> {
+  const child = monitor
+  if (!child || child.killed || !child.stdin || !child.stdin.writable) return Promise.resolve(null)
+  const cmdId = ++cmdSerial
+  const payload = JSON.stringify({
+    cmdId,
+    type: action.type,
+    target: sessionId,
+    position: action.type === 'seek' ? action.position : 0
+  })
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingControls.delete(cmdId)
+      resolve(null)
+    }, 5000)
+    pendingControls.set(cmdId, (result) => {
+      clearTimeout(timer)
+      resolve(result)
+    })
+    try {
+      child.stdin!.write(`${payload}\n`)
+    } catch {
+      clearTimeout(timer)
+      pendingControls.delete(cmdId)
+      resolve(null)
+    }
+  })
+}
+
+async function runControl(
   action: Extract<SpotifyAction, { type: 'play' | 'pause' | 'next' | 'previous' | 'seek' }>,
   sessionId: string
 ): Promise<ControlResult> {
+  const fast = await runControlOverMonitor(action, sessionId)
+  if (fast) return fast
   return new Promise((resolve) => {
     execFile(
       'powershell.exe',
@@ -599,30 +839,7 @@ function runControl(
         }
         try {
           const parsed = JSON.parse(stdout.trim()) as Partial<LocalSnapshot> & { ok?: boolean }
-          if (!parsed.ok) {
-            resolve({ ok: false })
-            return
-          }
-          resolve({
-            ok: true,
-            snapshot: parsed.available
-              ? {
-                  available: true,
-                  title: parsed.title,
-                  artist: parsed.artist,
-                  album: parsed.album,
-                  status: parsed.status,
-                  position: parsed.position,
-                  end: parsed.end,
-                  canNext: parsed.canNext,
-                  canPrevious: parsed.canPrevious,
-                  canSeek: parsed.canSeek,
-                  source: parsed.source,
-                  sampledAt: Date.now(),
-                  positionSampledAt: Date.now()
-                }
-              : undefined
-          })
+          resolve(parseControlPayload(parsed))
         } catch {
           resolve({ ok: false })
         }
@@ -633,7 +850,7 @@ function runControl(
 
 async function performLocalActionNow(action: SpotifyAction, sessionId: string | null): Promise<SpotifyPlayback> {
   if (!sessionId || !isLocalAvailable(sessionId)) {
-    throw new Error('The selected player is unavailable. Start playback in that player.')
+    throw new Error('That player is not playing right now. Start a song in it, then try again.')
   }
 
   if (action.type === 'play-track') {

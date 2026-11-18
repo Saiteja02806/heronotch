@@ -17,8 +17,8 @@ import type {
   SpotifyStatus
 } from '../../../shared/types'
 import { useApp } from './AppContext'
-import { useNow } from './clock'
-import { isSpotifySource, playbackLabel, playbackMatchesPreference, playbackSessionId, retainPlayback, unavailablePlayback } from '../../../shared/mediaFollow'
+import { useNowWhen } from './clock'
+import { isSpotifySource, isMusicSourceId, normalizeMediaPreference, playbackLabel, playbackMatchesPreference, playbackSessionId, retainPlayback, unavailablePlayback } from '../../../shared/mediaFollow'
 
 export type PlaybackPhase = 'idle' | 'opening' | 'no-device' | 'premium'
 
@@ -42,6 +42,7 @@ interface MediaContextValue {
   connect: () => Promise<void>
   disconnect: () => Promise<void>
   launchSpotify: () => Promise<boolean>
+  clearCachedPlayback: () => void
   progressMs: number
   pending: SpotifyAction['type'] | null
 }
@@ -74,7 +75,7 @@ function phaseFromDemo(phase: SpotifyStatus['demoPhase']): PlaybackPhase | null 
 
 function phaseFromError(message: string): PlaybackPhase {
   if (/premium/i.test(message)) return 'premium'
-  if (/no spotify device|no active spotify device/i.test(message)) return 'no-device'
+  if (/no spotify device|no active spotify device|not open yet|isn't open/i.test(message)) return 'no-device'
   return 'idle'
 }
 
@@ -93,7 +94,11 @@ function readCachedPlayback(preference: string): SpotifyPlayback | null {
     // Keep any remembered track, including tracks read from the Windows media
     // session while Spotify was closed.
     if (!parsed?.track?.id || !parsed.track.name) return null
-    if (!playbackMatchesPreference(parsed, preference)) return null
+    // A remembered session from an app that is no longer followed (a browser
+    // video, say) must not come back when the page opens.
+    const rememberedSource = playbackSessionId(parsed)
+    if (rememberedSource && !isMusicSourceId(rememberedSource)) return null
+    if (!playbackMatchesPreference(parsed, normalizeMediaPreference(preference))) return null
     return { ...parsed, localSessionId: playbackSessionId(parsed) || undefined, playing: false, device: null, connected: false }
   } catch {
     return null
@@ -105,10 +110,55 @@ function spotifyTrackTarget(trackId: string | undefined): string | undefined {
   return `spotify:track:${trackId}`
 }
 
+function sameTrack(a: SpotifyPlayback['track'], b: SpotifyPlayback['track']): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return (
+    a.id === b.id &&
+    a.name === b.name &&
+    a.artists === b.artists &&
+    a.album === b.album &&
+    a.image === b.image &&
+    a.duration === b.duration &&
+    a.url === b.url
+  )
+}
+
+function samePlayback(a: SpotifyPlayback | null, b: SpotifyPlayback | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  if (
+    a.connected !== b.connected ||
+    a.playing !== b.playing ||
+    a.source !== b.source ||
+    a.queueAvailable !== b.queueAvailable ||
+    a.shuffle !== b.shuffle ||
+    a.repeat !== b.repeat ||
+    a.volume !== b.volume ||
+    a.localSessionId !== b.localSessionId ||
+    a.contextUri !== b.contextUri ||
+    Boolean(a.controls?.next) !== Boolean(b.controls?.next) ||
+    Boolean(a.controls?.previous) !== Boolean(b.controls?.previous) ||
+    Boolean(a.controls?.seek) !== Boolean(b.controls?.seek) ||
+    a.device?.id !== b.device?.id ||
+    a.device?.name !== b.device?.name ||
+    a.device?.type !== b.device?.type ||
+    a.device?.active !== b.device?.active ||
+    a.device?.volume !== b.device?.volume ||
+    !sameTrack(a.track, b.track)
+  ) {
+    return false
+  }
+  const atA = a.track?.progress ?? 0
+  const atB = b.track?.progress ?? 0
+  if (!a.playing) return Math.abs(atA - atB) < 250
+  const projectedA = atA + Math.max(0, b.fetchedAt - a.fetchedAt)
+  return Math.abs(projectedA - atB) < 1500
+}
+
 export function MediaProvider({ children }: { children: ReactNode }) {
-  const { showToast, state, update } = useApp()
-  const now = useNow()
-  const preference = state.settings.mediaSource || 'auto'
+  const { showToast, state, update, expanded, presenceHidden } = useApp()
+  const preference = normalizeMediaPreference(state.settings.mediaSource)
   const selection = useRef({ preference, version: 0 })
   if (selection.current.preference !== preference) {
     selection.current = { preference, version: selection.current.version + 1 }
@@ -117,6 +167,9 @@ export function MediaProvider({ children }: { children: ReactNode }) {
   const [playback, setPlayback] = useState<SpotifyPlayback | null>(
     () => readCachedPlayback(preference) ?? (preference === 'auto' ? playbackFromMemory(state.spotifyMemory) : null)
   )
+  // The progress bar is the only thing that needs a clock here. A paused player
+  // reads its last position, so nothing has to re-render every second.
+  const now = useNowWhen(playback?.playing === true)
   const [queue, setQueue] = useState<SpotifyQueueItem[]>([])
   const [library, setLibrary] = useState<SpotifyLibrary>(EMPTY_LIBRARY)
   const [phase, setPhase] = useState<PlaybackPhase>('idle')
@@ -132,45 +185,66 @@ export function MediaProvider({ children }: { children: ReactNode }) {
   const statusRef = useRef<SpotifyStatus | null>(null)
   const memoryRef = useRef(state.spotifyMemory)
   const pollSuppressUntil = useRef(0)
+  const lastStorageWriteRef = useRef(0)
+  const lastStoredTrackRef = useRef<{ id: string | undefined; playing: boolean }>({
+    id: undefined,
+    playing: false
+  })
   memoryRef.current = state.spotifyMemory
 
-  const applyPlayback = useCallback((next: SpotifyPlayback | null) => {
-    playbackRef.current = next
-    setPlayback(next)
-    if (!next?.track) return
-    const trackId = next.track.id
-    if (!trackId) return
-    try {
-      window.localStorage.setItem('notch:spotify:playback', JSON.stringify(next))
-    } catch {
-      // ignore
-    }
-    // Only real Spotify tracks can be resumed through the Web API, so a
-    // locally detected track never replaces the remembered one.
-    if (!isSpotifyTrackId(trackId)) return
-    const contextUri = next.contextUri || null
-    const previous = memoryRef.current
-    if (previous?.track.id === trackId && (previous.contextUri || null) === contextUri) return
-    const memory: SpotifyMemory = {
-      track: next.track,
-      contextUri,
-      updatedAt: Date.now()
-    }
-    memoryRef.current = memory
-    update({ spotifyMemory: memory })
-  }, [update])
+  const applyPlayback = useCallback(
+    (next: SpotifyPlayback | null) => {
+      if (!samePlayback(playbackRef.current, next)) {
+        playbackRef.current = next
+        setPlayback(next)
+      }
+      if (!next?.track) return
+      const trackId = next.track.id
+      if (!trackId) return
+      const nowMs = Date.now()
+      const trackOrPlayChanged =
+        lastStoredTrackRef.current.id !== trackId || lastStoredTrackRef.current.playing !== next.playing
+      if (trackOrPlayChanged || nowMs - lastStorageWriteRef.current >= 15_000) {
+        lastStorageWriteRef.current = nowMs
+        lastStoredTrackRef.current = { id: trackId, playing: next.playing }
+        try {
+          window.localStorage.setItem('notch:spotify:playback', JSON.stringify(next))
+        } catch {
+          // ignore
+        }
+      }
+      // Only real Spotify tracks can be resumed through the Web API, so a
+      // locally detected track never replaces the remembered one.
+      if (!isSpotifyTrackId(trackId)) return
+      const contextUri = next.contextUri || null
+      const previous = memoryRef.current
+      if (previous?.track.id === trackId && (previous.contextUri || null) === contextUri) return
+      const memory: SpotifyMemory = {
+        track: next.track,
+        contextUri,
+        updatedAt: Date.now()
+      }
+      memoryRef.current = memory
+      update({ spotifyMemory: memory })
+    },
+    [update]
+  )
 
   const refreshStatus = useCallback(async () => {
     const version = selection.current.version
     try {
       const next = await window.notch.spotify.status()
       if (version !== selection.current.version) return
+      if (JSON.stringify(next) === JSON.stringify(statusRef.current)) return
       statusRef.current = next
       setStatus(next)
     } catch {
-      if (version === selection.current.version) setStatus(null)
+      if (version === selection.current.version) {
+        statusRef.current = null
+        setStatus((prev) => (prev === null ? prev : null))
+      }
     }
-  }, [applyPlayback])
+  }, [])
 
   const refreshPlayer = useCallback(
     async (quiet = false) => {
@@ -233,29 +307,31 @@ export function MediaProvider({ children }: { children: ReactNode }) {
     applyPlayback(cached ?? (preference === 'auto' ? playbackFromMemory(memoryRef.current) : null))
     void refreshStatus()
     void refreshPlayer(true)
-    void refreshQueue()
-    void refreshLibrary()
-  }, [preference, applyPlayback, refreshStatus, refreshPlayer, refreshQueue, refreshLibrary])
+  }, [preference, applyPlayback, refreshStatus, refreshPlayer])
 
   useEffect(() => {
     statusRef.current = status
   }, [status])
 
   useEffect(() => {
+    if (presenceHidden) return
     void refreshStatus()
     const interval = setInterval(() => void refreshStatus(), 5000)
     return () => clearInterval(interval)
-  }, [refreshStatus])
+  }, [presenceHidden, refreshStatus])
 
   useEffect(() => {
+    if (presenceHidden) return
     void refreshPlayer(true)
-    const pollMs = status?.connected ? 5000 : 1000
+    // A collapsed notch only draws a slim progress line, and that line is
+    // extrapolated from the last sample, so it does not need a read a second.
+    const pollMs = status?.connected ? 5000 : expanded ? 1000 : 3000
     const interval = setInterval(() => void refreshPlayer(true), pollMs)
     return () => clearInterval(interval)
-  }, [hasSource, status?.connected, refreshPlayer])
+  }, [hasSource, expanded, presenceHidden, status?.connected, refreshPlayer])
 
   useEffect(() => {
-    if (!status?.connected) return
+    if (!status?.connected || !expanded || presenceHidden) return
     void refreshQueue()
     void refreshLibrary()
     const queueTimer = setInterval(() => void refreshQueue(), 20_000)
@@ -264,7 +340,7 @@ export function MediaProvider({ children }: { children: ReactNode }) {
       clearInterval(queueTimer)
       clearInterval(libraryTimer)
     }
-  }, [status?.connected, refreshQueue, refreshLibrary])
+  }, [status?.connected, expanded, presenceHidden, refreshQueue, refreshLibrary])
 
   useEffect(() => {
     const next = phaseFromDemo(status?.demoPhase)
@@ -358,7 +434,7 @@ export function MediaProvider({ children }: { children: ReactNode }) {
         if (!ok || selected !== selection.current) return false
         // Spotify can take several seconds to publish a media session after a
         // cold start. Keep checking, then resume once that session exists.
-        const deadline = Date.now() + 12000
+        const deadline = Date.now() + 5000
         let live = playbackRef.current
         while (Date.now() < deadline) {
           pollSuppressUntil.current = deadline
@@ -380,6 +456,13 @@ export function MediaProvider({ children }: { children: ReactNode }) {
           (live.device?.active || statusRef.current?.localAvailable)
         ) {
           await action({ type: 'play' })
+        } else if (
+          resumeTrack &&
+          !live?.playing &&
+          !live?.device?.active &&
+          !statusRef.current?.localAvailable
+        ) {
+          showToast('Spotify opened', 'Press Play in Spotify to start playback.', 'default')
         }
         return true
       } catch {
@@ -434,6 +517,18 @@ export function MediaProvider({ children }: { children: ReactNode }) {
 
   const launchSpotify = useCallback(async () => openSpotify(false), [openSpotify])
 
+  const clearCachedPlayback = useCallback(() => {
+    try {
+      window.localStorage.removeItem('notch:spotify:playback')
+    } catch {
+      // ignore
+    }
+    playbackRef.current = null
+    setPlayback(null)
+    setError(null)
+    setPhase('idle')
+  }, [])
+
   const connect = useCallback(async () => {
     setConnecting(true)
     try {
@@ -474,32 +569,65 @@ export function MediaProvider({ children }: { children: ReactNode }) {
     )
   }, [playback, now])
 
-  const displayed = playbackMatchesPreference(playback, preference) ? playback : null
+  const displayed = useMemo(
+    () => (playbackMatchesPreference(playback, preference) ? playback : null),
+    [playback, preference]
+  )
   const spotifyControls = displayed?.source === 'api'
   const playerAvailable = Boolean(displayed?.connected || displayed?.device?.active)
-  const value: MediaContextValue = {
-    playerName: playbackLabel(displayed, preference),
-    spotifyControls,
-    playerAvailable,
-    status,
-    playback: displayed,
-    queue: spotifyControls ? queue : [],
-    library: spotifyControls ? library : EMPTY_LIBRARY,
-    loading,
-    connecting,
-    error,
-    phase,
-    refreshStatus,
-    refreshPlayer,
-    refreshQueue,
-    action,
-    togglePlay,
-    launchSpotify,
-    connect,
-    disconnect,
-    progressMs,
-    pending
-  }
+  const playerName = useMemo(() => playbackLabel(displayed, preference), [displayed, preference])
+  const visibleQueue = spotifyControls ? queue : []
+  const visibleLibrary = spotifyControls ? library : EMPTY_LIBRARY
+  const value = useMemo<MediaContextValue>(
+    () => ({
+      playerName,
+      spotifyControls,
+      playerAvailable,
+      status,
+      playback: displayed,
+      queue: visibleQueue,
+      library: visibleLibrary,
+      loading,
+      connecting,
+      error,
+      phase,
+      refreshStatus,
+      refreshPlayer,
+      refreshQueue,
+      action,
+      togglePlay,
+      launchSpotify,
+      clearCachedPlayback,
+      connect,
+      disconnect,
+      progressMs,
+      pending
+    }),
+    [
+      playerName,
+      spotifyControls,
+      playerAvailable,
+      status,
+      displayed,
+      visibleQueue,
+      visibleLibrary,
+      loading,
+      connecting,
+      error,
+      phase,
+      refreshStatus,
+      refreshPlayer,
+      refreshQueue,
+      action,
+      togglePlay,
+      launchSpotify,
+      clearCachedPlayback,
+      connect,
+      disconnect,
+      progressMs,
+      pending
+    ]
+  )
 
   return <MediaContext.Provider value={value}>{children}</MediaContext.Provider>
 }

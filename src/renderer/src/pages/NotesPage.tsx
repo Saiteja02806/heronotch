@@ -471,7 +471,7 @@ export function NotesPage() {
   }, [vaultPath])
 
   useEffect(() => {
-    const flush = (): void => {
+    const flushSyncOnUnload = (): void => {
       if (!dirtyRef.current || !pathRef.current || !vaultRef.current) return
       try {
         window.notch.obsidian.writeSync(vaultRef.current, pathRef.current, contentRef.current)
@@ -480,14 +480,21 @@ export function NotesPage() {
         // The async autosave path will surface a toast if the file is still editable.
       }
     }
-    window.addEventListener('beforeunload', flush)
+    window.addEventListener('beforeunload', flushSyncOnUnload)
     return () => {
-      window.removeEventListener('beforeunload', flush)
+      window.removeEventListener('beforeunload', flushSyncOnUnload)
       if (saveTimer.current) {
         clearTimeout(saveTimer.current)
         saveTimer.current = null
       }
-      flush()
+      if (!dirtyRef.current || !pathRef.current || !vaultRef.current) return
+      const vault = vaultRef.current
+      const notePath = pathRef.current
+      const draft = contentRef.current
+      dirtyRef.current = false
+      void window.notch.obsidian.write(vault, notePath, draft).catch(() => {
+        // Ignore unmount save failures if the note or vault is no longer writable.
+      })
     }
   }, [])
 
@@ -1094,7 +1101,7 @@ export function NotesPage() {
         <h1>Your notes, one hover away.</h1>
         <p>
           Open a folder of Markdown notes to browse it, create notes and edit drafts in place.
-          Nothing syncs anywhere else — Notch works directly with your files. You can create a new
+          Nothing syncs anywhere else — {window.notchDemo ? 'Hero Notch' : 'Notch'} works directly with your files. You can create a new
           folder in the picker.
         </p>
         <button className="primary-button" onClick={() => void chooseVault()}>
@@ -1384,8 +1391,10 @@ export function NotesPage() {
                     <Pencil size={13} />
                   </button>
                   <button
-                    className="icon-button subtle"
-                    title="Open in default app"
+                    className="icon-button subtle demo-open-obsidian-btn"
+                    data-demo-open-obsidian="true"
+                    title={window.notchDemo ? 'Open in Obsidian' : 'Open in default app'}
+                    aria-label={window.notchDemo ? 'Open in Obsidian' : 'Open in default app'}
                     onClick={async () => {
                       if (saveTimer.current) {
                         clearTimeout(saveTimer.current)
@@ -1396,6 +1405,11 @@ export function NotesPage() {
                     }}
                   >
                     <Wand2 size={13} />
+                    {window.notchDemo && (
+                      <span className="demo-tooltip" aria-hidden="true">
+                        Open in Obsidian
+                      </span>
+                    )}
                   </button>
                   <button
                     className={`preview-toggle ${preview ? 'is-on' : ''}`}
@@ -1578,6 +1592,7 @@ function TreeNodes({
           return (
             <div key={node.path} className="tree-group">
               <div
+                data-folder-path={node.path}
                 className={`tree-row folder-row ${dropTarget === node.path ? 'is-drop-target' : ''} ${dragPath === node.path ? 'is-dragging' : ''}`}
                 style={{ paddingLeft: 8 + depth * 13 }}
                 draggable
@@ -1660,6 +1675,7 @@ function TreeNodes({
         return (
           <div
             key={node.path}
+            data-note-path={node.path}
             className={`tree-row file-row ${selectedPath === node.path ? 'is-selected' : ''} ${!editable ? 'is-muted' : ''} ${dragPath === node.path ? 'is-dragging' : ''}`}
             style={{ paddingLeft: 20 + depth * 13 }}
             draggable

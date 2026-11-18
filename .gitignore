@@ -8,3 +8,7 @@ dist
 .scratch/
 .media-inspect.ps1
 demo/
+
+# Generated demo renders and Supabase CLI local state
+demo-output/
+supabase/.temp/

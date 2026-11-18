@@ -3,7 +3,10 @@ import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { CalendarDraft, CalendarEvent, CalendarStatus, CalendarSaveResult, GoogleCalendar } from '../shared/calendar'
+import { eventBelongsToDay } from '../shared/calendar'
+import type { CalendarDraft, CalendarEvent, CalendarSnapshot, CalendarStatus, CalendarSaveResult, GoogleCalendar } from '../shared/calendar'
+import { canonicalTimeZone, dayBoundsInTimeZone, resolveSystemTimeZone } from '../shared/timeZone'
+import { createCalendarDiskCache } from './calendarCache'
 
 const BASE = 'https://gswnffijfmhinavyxitz.supabase.co'
 // Dev preview: NOTCH_CALENDAR_STUB=1 runs this UI against fixtures so the
@@ -23,6 +26,22 @@ class CalendarRequestError extends Error {
   constructor(message: string, public status: number) { super(message) }
 }
 const sessionPath = () => path.join(app.getPath('userData'), 'calendar-session.enc')
+const cachePath = (): string | null => {
+  if (process.env.NOTCH_CALENDAR_CACHE_PATH) return process.env.NOTCH_CALENDAR_CACHE_PATH
+  if (STUB) return null
+  return path.join(app.getPath('userData'), 'calendar-cache.enc')
+}
+const diskCache = createCalendarDiskCache({
+  filePath: cachePath,
+  cipher: {
+    available: () => safeStorage.isEncryptionAvailable(),
+    encrypt: (plain) => safeStorage.encryptString(plain),
+    decrypt: (bytes) => safeStorage.decryptString(bytes)
+  }
+})
+export function flushCalendarCache(): void {
+  diskCache.flushSync()
+}
 
 async function request(url: string, init: RequestInit = {}) {
   let response: Response
@@ -31,7 +50,7 @@ async function request(url: string, init: RequestInit = {}) {
   let data: any
   try { data = await response.json() } catch { throw new Error('Calendar returned an unreadable response. Try again.') }
   if (!response.ok) {
-    if (response.status === 404) throw new Error('The Notch Calendar backend is not available yet.')
+    if (response.status === 404 && data.code === 'NOT_FOUND') throw new CalendarRequestError('The Notch Calendar backend is not available yet.', 404)
     const message = url.includes('/functions/v1/notch-calendar') && typeof data.error === 'string'
       ? data.error.slice(0, 240) : 'Todaywise sign-in failed. Please reconnect Google Calendar.'
     throw new CalendarRequestError(message, response.status)
@@ -53,7 +72,7 @@ async function loadSession(): Promise<Session | null> {
   return current
 }
 async function saveSession(value: Session) {
-  if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable. Calendar sign-in was not saved.')
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is unavailable. Calendar sign-in was not saved.')
   await fs.mkdir(path.dirname(sessionPath()), { recursive: true })
   const tmp = `${sessionPath()}.tmp`
   await fs.writeFile(tmp, safeStorage.encryptString(JSON.stringify(value)), { mode: 0o600 })
@@ -88,13 +107,37 @@ async function backend(body: unknown, signedIn?: Session) {
     headers: { apikey: PUBLIC_KEY, Authorization: `Bearer ${auth.accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body) })
 }
+export async function calendarSnapshot(): Promise<CalendarSnapshot | null> {
+  if (STUB) {
+    return diskCache.readSnapshot('stub', 'preview@example.com')
+  }
+  try {
+    const saved = await loadSession()
+    if (!saved) {
+      await diskCache.clear()
+      return null
+    }
+    return diskCache.readSnapshot(saved.userId, saved.email)
+  } catch {
+    return null
+  }
+}
 export async function calendarStatus(): Promise<CalendarStatus> {
-  if (STUB) return { configured: true, signedIn: true, connected: true, userId: 'stub', email: 'preview@example.com' }
+  if (STUB) {
+    const stubStatus: CalendarStatus = { configured: true, signedIn: true, connected: true, userId: 'stub', email: 'preview@example.com' }
+    diskCache.recordStatus(stubStatus)
+    return stubStatus
+  }
   const saved = await loadSession()
-  if (!saved) return { configured: true, signedIn: false, connected: false, userId: null, email: null }
+  if (!saved) {
+    await diskCache.clear()
+    return { configured: true, signedIn: false, connected: false, userId: null, email: null }
+  }
   const signedIn = await session()
   const data = await backend({ action: 'status' }, signedIn)
-  return { configured: true, signedIn: true, connected: data.connected === true, userId: signedIn.userId, email: signedIn.email }
+  const nextStatus: CalendarStatus = { configured: true, signedIn: true, connected: data.connected === true, userId: signedIn.userId, email: signedIn.email }
+  diskCache.recordStatus(nextStatus)
+  return nextStatus
 }
 export function cancelCalendarConnect(): void { cancelLogin?.() }
 export function connectCalendar(): Promise<CalendarStatus> {
@@ -104,7 +147,7 @@ export function connectCalendar(): Promise<CalendarStatus> {
 }
 async function beginConnect(): Promise<CalendarStatus> {
   if (STUB) return calendarStatus()
-  if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.')
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is unavailable.')
   const version = ++generation
   const verifier = randomBytes(32).toString('base64url')
   const challenge = createHash('sha256').update(verifier).digest('base64url')
@@ -120,6 +163,7 @@ async function beginConnect(): Promise<CalendarStatus> {
       clearTimeout(timeout)
       cancelLogin = null
       server.close()
+      server.closeAllConnections?.()
       if (error) reject(error); else resolve(result!)
     }
     const server = createServer(async (req, res) => {
@@ -143,8 +187,10 @@ async function beginConnect(): Promise<CalendarStatus> {
         await backend({ action: 'connect', accessToken: data.provider_token, refreshToken: data.provider_refresh_token }, next)
         if (settled || version !== generation) throw new Error('Sign-in was cancelled.')
         await saveSession(next)
+        const nextStatus: CalendarStatus = { configured: true, signedIn: true, connected: true, userId: next.userId, email: next.email }
+        diskCache.recordStatus(nextStatus)
         res.end('Google Calendar is connected. You can close this tab and return to Notch.')
-        finish(undefined, { configured: true, signedIn: true, connected: true, userId: next.userId, email: next.email })
+        finish(undefined, nextStatus)
       } catch (error) {
         res.writeHead(400).end('Calendar could not be connected. Return to Notch for details.')
         finish(error instanceof Error ? error : new Error('Calendar sign-in failed.'))
@@ -161,58 +207,95 @@ async function beginConnect(): Promise<CalendarStatus> {
 export async function disconnectCalendar(): Promise<void> {
   cancelCalendarConnect()
   const saved = await loadSession()
-  if (saved) await backend({ action: 'disconnect' })
+  if (saved) {
+    await backend({ action: 'disconnect' }).catch(() => undefined)
+  }
   generation++
+  await diskCache.clear()
   await fs.unlink(sessionPath()).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error })
   current = null
 }
 export async function listCalendars(): Promise<GoogleCalendar[]> {
   if (STUB) {
-    return [
+    const stubCalendars: GoogleCalendar[] = [
       { id: 'stub-primary', name: 'preview@example.com', primary: true, writable: true, timeZone: 'UTC' },
       { id: 'stub-work', name: 'Work', primary: false, writable: true, timeZone: 'UTC' }
     ]
+    diskCache.recordCalendars('stub', 'preview@example.com', stubCalendars)
+    return stubCalendars
   }
-  const data = await backend({ action: 'calendars' })
+  const signedIn = await session()
+  const data = await backend({ action: 'calendars' }, signedIn)
   if (!Array.isArray(data.calendars)) throw new Error('Calendar list was incomplete.')
+  diskCache.recordCalendars(signedIn.userId, signedIn.email, data.calendars)
   return data.calendars
 }
-export function calendarDayRange(date: string): { start: string; end: string } {
+export function calendarDayRange(date: string, timeZone?: string): { start: string; end: string } {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('Choose a valid date.')
-  const [year, month, day] = date.split('-').map(Number)
-  const start = new Date(year, month - 1, day)
-  if (start.getFullYear() !== year || start.getMonth() !== month - 1 || start.getDate() !== day) throw new Error('Choose a valid date.')
-  return { start: start.toISOString(), end: new Date(year, month - 1, day + 1).toISOString() }
+  const zone = timeZone ? canonicalTimeZone(timeZone) : resolveSystemTimeZone()
+  const bounds = dayBoundsInTimeZone(date, zone)
+  if (!bounds) throw new Error('Choose a valid date.')
+  return { start: bounds.startIso, end: bounds.endIso }
 }
-export async function calendarEvents(calendarId: string, date: string): Promise<{ events: CalendarEvent[]; truncated: boolean }> {
+export async function calendarEvents(calendarId: string, date: string, timeZone?: string): Promise<{ events: CalendarEvent[]; truncated: boolean }> {
+  const zone = timeZone ? canonicalTimeZone(timeZone) : resolveSystemTimeZone()
   if (STUB) {
     const [sy, sm, sd] = date.split('-').map(Number)
     const at = (hour: number): string => new Date(sy, sm - 1, sd, hour).toISOString()
-    return {
-      events: [
-        { id: 'stub-1', etag: '1', title: 'Design review', description: 'Weekly sync with the team', location: 'Zoom',
-          start: at(10), end: at(11), allDay: false, timeZone: 'UTC', url: 'https://calendar.google.com/' },
-        { id: 'stub-2', etag: '2', title: 'Ship Notch 1.1', description: '', location: '',
-          start: `${date}T00:00:00`, end: `${date}T00:00:00`, allDay: true, timeZone: 'UTC', url: null },
-        { id: 'stub-3', etag: '3', title: 'Gym', description: '', location: 'Gold\'s',
-          start: at(18), end: at(19), allDay: false, timeZone: 'UTC', url: null }
-      ],
-      truncated: false
-    }
+    const events: CalendarEvent[] = [
+      { id: 'stub-1', etag: '1', title: 'Design review', description: 'Weekly sync with the team', location: 'Zoom',
+        start: at(10), end: at(11), allDay: false, timeZone: 'UTC', url: 'https://calendar.google.com/' },
+      { id: 'stub-2', etag: '2', title: 'Ship Notch 1.1', description: '', location: '',
+        start: `${date}T00:00:00`, end: `${date}T00:00:00`, allDay: true, timeZone: 'UTC', url: null },
+      { id: 'stub-3', etag: '3', title: 'Gym', description: '', location: 'Gold\'s',
+        start: at(18), end: at(19), allDay: false, timeZone: 'UTC', url: null }
+    ]
+    diskCache.recordDayEvents('stub', 'preview@example.com', calendarId, date, zone, { events, truncated: false, fetchedAt: Date.now() })
+    return { events, truncated: false }
   }
   if (typeof calendarId !== 'string' || !calendarId || calendarId.length > 1024) throw new Error('Choose a calendar.')
-  const data = await backend({ action: 'events', calendarId, ...calendarDayRange(date) })
+  const signedIn = await session()
+  const data = await backend({ action: 'events', calendarId, ...calendarDayRange(date, zone) }, signedIn)
   if (!Array.isArray(data.events)) throw new Error('Calendar event data was incomplete.')
-  return data
+  // The range is absolute, so a previous day's all-day event can overlap it.
+  const events = (data.events as CalendarEvent[]).filter((event) => eventBelongsToDay(event, date, zone))
+  const truncated = data.truncated === true
+  diskCache.recordDayEvents(signedIn.userId, signedIn.email, calendarId, date, zone, { events, truncated, fetchedAt: Date.now() })
+  return { events, truncated }
+}
+
+export interface CalendarDeleteResult { ok: boolean; error?: string }
+export async function deleteCalendarEvent(calendarId: string, eventId: string): Promise<CalendarDeleteResult> {
+  if (STUB) {
+    diskCache.invalidateCalendar(calendarId)
+    return { ok: true }
+  }
+  if (typeof calendarId !== 'string' || !calendarId || calendarId.length > 1024) throw new Error('Choose a calendar.')
+  if (typeof eventId !== 'string' || !/^[a-zA-Z0-9_-]{1,1024}$/.test(eventId)) throw new Error('Choose an event.')
+  try {
+    await backend({ action: 'delete', calendarId, eventId })
+    diskCache.invalidateCalendar(calendarId)
+    return { ok: true }
+  } catch (error) {
+    // A 404 from the function itself means the backend is missing; a 404 for the
+    // event means Google no longer has it, which is the state we wanted.
+    if (error instanceof CalendarRequestError && error.status === 404 && !/backend is not available/.test(error.message)) {
+      diskCache.invalidateCalendar(calendarId)
+      return { ok: true }
+    }
+    return { ok: false, error: error instanceof Error ? error.message : 'The Google event could not be removed.' }
+  }
 }
 export async function saveCalendarEvent(calendarId: string, draft: CalendarDraft, editing: boolean): Promise<CalendarSaveResult> {
   if (STUB) {
+    diskCache.invalidateCalendar(calendarId)
     return { ok: true, event: { ...draft, id: `stub-new-${Date.now()}`, etag: '', url: null } }
   }
   if (typeof calendarId !== 'string' || !calendarId || calendarId.length > 1024 || typeof editing !== 'boolean') throw new Error('Choose a calendar and event.')
   try {
     const data = await backend({ action: editing ? 'update' : 'create', calendarId, draft })
-    if (!data.event?.id) throw new Error('Google did not confirm the saved event. Refresh before trying again.')
+    if (!data.event?.id || (editing && data.event.id !== draft.id)) throw new Error('Google did not confirm the selected event. Refresh before trying again.')
+    diskCache.invalidateCalendar(calendarId)
     return { ok: true, event: data.event }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : 'Calendar save could not be confirmed.',

@@ -26,5 +26,5 @@ export function shouldAutoHide(
   const blocked = (settings.neverOver || []).some((name) => cleanName(name) === cleanName(sample.process))
   if (blocked) return true
   if (settings.autoHideFullscreen === false) return false
-  return sample.fullscreen
+  return !explicitOpen && sample.fullscreen
 }

@@ -239,6 +239,7 @@ export async function startTransfer(host: string, outgoing: Parcel | null) {
           size += part.length
           if (size > limit) {
             res.writeHead(413).end('Maximum 16 MB')
+            req.destroy()
             return
           }
           parts.push(part)

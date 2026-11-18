@@ -47,27 +47,27 @@ export function readSpotifyFailure(status: number, text: string): SpotifyFailure
     return {
       status: 404,
       reason: 'NO_ACTIVE_DEVICE',
-      message: 'No active Spotify device. Open Spotify and start a track first.'
+      message: 'Spotify is not open yet. Open the Spotify app or the web player, then press Play again.'
     }
   }
   if (status === 403 || reason === 'PREMIUM_REQUIRED') {
     return {
       status: 403,
       reason: 'PREMIUM_REQUIRED',
-      message: 'Spotify Premium is required to start playback from Notch.'
+      message: 'Starting a song from Notch needs Spotify Premium. You can still play songs in the Spotify app itself.'
     }
   }
   if (status === 429) {
     return {
       status: 429,
       reason: 'RATE_LIMIT',
-      message: 'Spotify is rate-limiting requests. Try again in a moment.'
+      message: 'Spotify asked Notch to slow down. Wait a few seconds, then try again.'
     }
   }
   return {
     status,
     reason: 'OTHER',
-    message: (message || text || 'Spotify request failed.').slice(0, 200)
+    message: (message || text || 'Spotify did not respond. Try again in a moment.').slice(0, 200)
   }
 }
 

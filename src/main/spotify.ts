@@ -189,6 +189,26 @@ function base64Url(buffer: Buffer): string {
   return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
 }
 
+const SPOTIFY_FETCH_TIMEOUT_MS = 12_000
+
+/** Bound Spotify HTTP calls so stalled connections never wedge shared token refreshes or controls. */
+async function fetchSpotifyWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = SPOTIFY_FETCH_TIMEOUT_MS
+): Promise<Response> {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs)
+  const signal = init.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal
+  try {
+    return await fetch(url, { ...init, signal })
+  } catch (error) {
+    if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+      throw new Error('Spotify took too long to respond. Check your connection and try again.')
+    }
+    throw error
+  }
+}
+
 async function exchangeCode(
   clientId: string,
   code: string,
@@ -202,7 +222,7 @@ async function exchangeCode(
     redirect_uri: redirectUri(port),
     code_verifier: verifier
   })
-  const response = await fetch('https://accounts.spotify.com/api/token', {
+  const response = await fetchSpotifyWithTimeout('https://accounts.spotify.com/api/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body
@@ -220,7 +240,7 @@ async function exchangeCode(
 
   let profile: SpotifyProfile | null = null
   try {
-    const profileResponse = await fetch('https://api.spotify.com/v1/me', {
+    const profileResponse = await fetchSpotifyWithTimeout('https://api.spotify.com/v1/me', {
       headers: { Authorization: `Bearer ${data.access_token}` }
     })
     if (profileResponse.ok) {
@@ -251,10 +271,12 @@ async function exchangeCode(
   }
 }
 
-async function getAccessToken(clientId: string): Promise<string> {
+let refreshPromise: Promise<string> | null = null
+
+async function getAccessToken(clientId: string, forceRefresh = false): Promise<string> {
   const tokens = await loadTokens()
   if (!tokens) throw new Error('Connect Spotify in Settings first.')
-  if (tokens.expiresAt > Date.now() + 30_000) {
+  if (!forceRefresh && tokens.expiresAt > Date.now() + 30_000) {
     if (clientId && !tokens.clientId) {
       await saveTokens({ ...tokens, clientId })
     }
@@ -265,48 +287,56 @@ async function getAccessToken(clientId: string): Promise<string> {
     throw new Error('Your Spotify session expired. Reconnect Spotify in Settings.')
   }
 
-  // The state file can be reset independently of the token file. Prefer the
-  // client ID stored beside the refresh token so the session can still renew.
-  const effectiveClientId = tokens.clientId || clientId
-  if (!effectiveClientId) {
-    throw new Error('Spotify credentials are missing. Open Settings and reconnect Spotify.')
-  }
+  if (refreshPromise) return refreshPromise
 
-  const body = new URLSearchParams({
-    client_id: effectiveClientId,
-    grant_type: 'refresh_token',
-    refresh_token: tokens.refreshToken
-  })
-  const response = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  })
-  if (!response.ok) {
-    // Only an auth failure invalidates the saved session. A 5xx or 429 is
-    // temporary and must not delete the user's refresh token.
-    if (response.status === 400 || response.status === 401 || response.status === 403) {
-      await saveTokens(null)
-      throw new Error('Spotify needs to be reconnected. Open Settings to sign in again.')
+  refreshPromise = (async () => {
+    // The state file can be reset independently of the token file. Prefer the
+    // client ID stored beside the refresh token so the session can still renew.
+    const effectiveClientId = tokens.clientId || clientId
+    if (!effectiveClientId) {
+      throw new Error('Spotify credentials are missing. Open Settings and reconnect Spotify.')
     }
-    throw new Error('Spotify could not refresh the session. Check your connection and try again.')
-  }
-  const data = (await response.json()) as {
-    access_token: string
-    refresh_token?: string
-    expires_in: number
-    scope?: string
-  }
-  const next: TokenFile = {
-    ...tokens,
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token ?? tokens.refreshToken,
-    expiresAt: Date.now() + data.expires_in * 1000,
-    clientId: tokens.clientId ?? effectiveClientId,
-    scope: data.scope || tokens.scope
-  }
-  await saveTokens(next)
-  return next.accessToken
+
+    const body = new URLSearchParams({
+      client_id: effectiveClientId,
+      grant_type: 'refresh_token',
+      refresh_token: tokens.refreshToken!
+    })
+    const response = await fetchSpotifyWithTimeout('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    })
+    if (!response.ok) {
+      // Only an auth failure invalidates the saved session. A 5xx or 429 is
+      // temporary and must not delete the user's refresh token.
+      if (response.status === 400 || response.status === 401 || response.status === 403) {
+        await saveTokens(null)
+        throw new Error('Spotify needs to be reconnected. Open Settings to sign in again.')
+      }
+      throw new Error('Spotify could not refresh the session. Check your connection and try again.')
+    }
+    const data = (await response.json()) as {
+      access_token: string
+      refresh_token?: string
+      expires_in: number
+      scope?: string
+    }
+    const next: TokenFile = {
+      ...tokens,
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token ?? tokens.refreshToken,
+      expiresAt: Date.now() + data.expires_in * 1000,
+      clientId: tokens.clientId ?? effectiveClientId,
+      scope: data.scope || tokens.scope
+    }
+    await saveTokens(next)
+    return next.accessToken
+  })().finally(() => {
+    refreshPromise = null
+  })
+
+  return refreshPromise
 }
 
 async function spotifyFetch(
@@ -315,7 +345,7 @@ async function spotifyFetch(
   init: RequestInit = {}
 ): Promise<Response> {
   const token = await getAccessToken(clientId)
-  const response = await fetch(`https://api.spotify.com/v1${endpoint}`, {
+  const response = await fetchSpotifyWithTimeout(`https://api.spotify.com/v1${endpoint}`, {
     ...init,
     headers: {
       ...(init.headers || {}),
@@ -323,8 +353,8 @@ async function spotifyFetch(
     }
   })
   if (response.status === 401) {
-    const retryToken = await getAccessToken(clientId)
-    return fetch(`https://api.spotify.com/v1${endpoint}`, {
+    const retryToken = await getAccessToken(clientId, true)
+    return fetchSpotifyWithTimeout(`https://api.spotify.com/v1${endpoint}`, {
       ...init,
       headers: {
         ...(init.headers || {}),
@@ -384,6 +414,7 @@ export async function connect(clientId: string, port: number): Promise<SpotifySt
       authInProgress = false
       if (timeout) clearTimeout(timeout)
       server.close()
+      server.closeAllConnections?.()
       fn()
     }
 
