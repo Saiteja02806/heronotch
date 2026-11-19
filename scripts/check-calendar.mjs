@@ -45,7 +45,7 @@ function fixture() {
   const events = new Map()
   const writes = []
   const google = []
-  const fixture = { grants, events, writes, google, mismatch: false }
+  const fixture = { grants, events, writes, google, mismatch: false, refreshRace: null, expiresIn: 3600 }
   const handler = createCalendarHandler({
     supabaseUrl: 'https://example.test', serviceKey: 'test-only',
     googleClientId: 'test-client', googleClientSecret: 'test-secret',
@@ -68,11 +68,20 @@ function fixture() {
         grants.delete(id)
         return new Response(null, { status: 204 })
       }
+      if (init.method === 'PATCH') {
+        if (fixture.refreshRace === 'disconnect') {
+          grants.delete(id)
+          return json([])
+        }
+        if (url.searchParams.get('encrypted_grant') !== `eq.${grants.get(id)}`) return json([])
+        grants.set(id, JSON.parse(init.body).encrypted_grant)
+        return json(fixture.refreshRace === 'winner' ? [] : [{ user_id: id }])
+      }
       return json(grants.has(id) ? [{ encrypted_grant: grants.get(id) }] : [])
     }
     if (url.hostname === 'oauth2.googleapis.com') {
       assert.equal(init.body.get('client_id'), 'test-client')
-      return json({ access_token: fixture.mismatch ? 'bob-token' : 'alice-token', expires_in: 3600, scope: scopes })
+      return json({ access_token: fixture.mismatch ? 'bob-token' : 'alice-token', expires_in: fixture.expiresIn, scope: scopes })
     }
     if (url.hostname === 'openidconnect.googleapis.com') return json({ sub: headers.get('Authorization')?.includes('bob') ? 'bob' : 'alice' })
     if (url.hostname === 'www.googleapis.com') {
@@ -156,6 +165,37 @@ test('Planner draft reaches selected Google calendar and retries create with the
   assert.equal(saved.event.title, 'Updated')
   assert.equal((await f.call(patch)).status, 412)
   assert.equal(f.writes.length, 2)
+})
+
+test('all-day and timed edits explicitly clear the opposite Google date fields', async () => {
+  const f = fixture()
+  await f.connect()
+  const draft = serializeCalendarDraft({ ...newCalendarDraft('2026-11-19'), title: 'Transition' }, null)
+  const created = await (await f.call({ action: 'create', calendarId: 'A calendar', draft })).json()
+  const allDay = { ...draft, etag: created.event.etag, allDay: true, start: '2026-11-19', end: '2026-11-20' }
+  const changed = await (await f.call({ action: 'update', calendarId: 'A calendar', draft: allDay })).json()
+  assert.deepEqual(f.writes.at(-1).payload.start, { date: '2026-11-19', dateTime: null, timeZone: null })
+  assert.deepEqual(f.writes.at(-1).payload.end, { date: '2026-11-20', dateTime: null, timeZone: null })
+  assert.equal(changed.event.allDay, true)
+  const timed = { ...draft, etag: changed.event.etag }
+  const back = await (await f.call({ action: 'update', calendarId: 'A calendar', draft: timed })).json()
+  assert.deepEqual(f.writes.at(-1).payload.start, { date: null, dateTime: draft.start, timeZone: draft.timeZone })
+  assert.deepEqual(f.writes.at(-1).payload.end, { date: null, dateTime: draft.end, timeZone: draft.timeZone })
+  assert.equal(back.event.allDay, false)
+})
+
+test('refresh conflict reuses the winning grant but does not revive a disconnected grant', async () => {
+  for (const race of ['winner', 'disconnect']) {
+    const f = fixture()
+    f.expiresIn = 1
+    await f.connect()
+    f.expiresIn = 3600
+    f.refreshRace = race
+    const result = await f.call({ action: 'calendars' })
+    assert.equal(result.status, race === 'winner' ? 200 : 409)
+    assert.equal(f.grants.size, race === 'winner' ? 1 : 0)
+    assert.equal(f.google.length, race === 'winner' ? 1 : 0)
+  }
 })
 
 test('a deleted task event is removed from the selected calendar', async () => {

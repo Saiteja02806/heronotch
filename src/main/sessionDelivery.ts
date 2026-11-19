@@ -606,14 +606,61 @@ async function confirmAntiGravity(
     }
   }
 
+  const transcript = path.join(root, 'brain', rawId, '.system_generated', 'logs', 'transcript.jsonl')
+  if (await exists(transcript)) {
+    sawStore = true
+    try {
+      const raw = await readFrom(transcript, 0, 512_000)
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue
+        let parsed: Record<string, unknown> | undefined
+        try {
+          parsed = JSON.parse(line) as Record<string, unknown>
+        } catch {
+          continue
+        }
+        if (!parsed || typeof parsed !== 'object') continue
+        const stepIndex = typeof parsed.step_index === 'number' ? parsed.step_index : null
+        if (since != null && stepIndex !== null && stepIndex <= since) continue
+        if (parsed.type !== 'USER_INPUT' && parsed.type !== 'SYSTEM_MESSAGE') continue
+        if (jsonContainsText(parsed.content, text)) return { check: 'confirmed' }
+      }
+    } catch {
+      // Transcript can be mid-write.
+    }
+  }
+
+  // When a step mark was captured before sending, only confirm against
+  // conversation_summaries if its last_user_input_step_index actually advanced
+  // past `since`, and never fall through to un-marked FTS text after already
+  // inspecting the conversation steps DB.
   const summaries = path.join(root, 'conversation_summaries.db')
-  if (await exists(summaries)) {
+  if (!(since != null && readSteps) && (await exists(summaries))) {
     sawStore = true
     const db = await openStore(summaries)
     if (db) {
       try {
         const tables = tableNames(db)
-        if (tables.has('conversations_fts')) {
+        let summaryStepAdvanced = since == null
+        if (tables.has('conversation_summaries')) {
+          const row = db
+            .prepare(
+              `select last_user_input_step_index as idx, preview, raw_summary from conversation_summaries
+               where conversation_id = ? limit 1`
+            )
+            .get(rawId) as { idx?: number; preview?: unknown; raw_summary?: unknown } | undefined
+          if (since != null) {
+            summaryStepAdvanced = row?.idx != null && Number(row.idx) > since
+          }
+          if (
+            summaryStepAdvanced &&
+            row &&
+            (containsText(toText(row.preview), text) || containsText(toText(row.raw_summary), text))
+          ) {
+            return { check: 'confirmed' }
+          }
+        }
+        if (summaryStepAdvanced && tables.has('conversations_fts')) {
           const rows = db
             .prepare(
               `select user_body from conversations_fts
@@ -621,17 +668,6 @@ async function confirmAntiGravity(
             )
             .all(rawId) as { user_body: unknown }[]
           if (rows.some((row) => containsText(toText(row.user_body), text))) {
-            return { check: 'confirmed' }
-          }
-        }
-        if (tables.has('conversation_summaries')) {
-          const row = db
-            .prepare(
-              `select preview, raw_summary from conversation_summaries
-               where conversation_id = ? limit 1`
-            )
-            .get(rawId) as { preview?: unknown; raw_summary?: unknown } | undefined
-          if (row && (containsText(toText(row.preview), text) || containsText(toText(row.raw_summary), text))) {
             return { check: 'confirmed' }
           }
         }
@@ -773,13 +809,24 @@ async function readMark(
       return { files: marks }
     }
     if (provider === 'antigravity') {
+      const convDb = await openStore(path.join(antiGravityRoot(base), 'conversations', `${rawId}.db`))
+      if (convDb) {
+        try {
+          const row = convDb.prepare('select max(idx) as idx from steps').get() as { idx?: number | null } | undefined
+          if (row?.idx != null) return { stepIndex: Number(row.idx) }
+        } catch {
+          // Fall back to conversation_summaries below.
+        } finally {
+          closeQuietly(convDb)
+        }
+      }
       const db = await openStore(path.join(antiGravityRoot(base), 'conversation_summaries.db'))
       if (!db) return undefined
       try {
         const row = db
           .prepare('select last_user_input_step_index as idx from conversation_summaries where conversation_id = ?')
           .get(rawId) as { idx?: number } | undefined
-        if (row?.idx == null) return undefined
+        if (row?.idx == null || Number(row.idx) < 0) return undefined
         return { stepIndex: Number(row.idx) }
       } finally {
         closeQuietly(db)

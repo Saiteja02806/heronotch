@@ -156,6 +156,7 @@ export function SessionsPage() {
 
   // While armed, watch the Codex thread-writer lock and deliver as soon as the
   // thread is no longer open in ChatGPT.
+  const watchRetriesRef = useRef(0)
   useEffect(() => {
     if (!watching || !composer || phase !== 'failed' || sendErrorCode !== 'codex-open') return
     let alive = true
@@ -169,6 +170,12 @@ export function SessionsPage() {
           return
         }
         if (!status.locked) {
+          if (watchRetriesRef.current >= 2) {
+            setWatching(false)
+            setSendNote('Could not deliver to Codex automatically. Press Send to try again.')
+            return
+          }
+          watchRetriesRef.current += 1
           setWatching(false)
           setSendNote(null)
           void send()
@@ -197,27 +204,31 @@ export function SessionsPage() {
       if (result.status === 'delivered') {
         flashRow(result.sessionId, window.notchDemo ? 'Delivered' : 'Sent', 'ok')
         void refreshSessions()
+      } else {
+        void refreshSessions()
       }
       const current = composerRef.current
       if (!current || current.id !== result.sessionId) return
       if (result.status === 'delivered') {
+        watchRetriesRef.current = 0
         // The composer already said "Sent" when the command started.
         if (phaseRef.current === 'sending') {
           setPhase('delivered')
           flashNote(window.notchDemo ? 'Delivered' : 'Sent')
         }
         setSendErrorCode(null)
-        setMessage('')
+        setMessage((draft) => (draft.trim() === lastSentRef.current.trim() ? '' : draft))
         return
       }
       if (result.status === 'unconfirmed') {
         setPhase('unconfirmed')
         stopNoteTimer()
-        setSendNote('Not visible in the session yet')
+        setSendNote(result.error || 'Not visible in the session yet')
         setMessage((current) => (current.trim() ? current : lastSentRef.current))
         return
       }
       setPhase('failed')
+      setSendErrorCode(result.code || null)
       stopNoteTimer()
       setMessage((current) => (current.trim() ? current : lastSentRef.current))
       setSendNote(

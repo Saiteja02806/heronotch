@@ -94,7 +94,9 @@ export function isMusicSourceId(id: string | null | undefined): boolean {
 export function normalizeMediaPreference(preference: string | null | undefined): string {
   const wanted = (preference || 'auto').trim()
   if (!wanted || wanted === 'auto') return 'auto'
-  return musicAppFor({ id: wanted }) ? wanted : 'auto'
+  // Allow both dedicated music app IDs and browser IDs (Chrome/Edge can host
+  // YouTube Music; pickMediaSession still enforces album/YouTube Music checks).
+  return musicAppFor({ id: wanted }) || BROWSER_ID.test(wanted) ? wanted : 'auto'
 }
 
 export function playbackSessionId(playback: SpotifyPlayback | null): string | null {

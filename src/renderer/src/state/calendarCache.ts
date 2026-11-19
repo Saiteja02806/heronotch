@@ -268,6 +268,10 @@ export function createCalendarStore(options: CalendarStoreOptions) {
       } catch (cause) {
         if (startEpoch !== epoch) return null
         const message = cause instanceof Error ? cause.message : String(cause)
+        if (/needs to be reconnected|session has expired|Connect Google Calendar first|sign-in failed/i.test(message)) {
+          resetDisconnected(message)
+          return null
+        }
         patch({
           metadataLoading: false,
           phase: state.calendars ? state.phase : 'error',
@@ -314,6 +318,10 @@ export function createCalendarStore(options: CalendarStoreOptions) {
       } catch (cause) {
         if (startEpoch !== epoch) return null
         const message = cause instanceof Error ? cause.message : String(cause)
+        if (/needs to be reconnected|session has expired|Connect Google Calendar first|sign-in failed/i.test(message)) {
+          resetDisconnected(message)
+          return null
+        }
         if (hadCache) {
           patch({
             metadataLoading: false,
@@ -382,6 +390,10 @@ export function createCalendarStore(options: CalendarStoreOptions) {
       } catch (cause) {
         if (startEpoch !== epoch) return
         const message = cause instanceof Error ? cause.message : String(cause)
+        if (/needs to be reconnected|session has expired|Connect Google Calendar first|sign-in failed/i.test(message)) {
+          resetDisconnected(message)
+          return
+        }
         const hasCachedEvents = Boolean(state.days[viewKey])
         patch({
           viewErrors: {

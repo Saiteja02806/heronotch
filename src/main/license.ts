@@ -165,10 +165,12 @@ async function saveToDisk(): Promise<void> {
   const serialized = JSON.stringify(sealedRecord)
   if (safeStorage.isEncryptionAvailable()) {
     payload.encrypted = safeStorage.encryptString(serialized).toString('base64')
-  } else {
+  } else if (!app.isPackaged) {
     payload.plain = sealedRecord
+  } else {
+    throw new Error('Windows credential encryption is unavailable.')
   }
-  const tmp = `${file}.tmp`
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
   await fs.writeFile(tmp, JSON.stringify(payload, null, 2), 'utf8')
   await fs.rename(tmp, file).catch(async () => {
     await fs.writeFile(file, JSON.stringify(payload, null, 2), 'utf8')
@@ -185,7 +187,7 @@ async function loadFromDisk(): Promise<void> {
       if (!parsed.encrypted) return
       const json = safeStorage.decryptString(Buffer.from(parsed.encrypted, 'base64'))
       decrypted = JSON.parse(json) as StoredSecretPayload
-    } else if (parsed.plain) {
+    } else if (!app.isPackaged && parsed.plain) {
       decrypted = parsed.plain
     }
     if (!decrypted || !decrypted.licenseKey || !decrypted.instanceId) return
@@ -210,7 +212,7 @@ async function loadFromDisk(): Promise<void> {
     const sealedActivatedAt = decrypted.activatedAt ?? parsed.activatedAt ?? null
     const sealedValidatedAt = decrypted.lastValidatedAt ?? parsed.lastValidatedAt ?? null
     diskMeta = {
-      status: sealedStatus === 'expired' ? 'active' : sealedStatus,
+      status: sealedStatus,
       activatedAt: sealedActivatedAt,
       lastValidatedAt: sealedValidatedAt,
       error: null
@@ -246,6 +248,10 @@ async function postDodo(
 
 export function getLicenseState(): LicenseState {
   return publicState
+}
+
+export function isLicenseUnlocked(): boolean {
+  return !publicState.required || publicState.status === 'active'
 }
 
 export async function activateLicenseKey(rawKey: string): Promise<LicenseState> {
@@ -369,13 +375,19 @@ export async function validateStoredLicense(manual = true): Promise<LicenseState
     }
     return publish()
   } catch {
-    // Once activated on this PC, network failures must never lock the user out
-    // or ask for the license key again.
+    // Once activated on this PC, network failures must never lock out an already
+    // active license — but never unlock a license already marked invalid/unlicensed.
     if (manual) {
-      diskMeta = {
-        ...diskMeta,
-        status: 'active',
-        error: 'Offline right now — your license stays permanently active on this PC.'
+      if (diskMeta.status === 'active') {
+        diskMeta = {
+          ...diskMeta,
+          error: 'Offline right now — your license stays active on this PC.'
+        }
+      } else {
+        diskMeta = {
+          ...diskMeta,
+          error: 'Could not reach Dodo Payments. Connect to the internet to verify your license key.'
+        }
       }
     }
     return publish()
@@ -393,7 +405,7 @@ export async function deactivateStoredLicense(): Promise<LicenseState> {
       license_key: secretRecord.licenseKey,
       license_key_instance_id: secretRecord.instanceId
     })
-    if ((status >= 200 && status < 300) || status === 404 || status === 400) {
+    if ((status >= 200 && status < 300) || status === 404 || status === 400 || status === 422) {
       hooks?.log(`license: deactivated status=${status}`)
       secretRecord = null
       diskMeta = { status: 'unlicensed', activatedAt: null, lastValidatedAt: null, error: null }

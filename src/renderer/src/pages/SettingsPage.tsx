@@ -2,33 +2,30 @@ import {
   ArrowUpRight,
   Bell,
   Blocks,
-  Bot,
-  CalendarDays,
   Check,
   ChevronRight,
   Copy,
   ExternalLink,
-  FileText,
   FolderOpen,
   GripVertical,
   Info,
   Keyboard,
   LayoutGrid,
-  ListChecks,
   Loader2,
   LogOut,
   Music2,
   NotebookPen,
   Palette,
   PanelTop,
+  Plus,
   Power,
   Save,
   ShieldCheck,
   SlidersHorizontal,
   Smartphone,
   Sparkles,
-  Timer,
-  Wifi
+  Wifi,
+  X
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import {
@@ -46,7 +43,10 @@ import { useMedia } from '../state/MediaContext'
 import { useVaultPicker } from '../hooks/useVaultPicker'
 import { ACCENTS, PRESET_ACCENTS, resolveAccent } from '../lib/theme'
 import {
+  HOME_CARD_META,
   SECTION_META,
+  homeCardAvailable,
+  homeLayoutFor,
   moveSection,
   sectionPrefs,
   sectionVisible,
@@ -60,11 +60,17 @@ import { LicenseCard } from '../components/LicenseCard'
 import { AgentConnections } from '../components/AgentConnections'
 import { UpdatesCard } from '../components/UpdatesCard'
 import {
+  DEFAULT_HOME_HIDDEN,
   HOME_CARD_IDS,
-  HOME_GRID_COLUMNS,
+  addHomeCard,
+  hiddenHomeCards,
+  homeGridColumns,
   homeSlotLabel,
   moveHomeCard,
-  normalizeHomeLayout,
+  removeHomeCard,
+  reorderHomeCards,
+  setHomeCardCount,
+  shownHomeCards,
   type HomeCardId
 } from '../../../shared/homeLayout'
 
@@ -230,50 +236,26 @@ function SectionManager() {
   )
 }
 
-const HOME_CARD_META: Record<HomeCardId, { label: string; note: string; icon: typeof Palette }> = {
-  timer: { label: 'Focus', note: 'Timer, modes and start controls.', icon: Timer },
-  music: { label: 'Now playing', note: 'Player, album art and queue.', icon: Music2 },
-  tasks: { label: 'Today', note: 'Today’s tasks and quick add.', icon: ListChecks },
-  notes: { label: 'Notes', note: 'Recent notes from your folder.', icon: FileText },
-  sessions: { label: 'Coding sessions', note: 'Live agent activity and recent runs.', icon: Bot },
-  calendar: { label: 'Calendar', note: 'Month grid and what is next.', icon: CalendarDays }
-}
-
 /**
- * Moves the home cards. The map mirrors the three-column home grid, so dropping
- * a card is the same as choosing its X-Y spot. Cards keep their size; the saved
- * order becomes the grid order.
+ * Personalizes the Home section: choose 2, 4, 6 or any custom set of cards,
+ * remove any section, add available sections like Water, Posture or Phone,
+ * and drag cards to reorder them.
  */
 function HomeLayoutManager() {
   const { state, updateSettings, showToast } = useApp()
-  const layout = normalizeHomeLayout(state.settings.homeLayout)
-  const showMusic = sectionVisible(state, 'music')
-  const showPlan = sectionVisible(state, 'planner')
-  const showWater = sectionVisible(state, 'water')
-  const showNotes = sectionVisible(state, 'notes')
-  const showSessions = sectionVisible(state, 'sessions')
-  // Water borrows the now-playing slot when music is off, exactly as Home does.
-  const waterTakesMusicSlot = !showMusic && showWater
-  const available: Record<HomeCardId, boolean> = {
-    timer: true,
-    music: showMusic || waterTakesMusicSlot,
-    tasks: showPlan,
-    notes: showNotes,
-    sessions: showSessions,
-    calendar: showPlan
-  }
-  const shown = layout.order.filter((id) => available[id])
-  const hidden = layout.order.filter((id) => !available[id])
+  const avail = (id: HomeCardId): boolean => homeCardAvailable(state, id)
+  const layout = homeLayoutFor(state)
+  const shown = shownHomeCards(layout, avail)
+  const hidden = hiddenHomeCards(layout, avail)
+  const availableCount = HOME_CARD_IDS.filter(avail).length
+  const columns = homeGridColumns(shown.length)
   const [dragId, setDragId] = useState<HomeCardId | null>(null)
   const [overIndex, setOverIndex] = useState<number | null>(null)
 
-  const labelFor = (id: HomeCardId): string =>
-    id === 'music' && waterTakesMusicSlot ? 'Water' : HOME_CARD_META[id].label
-
   const saveOrder = (visibleOrder: HomeCardId[]): void => {
-    // Cards whose section is off wait at the end, so turning one back on never
-    // reshuffles spots that are already set.
-    updateSettings({ homeLayout: { order: [...visibleOrder, ...hidden] } })
+    updateSettings({
+      homeLayout: reorderHomeCards(layout, visibleOrder)
+    })
   }
 
   const place = (id: HomeCardId, index: number): void => {
@@ -287,41 +269,90 @@ function HomeLayoutManager() {
     if (target !== index) saveOrder(moveHomeCard(shown, id, target))
   }
 
+  const applyPreset = (count: number): void => {
+    const next = setHomeCardCount(layout, count, avail)
+    const nextShown = shownHomeCards(next, avail)
+    updateSettings({ homeLayout: next })
+    showToast(
+      `Home · ${nextShown.length} sections`,
+      `Showing ${nextShown.length} sections in a ${homeGridColumns(nextShown.length)}-column layout.`,
+      'success'
+    )
+  }
+
+  const handleAdd = (id: HomeCardId): void => {
+    const meta = HOME_CARD_META[id]
+    const next = addHomeCard(layout, id, undefined, avail)
+    const nextShown = shownHomeCards(next, avail)
+    updateSettings({ homeLayout: next })
+    showToast(
+      `${meta.label} added to Home`,
+      `Home now shows ${nextShown.length} sections.`,
+      'success'
+    )
+  }
+
+  const handleRemove = (id: HomeCardId): void => {
+    const meta = HOME_CARD_META[id]
+    const next = removeHomeCard(layout, id, avail)
+    if (!next) {
+      showToast('Keep one section', 'At least one section stays on the home panel.')
+      return
+    }
+    updateSettings({ homeLayout: next })
+    showToast(
+      `${meta.label} removed from Home`,
+      'You can add it back below whenever you want.',
+      'success'
+    )
+  }
+
   const reset = (): void => {
-    updateSettings({ homeLayout: { order: [...HOME_CARD_IDS] } })
+    updateSettings({
+      homeLayout: {
+        order: [...HOME_CARD_IDS],
+        hidden: [...DEFAULT_HOME_HIDDEN]
+      }
+    })
     setDragId(null)
     setOverIndex(null)
-    showToast('Home layout reset', 'The cards are back in their original spots.', 'success')
+    showToast('Home layout reset', 'Back to the default six sections.', 'success')
   }
 
   return (
     <div className="home-layout">
-      <div className="home-layout-map" role="list" aria-label="Home card positions">
-        {Array.from({ length: HOME_CARD_IDS.length }).map((_, index) => {
-          const id = shown[index]
-          if (!id) {
-            return (
-              <div
-                key={`empty-${index}`}
-                role="listitem"
-                aria-label={`Empty spot, ${homeSlotLabel(index)}`}
-                className={`home-layout-slot is-empty ${dragId && overIndex === index ? 'is-over' : ''}`}
-                onDragOver={(event) => {
-                  if (!dragId) return
-                  event.preventDefault()
-                  if (overIndex !== index) setOverIndex(index)
-                }}
-                onDrop={(event) => {
-                  event.preventDefault()
-                  if (dragId) place(dragId, shown.length - 1)
-                }}
+      <div className="home-layout-presets" role="group" aria-label="Home section count presets">
+        <span className="home-layout-presets-label">Quick layout</span>
+        <div className="home-layout-preset-buttons">
+          {([2, 4, 6] as const)
+            .filter((count) => count <= availableCount)
+            .map((count) => (
+              <button
+                key={count}
+                type="button"
+                data-settings-home-preset={count}
+                className={`soft-button compact ${shown.length === count ? 'is-active' : ''}`}
+                onClick={() => applyPreset(count)}
+                aria-pressed={shown.length === count}
               >
-                <span className="home-layout-empty-label">{homeSlotLabel(index)}</span>
-              </div>
-            )
-          }
+                {count} sections
+              </button>
+            ))}
+        </div>
+        <span className="home-layout-count-badge">
+          {shown.length} on Home · {columns} {columns === 1 ? 'column' : 'columns'}
+        </span>
+      </div>
+
+      <div
+        className={`home-layout-map is-cols-${columns}`}
+        role="list"
+        aria-label="Home card positions"
+      >
+        {shown.map((id, index) => {
           const meta = HOME_CARD_META[id]
           const Icon = meta.icon
+          const slotLabel = homeSlotLabel(index, shown.length)
           return (
             <div
               key={id}
@@ -338,52 +369,110 @@ function HomeLayoutManager() {
                 if (dragId) place(dragId, index)
               }}
             >
-              <button
-                type="button"
-                className="home-layout-card"
-                draggable
-                onDragStart={(event) => {
-                  event.dataTransfer.effectAllowed = 'move'
-                  event.dataTransfer.setData('text/plain', id)
-                  setDragId(id)
-                }}
-                onDragEnd={() => {
-                  setDragId(null)
-                  setOverIndex(null)
-                }}
-                onKeyDown={(event) => {
-                  const deltas: Record<string, number> = {
-                    ArrowLeft: -1,
-                    ArrowRight: 1,
-                    ArrowUp: -HOME_GRID_COLUMNS,
-                    ArrowDown: HOME_GRID_COLUMNS
+              <div className="home-layout-card-shell">
+                <button
+                  type="button"
+                  className="home-layout-card"
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = 'move'
+                    event.dataTransfer.setData('text/plain', id)
+                    setDragId(id)
+                  }}
+                  onDragEnd={() => {
+                    setDragId(null)
+                    setOverIndex(null)
+                  }}
+                  onKeyDown={(event) => {
+                    const deltas: Record<string, number> = {
+                      ArrowLeft: -1,
+                      ArrowRight: 1,
+                      ArrowUp: -columns,
+                      ArrowDown: columns
+                    }
+                    const delta = deltas[event.key]
+                    if (delta === undefined) return
+                    event.preventDefault()
+                    moveBy(id, index, delta)
+                  }}
+                  aria-label={`${meta.label}, ${slotLabel}. Drag it, or use the arrow keys to move it.`}
+                  title={meta.note}
+                >
+                  <span className="home-layout-icon" aria-hidden="true">
+                    <Icon size={14} />
+                  </span>
+                  <span className="home-layout-copy">
+                    <strong>{meta.label}</strong>
+                    <small>{slotLabel}</small>
+                  </span>
+                  <GripVertical size={13} className="home-layout-grip" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  data-settings-home-remove={id}
+                  className="home-layout-remove"
+                  disabled={shown.length <= 1}
+                  onClick={() => handleRemove(id)}
+                  aria-label={`Remove ${meta.label} from Home`}
+                  title={
+                    shown.length <= 1
+                      ? 'At least one section stays on Home'
+                      : `Remove ${meta.label} from Home`
                   }
-                  const delta = deltas[event.key]
-                  if (delta === undefined) return
-                  event.preventDefault()
-                  moveBy(id, index, delta)
-                }}
-                aria-label={`${labelFor(id)}, ${homeSlotLabel(index)}. Drag it, or use the arrow keys to move it.`}
-                title={meta.note}
-              >
-                <span className="home-layout-icon" aria-hidden="true">
-                  <Icon size={14} />
-                </span>
-                <span className="home-layout-copy">
-                  <strong>{labelFor(id)}</strong>
-                  <small>{homeSlotLabel(index)}</small>
-                </span>
-                <GripVertical size={13} className="home-layout-grip" aria-hidden="true" />
-              </button>
+                >
+                  <X size={12} />
+                </button>
+              </div>
             </div>
           )
         })}
       </div>
+
+      <div className="home-layout-available">
+        <div className="home-layout-available-head">
+          <strong>Available sections to add</strong>
+          <small>
+            {hidden.length > 0
+              ? 'Add any enabled section to the home panel — turn on sections like Water in Sections first.'
+              : 'Every enabled section is currently on the home panel.'}
+          </small>
+        </div>
+        {hidden.length > 0 && (
+          <div className="home-layout-available-grid" role="list" aria-label="Available sections to add to Home">
+            {hidden.map((id) => {
+              const meta = HOME_CARD_META[id]
+              const Icon = meta.icon
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="listitem"
+                  data-settings-home-add={id}
+                  className="home-layout-add-card"
+                  onClick={() => handleAdd(id)}
+                  title={`Add ${meta.label} to Home`}
+                >
+                  <span className="home-layout-icon" aria-hidden="true">
+                    <Icon size={14} />
+                  </span>
+                  <span className="home-layout-copy">
+                    <strong>{meta.label}</strong>
+                    <small>{meta.note}</small>
+                  </span>
+                  <span className="home-layout-add-pill">
+                    <Plus size={12} />
+                    Add
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
       <div className="home-layout-footer">
         <span>
-          {hidden.length > 0
-            ? `Off the home panel: ${hidden.map((id) => labelFor(id)).join(', ')}. Turn a section back on in Sections and it lands in the last spot.`
-            : 'All six cards are on the home panel.'}
+          Drag any card to reorder, remove sections you do not need, or switch between 2, 4 and 6 sections anytime.
         </span>
         <button className="soft-button compact" onClick={reset}>
           Reset layout
@@ -818,13 +907,13 @@ export function SettingsPage() {
             <div className="settings-sections">
               <section className="setting-group">
                 <div className="setting-group-head">
-                  <h3>Home cards</h3>
-                  <p>Drag a card to another spot.</p>
+                  <h3>Home sections</h3>
+                  <p>Choose 2, 4, 6 or any custom mix of sections for the home panel.</p>
                 </div>
                 <p className="section-manager-note">
-                  The home panel is three across and two down. Pick a card and drop it in the spot you
-                  want, or tab to it and use the arrow keys. Cards keep their size, and the compact
-                  panel stacks the same order into one column.
+                  Remove any section you do not need, add sections like Water, Posture or Phone, or drag
+                  cards to rearrange them. You can also personalize this directly from the bar at the top
+                  of the Home tab.
                 </p>
                 <HomeLayoutManager />
               </section>

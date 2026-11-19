@@ -11,6 +11,7 @@ import {
 } from 'react'
 import type {
   AgentQuestion,
+  AgentQuestionResponse,
   AgentSnapshot,
   AppState,
   AppStatePatch,
@@ -23,6 +24,7 @@ import type {
   LicenseState,
   WaterState
 } from '../../../shared/types'
+import { normalizeQuestionResponse, questionSteps, stepAnswerTexts } from '../../../shared/questionAnswers'
 import type { DemoConfig, DemoPlatform } from '@demo/shared/types'
 import {
   formatDateKeyInZone,
@@ -133,7 +135,7 @@ interface AppContextValue {
   openCodeError: string
   approvalBusy: boolean
   decideAgent: (id: string, reply: 'allow' | 'deny') => Promise<void>
-  decideAgentQuestion: (id: string, choices: number[] | number[][]) => Promise<void>
+  decideAgentQuestion: (id: string, response: AgentQuestionResponse) => Promise<void>
   releaseAgentQuestion: (id: string) => Promise<void>
   decideOpenCode: (item: PendingApproval, reply: 'once' | 'reject') => Promise<void>
   refreshOpenCode: () => void
@@ -164,6 +166,27 @@ function mergeLocal(prev: AppState, patch: AppStatePatch): AppState {
     posture: patch.posture ? { ...prev.posture, ...patch.posture } : prev.posture,
     water: patch.water ? { ...prev.water, ...patch.water } : prev.water
   }
+}
+
+/** Sends Notch handed to the Claude app and could not confirm, by result code. */
+const UNCONFIRMED_NOTICES: Record<string, { title: string; fallback: string }> = {
+  'claude-open-in-app': {
+    title: 'Paste in Claude',
+    fallback: 'Notch opened this chat and copied your message. Press Ctrl+V, then Enter.'
+  },
+  // Notch already pasted and pressed Enter, so asking for another paste would
+  // risk sending the message twice.
+  'claude-sent-unconfirmed': {
+    title: 'Check Claude',
+    fallback: 'Notch typed your message into Claude but could not confirm it was sent.'
+  }
+}
+
+function unconfirmedNotice(result: { code?: string }): { title: string; fallback: string } | undefined {
+  if (result.code === 'claude-open-in-app' || result.code === 'claude-sent-unconfirmed') {
+    return UNCONFIRMED_NOTICES[result.code]
+  }
+  return undefined
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
@@ -199,6 +222,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [openCodeQuestions, setOpenCodeQuestions] = useState<AgentQuestion[]>([])
   const [openCodeError, setOpenCodeError] = useState('')
   const [approvalBusy, setApprovalBusy] = useState(false)
+  const approvalBusyRef = useRef(false)
+  approvalBusyRef.current = approvalBusy
+  const dismissedOpenCodeQuestions = useRef(new Set<string>())
   const [openCodeVersion, setOpenCodeVersion] = useState(0)
   const agentMountedAt = useRef(Date.now())
   const agentSeen = useRef(new Set<string>())
@@ -212,6 +238,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [demoPlatform, setDemoPlatformState] = useState<DemoPlatform>('macos')
   const [updateState, setUpdateState] = useState<UpdateState | null>(null)
   const [licenseState, setLicenseState] = useState<LicenseState | null>(null)
+  const licenseReady = Boolean(licenseState && (!licenseState.required || licenseState.status === 'active'))
+  const licenseReadyRef = useRef(licenseReady)
+  licenseReadyRef.current = licenseReady
   const pageRef = useRef<Page>(page)
   pageRef.current = page
   const settingsSectionRef = useRef<SettingsSection>(settingsSection)
@@ -402,6 +431,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const lastScanAt = useRef(0)
   const refreshSessions = useCallback(async () => {
+    if (!licenseReadyRef.current) return
     lastScanAt.current = Date.now()
     setSessionsLoading(true)
     try {
@@ -454,13 +484,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!presenceHidden) scanIfStale(8_000)
   }, [presenceHidden, scanIfStale])
 
-  // One scan when the app comes up. The cadence below owns everything after
-  // that, so expanding the panel does not spawn another one on top.
+  // One scan when the app comes up (once license is ready). The cadence below
+  // owns everything after that, so expanding the panel does not spawn another.
   useEffect(() => {
+    if (!licenseReady) return
     void refreshSessions()
-  }, [refreshSessions])
+  }, [licenseReady, refreshSessions])
 
   useEffect(() => {
+    if (!licenseReady) return
     let timer = 0
     let alive = true
     // Every scan starts a PowerShell process probe and re-reads each agent's
@@ -469,7 +501,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // feel live.
     if (expanded) scanIfStale(15_000)
     const schedule = (): void => {
-      const wait = presenceHiddenRef.current ? 60_000 : expanded ? 8_000 : 8_000
+      const wait = presenceHiddenRef.current ? 60_000 : expanded ? 8_000 : 30_000
       timer = window.setTimeout(() => {
         if (!alive) return
         if (!presenceHiddenRef.current) void refreshSessions()
@@ -481,15 +513,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
       alive = false
       window.clearTimeout(timer)
     }
-  }, [expanded, refreshSessions, scanIfStale])
+  }, [licenseReady, expanded, refreshSessions, scanIfStale])
 
   const update = useCallback((patch: AppStatePatch) => {
-    setState((prev) => (prev ? mergeLocal(prev, patch) : prev))
+    setState((prev) => {
+      const next = prev ? mergeLocal(prev, patch) : prev
+      stateRef.current = next
+      return next
+    })
     const seq = ++writeSeq.current
     void window.notch
       .setState(patch)
       .then((remote) => {
-        if (writeSeq.current === seq) setState(remote)
+        if (writeSeq.current === seq) {
+          stateRef.current = remote
+          setState(remote)
+        }
       })
       .catch(() => {
         // The renderer keeps the optimistic state; the next launch retries from disk.
@@ -629,10 +668,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [showToast])
 
   useEffect(() => {
+    if (!licenseReady) return
     let alive = true
-    void window.notch.agent.status().then((value) => {
-      if (alive) setAgentSnapshot(value)
-    })
+    void window.notch.agent
+      .status()
+      .then((value) => {
+        if (alive) setAgentSnapshot(value)
+      })
+      .catch(() => undefined)
     const off = window.notch.agent.onUpdate((value) => {
       if (!alive) return
       setAgentSnapshot(value)
@@ -671,21 +714,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
       alive = false
       off()
     }
-  }, [showToast])
+  }, [licenseReady, showToast])
 
   const openCodePort = state?.settings.openCodeApprovalPort
   const openCodePendingSig = useRef('[]')
   const openCodeQuestionsSig = useRef('[]')
   const openCodeBootstrapped = useRef(false)
   useEffect(() => {
+    if (!licenseReady || !openCodePort) {
+      openCodeBootstrapped.current = false
+      openCodePendingSig.current = '[]'
+      openCodeQuestionsSig.current = '[]'
+      setOpenCodePending((prev) => (prev.length === 0 ? prev : []))
+      setOpenCodeQuestions((prev) => (prev.length === 0 ? prev : []))
+      setOpenCodeError((prev) => (prev === '' ? prev : ''))
+      return
+    }
     let active = true
     let timer: ReturnType<typeof setTimeout> | undefined
-    openCodeBootstrapped.current = false
-    openCodePendingSig.current = '[]'
-    openCodeQuestionsSig.current = '[]'
-    setOpenCodePending((prev) => (prev.length === 0 ? prev : []))
-    setOpenCodeQuestions((prev) => (prev.length === 0 ? prev : []))
     async function refresh(): Promise<void> {
+      if (approvalBusyRef.current) {
+        if (active) timer = setTimeout(() => void refresh(), 800)
+        return
+      }
       try {
         const [result, rawQuestions] = await Promise.all([
           window.notch.approvals.list(),
@@ -693,16 +744,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
         ])
         if (!active) return
         const fresh = result.filter((row) => !openCodeSeen.current.has(row.fingerprint))
-        const mappedQuestions: AgentQuestion[] = rawQuestions.map((item) => ({
-          id: `opencode:${item.id}`,
-          tool: 'opencode',
-          title: item.title,
-          detail: item.detail,
-          options: item.options,
-          multiSelect: item.multiSelect,
-          steps: item.steps,
-          at: Date.now()
-        }))
+        const activeIds = new Set(rawQuestions.map((item) => `opencode:${item.id}`))
+        for (const dismissed of [...dismissedOpenCodeQuestions.current]) {
+          if (!activeIds.has(dismissed)) dismissedOpenCodeQuestions.current.delete(dismissed)
+        }
+        const mappedQuestions: AgentQuestion[] = rawQuestions
+          .map((item) => ({
+            id: `opencode:${item.id}`,
+            tool: 'opencode' as const,
+            title: item.title,
+            detail: item.detail,
+            options: item.options,
+            multiSelect: item.multiSelect,
+            steps: item.steps,
+            at: Date.now()
+          }))
+          .filter((item) => !dismissedOpenCodeQuestions.current.has(item.id))
         const freshQuestions = mappedQuestions.filter((item) => !openCodeSeen.current.has(item.id))
         if ((fresh.length > 0 || freshQuestions.length > 0) && openCodeBootstrapped.current) {
           setGlowTick((tick) => tick + 1)
@@ -723,7 +780,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           openCodePendingSig.current = nextPendingSig
           setOpenCodePending(result)
         }
-        const nextQuestionsSig = JSON.stringify(rawQuestions)
+        const nextQuestionsSig = JSON.stringify(mappedQuestions.map((q) => ({ ...q, at: 0 })))
         if (nextQuestionsSig !== openCodeQuestionsSig.current) {
           openCodeQuestionsSig.current = nextQuestionsSig
           setOpenCodeQuestions(mappedQuestions)
@@ -745,12 +802,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
       if (active) timer = setTimeout(() => void refresh(), 3500)
     }
-    if (openCodePort && !approvalBusy) void refresh()
+    void refresh()
     return () => {
       active = false
       if (timer) clearTimeout(timer)
     }
-  }, [openCodePort, openCodeVersion, approvalBusy, showToast])
+  }, [licenseReady, openCodePort, openCodeVersion, showToast])
 
   const decideAgent = useCallback(
     async (id: string, reply: 'allow' | 'deny') => {
@@ -775,37 +832,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const questions = [...(agentSnapshot?.questions || []), ...openCodeQuestions]
 
   const decideAgentQuestion = useCallback(
-    async (id: string, choices: number[] | number[][]) => {
+    async (id: string, response: AgentQuestionResponse) => {
       setApprovalBusy(true)
       try {
         if (id.startsWith('opencode:')) {
           const port = stateRef.current?.settings.openCodeApprovalPort
           const target = openCodeQuestions.find((q) => q.id === id)
           if (!port || !target) throw new Error('That OpenCode question is no longer active.')
-          const stepList =
-            target.steps && target.steps.length > 0
-              ? target.steps
-              : [
-                  {
-                    title: target.title,
-                    detail: target.detail,
-                    options: target.options,
-                    multiSelect: target.multiSelect
-                  }
-                ]
-          const choiceMatrix: number[][] = Array.isArray(choices[0])
-            ? (choices as number[][])
-            : [choices as number[]]
-          const answers = stepList.map((step, sIdx) => {
-            const stepChoices = choiceMatrix[sIdx] || []
-            return stepChoices.map((index) => step.options[index]?.label || '').filter(Boolean)
-          })
-          if (answers.some((row) => row.length === 0)) throw new Error('Pick at least one option.')
+          const stepList = questionSteps(target)
+          const normalized = normalizeQuestionResponse(stepList, response)
+          const answers = stepList.map((step, sIdx) => stepAnswerTexts(step, normalized[sIdx] || { choices: [] }))
+          if (answers.some((row) => row.length === 0)) throw new Error('Pick an option or type an answer.')
           await window.notch.approvals.replyQuestion(id.slice('opencode:'.length), answers, port)
           setOpenCodeVersion((v) => v + 1)
           return
         }
-        await window.notch.agent.decideQuestion(id, choices)
+        await window.notch.agent.decideQuestion(id, response)
         setAgentSnapshot(await window.notch.agent.status())
       } catch (cause) {
         showToast(
@@ -825,10 +867,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     async (id: string) => {
       try {
         if (id.startsWith('opencode:')) {
-          const port = stateRef.current?.settings.openCodeApprovalPort
-          if (!port) throw new Error('OpenCode is not connected.')
-          await window.notch.approvals.rejectQuestion(id.slice('opencode:'.length), port)
-          setOpenCodeVersion((v) => v + 1)
+          // Dismiss locally in Notch without deleting/rejecting the prompt on
+          // OpenCode's server, so the user can still answer it in OpenCode.
+          dismissedOpenCodeQuestions.current.add(id)
+          setOpenCodeQuestions((prev) => prev.filter((item) => item.id !== id))
         } else {
           await window.notch.agent.releaseQuestion(id)
           setAgentSnapshot(await window.notch.agent.status())
@@ -859,7 +901,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         await window.notch.approvals.decide(item.fingerprint, reply, port)
       } catch (cause) {
-        showToast('OpenCode decision failed', String(cause), 'error')
+        showToast(
+          'OpenCode decision failed',
+          cause instanceof Error ? cause.message : String(cause),
+          'error'
+        )
       } finally {
         setApprovalBusy(false)
         setOpenCodeVersion((v) => v + 1)
@@ -871,17 +917,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     return window.notch.sessions.onSendResult((result) => {
-      // A message that went through says "Sent" in the composer; nothing else
-      // needs to interrupt the user.
+      void refreshSessions()
+      // A message that went through says "Sent" in the composer, and a queued
+      // one shows its queue badge on the row; nothing else needs to interrupt
+      // the user.
       if (result.status === 'delivered') return
-      if (result.status === 'unconfirmed') return
+      if (result.status === 'queued') return
+      if (result.status === 'unconfirmed') {
+        const notice = unconfirmedNotice(result)
+        if (notice) showToast(notice.title, result.error || notice.fallback, 'default')
+        return
+      }
       showToast(
         `${result.label} did not deliver`,
         result.error || 'The agent command failed.',
         'error'
       )
     })
-  }, [showToast])
+  }, [refreshSessions, showToast])
 
   const setExpanded = useCallback((value: boolean) => {
     if (!value) {
@@ -1103,7 +1156,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => {
-    if (!state?.timer.running || !state.timer.endsAt) return
+    if (!licenseReady || !state?.timer.running || !state.timer.endsAt) return
     return subscribeClock(() => {
       const current = state.timer
       if (!current.running || !current.endsAt) return
@@ -1169,11 +1222,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
           : state.focusLog
       })
     })
-  }, [state, update, showToast])
+  }, [licenseReady, state, update, showToast])
 
   const addTask = useCallback<AppContextValue['addTask']>(
     (input) => {
-      if (!state) return
+      const currentState = stateRef.current
+      if (!currentState) return
       const task: Task = {
         id: uid(),
         title: input.title.trim(),
@@ -1190,41 +1244,44 @@ export function AppProvider({ children }: { children: ReactNode }) {
         eventEtag: input.eventEtag
       }
       if (!task.title) return
-      update({ tasks: [...state.tasks, task] })
+      update({ tasks: [...currentState.tasks, task] })
     },
-    [state, update]
+    [update]
   )
 
   const toggleTask = useCallback(
     (id: string) => {
-      if (!state) return
+      const currentState = stateRef.current
+      if (!currentState) return
       update({
-        tasks: state.tasks.map((task) =>
+        tasks: currentState.tasks.map((task) =>
           task.id === id
             ? { ...task, done: !task.done, completedAt: !task.done ? Date.now() : undefined }
             : task
         )
       })
     },
-    [state, update]
+    [update]
   )
 
   const deleteTask = useCallback(
     (id: string) => {
-      if (!state) return
-      update({ tasks: state.tasks.filter((task) => task.id !== id) })
+      const currentState = stateRef.current
+      if (!currentState) return
+      update({ tasks: currentState.tasks.filter((task) => task.id !== id) })
     },
-    [state, update]
+    [update]
   )
 
   const patchTask = useCallback(
     (id: string, patch: Partial<Task>) => {
-      if (!state) return
+      const currentState = stateRef.current
+      if (!currentState) return
       update({
-        tasks: state.tasks.map((task) => (task.id === id ? { ...task, ...patch } : task))
+        tasks: currentState.tasks.map((task) => (task.id === id ? { ...task, ...patch } : task))
       })
     },
-    [state, update]
+    [update]
   )
 
   const waterRef = useRef<WaterState | null>(state?.water ?? null)
@@ -1283,6 +1340,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => {
+    if (!licenseReady) return
     const interval = state?.water.reminderMinutes || 0
     const remindAt = state?.water.remindAt
     if (interval <= 0 || !remindAt) return
@@ -1326,7 +1384,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         remindAt: Date.now() + activeInterval * 60 * 1000
       }))
     })
-  }, [state?.water.reminderMinutes, state?.water.remindAt, commitWater, showToast, addGlass])
+  }, [licenseReady, state?.water.reminderMinutes, state?.water.remindAt, commitWater, showToast, addGlass])
 
   const stateLoaded = Boolean(state)
   const welcomeSeen = state?.settings.welcomeSeen === true
@@ -1335,7 +1393,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => {
-    if (!stateLoaded || welcomeSeen || welcomeTriggered.current) return
+    if (!stateLoaded || !licenseReady || welcomeSeen || welcomeTriggered.current) return
     if (demoConfig || window.notchDemo) return
     if (expanded || presenceHidden || hasPendingPrompt) return
 
@@ -1348,7 +1406,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }, 900)
 
     return () => window.clearTimeout(startTimer)
-  }, [stateLoaded, welcomeSeen, demoConfig, expanded, presenceHidden, hasPendingPrompt, updateSettings])
+  }, [stateLoaded, licenseReady, welcomeSeen, demoConfig, expanded, presenceHidden, hasPendingPrompt, updateSettings])
 
   useEffect(() => {
     if (!welcomeActive) return

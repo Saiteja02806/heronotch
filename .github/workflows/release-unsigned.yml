@@ -51,6 +51,7 @@ jobs:
       # package.json version. If the tag and package.json disagree, the release
       # looks fine but the in-app updater loops or never offers it. Stop early.
       - name: Check the tag matches package.json
+        id: tag-check
         shell: pwsh
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -63,7 +64,9 @@ jobs:
           if ($tag -ne "v$version") {
             throw "Tag $tag does not match package.json version $version. Bump package.json to $($tag.TrimStart('v')) and push a new tag, or delete this tag and tag v$version."
           }
-          Write-Host "Tag $tag matches package.json $version."
+          $isPrerelease = if ($tag -match '-') { 'true' } else { 'false' }
+          "prerelease=$isPrerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Tag $tag matches package.json $version (prerelease=$isPrerelease)."
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -87,6 +90,22 @@ jobs:
           npx electron-builder --win portable nsis --publish never
           if ($LASTEXITCODE -ne 0) { throw "Unsigned build failed (exit $LASTEXITCODE)" }
 
+      - name: Add stable download names
+        shell: pwsh
+        run: |
+          # The website links to /releases/latest/download/Notch-Setup.exe.
+          # GitHub only serves that path when the asset name is identical in
+          # every release, so publish a copy with the version stripped out.
+          $release = Join-Path $env:GITHUB_WORKSPACE 'release'
+          $setup = Get-ChildItem $release -File -Filter 'Notch-Setup-*.exe' | Select-Object -First 1
+          $portable = Get-ChildItem $release -File -Filter 'Notch-Portable-*.exe' | Select-Object -First 1
+          if (-not $setup -or -not $portable) {
+            throw 'Expected both Notch-Setup-<version>.exe and Notch-Portable-<version>.exe.'
+          }
+          Copy-Item $setup.FullName (Join-Path $release 'Notch-Setup.exe') -Force
+          Copy-Item $portable.FullName (Join-Path $release 'Notch-Portable.exe') -Force
+          Get-ChildItem $release -File | Select-Object Name, Length
+
       - name: Write SHA-256 checksums
         shell: pwsh
         run: |
@@ -100,31 +119,13 @@ jobs:
           $lines | Set-Content (Join-Path $release 'SHA256SUMS.txt') -Encoding ascii
           Get-Content (Join-Path $release 'SHA256SUMS.txt')
 
-      - name: Add stable download names
-        shell: pwsh
-        run: |
-          # The website links to /releases/latest/download/Notch-Setup.exe.
-          # GitHub only serves that path when the asset name is identical in
-          # every release, so publish a copy with the version stripped out.
-          # The copies are byte-identical to the versioned files above, so the
-          # checksums in SHA256SUMS.txt still apply.
-          $release = Join-Path $env:GITHUB_WORKSPACE 'release'
-          $setup = Get-ChildItem $release -File -Filter 'Notch-Setup-*.exe' | Select-Object -First 1
-          $portable = Get-ChildItem $release -File -Filter 'Notch-Portable-*.exe' | Select-Object -First 1
-          if (-not $setup -or -not $portable) {
-            throw 'Expected both Notch-Setup-<version>.exe and Notch-Portable-<version>.exe.'
-          }
-          Copy-Item $setup.FullName (Join-Path $release 'Notch-Setup.exe') -Force
-          Copy-Item $portable.FullName (Join-Path $release 'Notch-Portable.exe') -Force
-          Get-ChildItem $release -File | Select-Object Name, Length
-
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: Notch ${{ inputs.tag || github.ref_name }}
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.tag-check.outputs.prerelease == 'true' }}
           fail_on_unmatched_files: true
           body: |
             **Notch is not code-signed yet.** Windows will warn the first time you run it.

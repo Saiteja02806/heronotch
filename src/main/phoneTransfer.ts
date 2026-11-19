@@ -226,6 +226,9 @@ export async function startTransfer(host: string, outgoing: Parcel | null) {
         return
       }
       uploading = true
+      req.setTimeout(30_000, () => {
+        req.destroy()
+      })
       try {
         const name =
           decodeURIComponent(req.headers['x-notch-name'])
@@ -238,8 +241,8 @@ export async function startTransfer(host: string, outgoing: Parcel | null) {
         for await (const part of req) {
           size += part.length
           if (size > limit) {
-            res.writeHead(413).end('Maximum 16 MB')
-            req.destroy()
+            res.setHeader('Connection', 'close')
+            res.writeHead(413).end('Maximum 16 MB', () => req.destroy())
             return
           }
           parts.push(part)
@@ -247,7 +250,7 @@ export async function startTransfer(host: string, outgoing: Parcel | null) {
         received = { name, bytes: Buffer.concat(parts), text: req.headers['x-notch-kind'] === 'text' }
         res.writeHead(201).end()
       } catch {
-        res.writeHead(400).end()
+        if (!res.headersSent) res.writeHead(400).end()
       } finally {
         uploading = false
       }
@@ -259,6 +262,7 @@ export async function startTransfer(host: string, outgoing: Parcel | null) {
     server.once('error', reject)
     server.listen(0, host, resolve)
   })
+  server.on('error', () => undefined)
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('Could not open transfer')
   const url = 'http://' + host + ':' + address.port + '/' + token + '/'

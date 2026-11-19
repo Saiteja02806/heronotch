@@ -158,8 +158,20 @@ export async function findAntiGravityTarget(
   return null
 }
 
-export function antiGravityEnv(target: AntiGravityTarget): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, ANTIGRAVITY_LS_ADDRESS: target.address }
+export function antiGravityEnv(
+  target: AntiGravityTarget,
+  baseEnv: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(baseEnv)) {
+    // Strip any ANTIGRAVITY_* variables inherited when Notch itself was started
+    // from an Antigravity shell (ANTIGRAVITY_PROJECT_ID, ANTIGRAVITY_CONVERSATION_ID,
+    // ANTIGRAVITY_SOURCE_METADATA, etc.); keeping them causes the daemon to reject
+    // sends to conversations outside that project with PermissionDenied.
+    if (key.startsWith('ANTIGRAVITY_')) continue
+    env[key] = value
+  }
+  env.ANTIGRAVITY_LS_ADDRESS = target.address
   // The CLI signs its gRPC calls with this token; a live server rejects calls
   // that arrive without it.
   if (target.csrfToken) env.ANTIGRAVITY_CSRF_TOKEN = target.csrfToken

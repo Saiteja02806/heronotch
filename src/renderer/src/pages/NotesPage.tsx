@@ -305,10 +305,15 @@ export function NotesPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const dirtyRef = useRef(false)
   const contentRef = useRef('')
+  const lineEndingRef = useRef<'\n' | '\r\n'>('\n')
   const pathRef = useRef<string | null>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previousVault = useRef<string | null | undefined>(undefined)
   const vaultRef = useRef<string | null>(vaultPath)
+
+  const serializeContent = useCallback((value: string): string => {
+    return lineEndingRef.current === '\r\n' ? value.replace(/\r?\n/g, '\r\n') : value
+  }, [])
 
   const loadTree = useCallback(
     async (silent = false) => {
@@ -344,28 +349,33 @@ export function NotesPage() {
     }
     if (previous === vaultPath) return
     if (previous && dirtyRef.current && pathRef.current) {
-      void window.notch.obsidian.write(previous, pathRef.current, contentRef.current)
+      void window.notch.obsidian
+        .write(previous, pathRef.current, serializeContent(contentRef.current))
+        .catch(() => undefined)
     }
     previousVault.current = vaultPath
     pathRef.current = null
     dirtyRef.current = false
     contentRef.current = ''
+    lineEndingRef.current = '\n'
     setContent('')
     setSelectedPath(null)
     setTree([])
     setTreeReady(false)
     setSaveState('idle')
-  }, [vaultPath])
+  }, [vaultPath, serializeContent])
 
   useEffect(() => {
     if (!vaultPath || !selectedPath || dirtyRef.current) return
     let alive = true
     void window.notch.obsidian
       .read(vaultPath, selectedPath)
-      .then((text) => {
-        if (!alive || dirtyRef.current || text === contentRef.current) return
-        contentRef.current = text
-        setContent(text)
+      .then((raw) => {
+        const normalized = raw.replace(/\r\n/g, '\n')
+        if (!alive || dirtyRef.current || normalized === contentRef.current) return
+        lineEndingRef.current = raw.includes('\r\n') ? '\r\n' : '\n'
+        contentRef.current = normalized
+        setContent(normalized)
         setSaveState('saved')
       })
       .catch(() => undefined)
@@ -402,16 +412,19 @@ export function NotesPage() {
   const saveNow = useCallback(async (): Promise<void> => {
     const path = pathRef.current
     if (!path || !vaultPath || !dirtyRef.current) return
+    const snapshot = contentRef.current
     setSaveState('saving')
     try {
-      await window.notch.obsidian.write(vaultPath, path, contentRef.current)
-      dirtyRef.current = false
-      setSaveState('saved')
+      await window.notch.obsidian.write(vaultPath, path, serializeContent(snapshot))
+      if (contentRef.current === snapshot && pathRef.current === path) {
+        dirtyRef.current = false
+        setSaveState('saved')
+      }
     } catch (error) {
       setSaveState('error')
       showToast('Note not saved', error instanceof Error ? error.message : 'Could not write the file.', 'error')
     }
-  }, [vaultPath, showToast])
+  }, [vaultPath, serializeContent, showToast])
 
   const selectFile = useCallback(
     async (path: string) => {
@@ -422,11 +435,13 @@ export function NotesPage() {
       setLoadingNote(true)
       setPreview(false)
       try {
-        const text = await window.notch.obsidian.read(vaultPath, path)
+        const raw = await window.notch.obsidian.read(vaultPath, path)
+        const normalized = raw.replace(/\r\n/g, '\n')
+        lineEndingRef.current = raw.includes('\r\n') ? '\r\n' : '\n'
         pathRef.current = path
-        contentRef.current = text
+        contentRef.current = normalized
         dirtyRef.current = false
-        setContent(text)
+        setContent(normalized)
         setSelectedPath(path)
         setSaveState('idle')
         update({ notes: { lastPath: path } })
@@ -474,7 +489,11 @@ export function NotesPage() {
     const flushSyncOnUnload = (): void => {
       if (!dirtyRef.current || !pathRef.current || !vaultRef.current) return
       try {
-        window.notch.obsidian.writeSync(vaultRef.current, pathRef.current, contentRef.current)
+        window.notch.obsidian.writeSync(
+          vaultRef.current,
+          pathRef.current,
+          serializeContent(contentRef.current)
+        )
         dirtyRef.current = false
       } catch {
         // The async autosave path will surface a toast if the file is still editable.
@@ -557,13 +576,26 @@ export function NotesPage() {
   const folderPath = selectedPath?.split('/').slice(0, -1).join(' / ')
   const words = content.trim() ? content.trim().split(/\s+/).length : 0
   const markdownHtml = useMemo(() => {
-    const text = content.replace(
-      /\[\[([^\]]+)\]\]/g,
-      '<span class="wiki-link">$1</span>'
-    )
+    if (!preview) return ''
+    let inFence = false
+    const text = content
+      .split('\n')
+      .map((line) => {
+        if (/^\s*(`{3,}|~{3,})/.test(line)) {
+          inFence = !inFence
+          return line
+        }
+        if (inFence) return line
+        return line.replace(/\[\[([^\]]+)\]\]/g, '<span class="wiki-link">$1</span>')
+      })
+      .join('\n')
     const raw = marked.parse(text, { gfm: true, breaks: true, async: false }) as string
-    return DOMPurify.sanitize(raw, { ADD_ATTR: ['target'] })
-  }, [content])
+    return DOMPurify.sanitize(raw, {
+      FORBID_TAGS: ['style', 'form', 'svg', 'iframe', 'object', 'embed', 'base', 'meta'],
+      FORBID_ATTR: ['style', 'srcdoc'],
+      ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|obsidian:|#)/i
+    })
+  }, [content, preview])
 
   // Line-based render of the note for the live editor overlay. Each source
   // line becomes one .lm-line element, so blank lines and wrapped lines keep
@@ -907,7 +939,13 @@ export function NotesPage() {
     (index: number): void => {
       const lines = content.split('\n')
       let seen = 0
+      let inFence = false
       for (let i = 0; i < lines.length; i += 1) {
+        if (/^\s*(`{3,}|~{3,})/.test(lines[i])) {
+          inFence = !inFence
+          continue
+        }
+        if (inFence) continue
         const match = lines[i].match(/^(\s*[-*+]\s+)\[([ xX])\](.*)$/)
         if (!match) continue
         if (seen === index) {
@@ -924,6 +962,15 @@ export function NotesPage() {
 
   const togglePreviewTask = (event: ReactMouseEvent<HTMLDivElement>): void => {
     const target = event.target as HTMLElement
+    const anchor = target.closest('a') as HTMLAnchorElement | null
+    if (anchor) {
+      event.preventDefault()
+      const href = (anchor.getAttribute('href') || '').trim()
+      if (/^(?:https?:|obsidian:)/i.test(href)) {
+        window.notch.openExternal(href)
+      }
+      return
+    }
     const item = target.closest('li')
     if (!item) return
     const box = item.querySelector('input[type="checkbox"]') as HTMLInputElement | null
@@ -1042,6 +1089,12 @@ export function NotesPage() {
         setEntryDialog(null)
         showToast('Folder created', path, 'success')
       } else if (entryDialog.targetPath) {
+        if (
+          selectedPath === entryDialog.targetPath ||
+          selectedPath?.startsWith(`${entryDialog.targetPath}/`)
+        ) {
+          await saveNow()
+        }
         const nextPath = await window.notch.obsidian.rename(vaultPath, entryDialog.targetPath, name)
         if (
           selectedPath === entryDialog.targetPath ||
@@ -1050,6 +1103,7 @@ export function NotesPage() {
           const rebased = `${nextPath}${selectedPath.slice(entryDialog.targetPath.length)}`
           pathRef.current = rebased
           setSelectedPath(rebased)
+          update({ notes: { lastPath: rebased } })
         }
         await loadTree(true)
         setEntryDialog(null)

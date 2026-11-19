@@ -189,7 +189,19 @@ export interface PostureState {
   goodSeconds: number
   badSeconds: number
   lastAlertAt: number | null
+  /** Finished days, oldest first, so the page can show whether posture is improving. */
+  days?: PostureDay[]
 }
+
+/** One finished day of posture coaching. */
+export interface PostureDay {
+  dayKey: string
+  goodSeconds: number
+  badSeconds: number
+}
+
+/** How many finished days are kept. */
+export const POSTURE_DAYS_MAX = 90
 
 export const WATER_GOAL_MIN = 1
 export const WATER_GOAL_MAX = 16
@@ -292,7 +304,18 @@ export interface AgentQuestionStep {
   detail?: string
   options: AgentQuestionOption[]
   multiSelect: boolean
+  /** Whether the user may type a custom free-text ("Other") answer. Defaults to true. */
+  allowCustom?: boolean
 }
+
+/** One step's answer: chosen preset option indices and/or custom typed text. */
+export interface AgentQuestionStepAnswer {
+  choices: number[]
+  customText?: string
+}
+
+/** Question response payload: legacy index array(s) or structured step answers supporting custom text. */
+export type AgentQuestionResponse = number[] | number[][] | AgentQuestionStepAnswer[]
 
 /** A session asking the user to pick from options instead of approve or deny. */
 export interface AgentQuestion {
@@ -579,7 +602,7 @@ export interface NotchApi {
     /** Open Claude Code's own sign-in so Notch can message Claude sessions. */
     claudeLogin(): Promise<{ ok: boolean; error?: string }>
     decide(id: string, reply: 'allow' | 'deny'): Promise<void>
-    decideQuestion: (id: string, choices: number[] | number[][]) => Promise<void>
+    decideQuestion: (id: string, response: AgentQuestionResponse) => Promise<void>
     /** Let the tool show the question itself; Notch drops its hold. */
     releaseQuestion: (id: string) => Promise<void>
     onUpdate(listener: (snapshot: AgentSnapshot) => void): () => void

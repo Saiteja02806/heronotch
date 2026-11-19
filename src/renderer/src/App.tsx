@@ -36,6 +36,7 @@ import { PhonePage } from './pages/PhonePage'
 import { sectionPrefs, visibleSections, type SectionId } from './lib/sections'
 import { AppProvider, useApp } from './state/AppContext'
 import { CalendarProvider } from './state/CalendarContext'
+import { HomeEditProvider } from './state/HomeEditContext'
 import { setClockPaused } from './state/clock'
 import { MediaProvider } from './state/MediaContext'
 import { PostureProvider } from './state/PostureContext'
@@ -333,7 +334,7 @@ function Shell() {
         setExpanded(false)
         return
       }
-      if (typing || licenseLocked) return
+      if (typing || licenseLocked || document.body.classList.contains('interaction-locked')) return
       if (event.ctrlKey || event.metaKey || event.altKey) return
       const next = pageForKey(event.key, visibleSections(sectionPrefs(state), { compact }))
       if (!next) return
@@ -444,6 +445,8 @@ function Shell() {
     metrics,
     state.settings.notchStyle,
     toasts,
+    Boolean(licenseState),
+    licenseLocked,
     agentSnapshot?.pending.length,
     questions.length,
     openCodePending.length
@@ -720,7 +723,7 @@ function Shell() {
             />
           )}
           <div className="focus-backdrop-tint" />
-          {settled && !closing && (
+          {settled && !closing && !licenseLocked && (
             <span className="focus-hint">
               Focused · click outside to close · turn off focus mode in{' '}
               <button
@@ -764,6 +767,7 @@ function Shell() {
             <LicenseGate />
           ) : (
             <CompactSlotProvider>
+              <HomeEditProvider>
               <Header />
               <main className="page-host">
                 <AnimatePresence mode="wait" initial={false}>
@@ -788,32 +792,46 @@ function Shell() {
                 </AnimatePresence>
               </main>
               <Footer />
+              </HomeEditProvider>
             </CompactSlotProvider>
           )}
         </div>
         <EdgeGlow tick={glowTick} ready={settled && !closing && expanded} />
       </div>
       <div className={`collapsed-layer${expanded ? ' is-hidden' : ''}`}>
-        <CollapsedBar
-          onOpen={openImmediately}
-          onOpenSessions={() => {
-            setPage('sessions')
-            openImmediately()
-          }}
-          onOpenPosture={() => {
-            setPage('posture')
-            openImmediately()
-          }}
-          style={metrics?.style}
-        />
-        {!expanded && (
-          <CollapsedNotice
-            onOpen={openImmediately}
-            onOpenSection={(section) => {
-              setPage(section)
-              openImmediately()
-            }}
-          />
+        {!licenseState ? null : licenseLocked ? (
+          <button
+            type="button"
+            className={`collapsed-bar is-locked style-${metrics?.style || state.settings.notchStyle || 'minimal'}`}
+            onClick={openImmediately}
+            aria-label="Open Notch to activate license"
+          >
+            <span className="collapsed-lock-label">Activate Notch</span>
+          </button>
+        ) : (
+          <>
+            <CollapsedBar
+              onOpen={openImmediately}
+              onOpenSessions={() => {
+                setPage('sessions')
+                openImmediately()
+              }}
+              onOpenPosture={() => {
+                setPage('posture')
+                openImmediately()
+              }}
+              style={metrics?.style}
+            />
+            {!expanded && (
+              <CollapsedNotice
+                onOpen={openImmediately}
+                onOpenSection={(section) => {
+                  setPage(section)
+                  openImmediately()
+                }}
+              />
+            )}
+          </>
         )}
       </div>
       {expanded && <Toasts />}
@@ -858,17 +876,27 @@ function Shell() {
   )
 }
 
+function LicensedShell() {
+  const { licenseState, licenseLocked } = useApp()
+  if (!licenseState || licenseLocked) {
+    return <Shell />
+  }
+  return (
+    <CalendarProvider>
+      <MediaProvider>
+        <PostureProvider>
+          <Shell />
+        </PostureProvider>
+      </MediaProvider>
+    </CalendarProvider>
+  )
+}
+
 export function App() {
   return (
     <ErrorBoundary>
       <AppProvider>
-        <CalendarProvider>
-          <MediaProvider>
-            <PostureProvider>
-              <Shell />
-            </PostureProvider>
-          </MediaProvider>
-        </CalendarProvider>
+        <LicensedShell />
       </AppProvider>
     </ErrorBoundary>
   )

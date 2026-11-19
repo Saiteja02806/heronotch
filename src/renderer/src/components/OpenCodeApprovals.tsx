@@ -11,7 +11,7 @@ export function OpenCodeApprovals() {
   } = useApp()
   const port = state.settings.openCodeApprovalPort
   if (!port) return null
-  if (!error && !busy && rows.length === 0) return null
+  if (!error && rows.length === 0) return null
   return (
     <section className="agent-status is-compact opencode-approvals" aria-label="OpenCode approvals">
       <div className="agent-status-head">
@@ -22,9 +22,6 @@ export function OpenCodeApprovals() {
         <div className="agent-status-error" role="alert">
           {error}
         </div>
-      )}
-      {!error && busy && rows.length === 0 && (
-        <div className="agent-status-item">Sending decision…</div>
       )}
       {rows.map((item) => (
         <article key={item.fingerprint} className="agent-status-item is-waiting">

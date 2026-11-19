@@ -142,3 +142,24 @@ test('a deleted conversation is described as one, whatever the CLI calls it', ()
   assert.equal(agent.sessionGone('Error: model overloaded'), false)
   assert.equal(agent.describeAgentFailure('claude', 'Error: model overloaded', 1), 'Error: model overloaded')
 })
+
+test('antiGravityEnv strips inherited ANTIGRAVITY_PROJECT_ID and caller metadata so cross-project sends work', () => {
+  const env = agent.antiGravityEnv(
+    { address: '127.0.0.1:49780', csrfToken: 'tok-123', version: '2.32.2', pid: 39032 },
+    {
+      PATH: 'C:\\Windows\\System32',
+      ANTIGRAVITY_PROJECT_ID: '396741ba-437d-45f5-9b2a-da12c1602a83',
+      ANTIGRAVITY_CONVERSATION_ID: 'd5268baa-7fad-4317-9703-8a84bffd9644',
+      ANTIGRAVITY_SOURCE_METADATA: '{"tool":{}}',
+      ANTIGRAVITY_TRAJECTORY_ID: 'traj-1'
+    }
+  )
+  assert.equal(env.PATH, 'C:\\Windows\\System32')
+  assert.equal(env.ANTIGRAVITY_LS_ADDRESS, '127.0.0.1:49780')
+  assert.equal(env.ANTIGRAVITY_CSRF_TOKEN, 'tok-123')
+  assert.equal(env.ANTIGRAVITY_LS_VERSION, '2.32.2')
+  assert.equal(env.ANTIGRAVITY_PROJECT_ID, undefined)
+  assert.equal(env.ANTIGRAVITY_CONVERSATION_ID, undefined)
+  assert.equal(env.ANTIGRAVITY_SOURCE_METADATA, undefined)
+  assert.equal(env.ANTIGRAVITY_TRAJECTORY_ID, undefined)
+})

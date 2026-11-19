@@ -1,4 +1,4 @@
-import { app, shell } from 'electron'
+import { app, safeStorage, shell } from 'electron'
 import { createHash, randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import http from 'node:http'
@@ -75,9 +75,15 @@ function controlError(status: number, text: string): SpotifyControlError {
   return new SpotifyControlError(readSpotifyFailure(status, text))
 }
 
-const DEMO_MEDIA = process.env.NOTCH_DEMO_MEDIA === '1'
+const DEMO_MEDIA = !app.isPackaged && process.env.NOTCH_DEMO_MEDIA === '1'
 let authInProgress = false
+let cancelActiveConnect: (() => void) | null = null
+let rateLimitedUntil = 0
 let cachedTokens: TokenFile | null | undefined
+
+export function cancelConnect(): void {
+  cancelActiveConnect?.()
+}
 
 function demoPlayback(): SpotifyPlayback {
   const started = Date.now() % 214000
@@ -109,7 +115,7 @@ function demoPlayback(): SpotifyPlayback {
 }
 
 function tokenPath(): string {
-  if (process.env.NOTCH_SPOTIFY_TOKENS) return process.env.NOTCH_SPOTIFY_TOKENS
+  if (!app.isPackaged && process.env.NOTCH_SPOTIFY_TOKENS) return process.env.NOTCH_SPOTIFY_TOKENS
   return path.join(app.getPath('userData'), 'spotify-auth.json')
 }
 
@@ -121,11 +127,35 @@ export function redirectUri(port: number): string {
   return `http://127.0.0.1:${port}/callback`
 }
 
+interface EncryptedTokenEnvelope {
+  version: 1
+  encrypted: string
+}
+
 async function loadTokens(): Promise<TokenFile | null> {
   if (cachedTokens !== undefined) return cachedTokens
   try {
     const raw = await fs.readFile(tokenPath(), 'utf8')
-    cachedTokens = JSON.parse(raw.replace(/^\uFEFF/, '')) as TokenFile
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) as TokenFile | EncryptedTokenEnvelope
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      'encrypted' in parsed &&
+      typeof parsed.encrypted === 'string'
+    ) {
+      if (!safeStorage.isEncryptionAvailable()) {
+        cachedTokens = null
+        return cachedTokens
+      }
+      const plain = safeStorage.decryptString(Buffer.from(parsed.encrypted, 'base64'))
+      cachedTokens = JSON.parse(plain) as TokenFile
+    } else {
+      cachedTokens = parsed as TokenFile
+      // Transparently migrate legacy plaintext Spotify tokens to DPAPI storage.
+      if (cachedTokens && safeStorage.isEncryptionAvailable()) {
+        void saveTokens(cachedTokens).catch(() => undefined)
+      }
+    }
   } catch {
     cachedTokens = null
   }
@@ -140,10 +170,22 @@ async function saveTokens(tokens: TokenFile | null): Promise<void> {
     return
   }
   await fs.mkdir(path.dirname(file), { recursive: true })
-  const temp = `${file}.tmp`
-  await fs.writeFile(temp, JSON.stringify(tokens, null, 2), 'utf8')
+  let serialized: string
+  if (safeStorage.isEncryptionAvailable()) {
+    const envelope: EncryptedTokenEnvelope = {
+      version: 1,
+      encrypted: safeStorage.encryptString(JSON.stringify(tokens)).toString('base64')
+    }
+    serialized = JSON.stringify(envelope, null, 2)
+  } else if (!app.isPackaged) {
+    serialized = JSON.stringify(tokens, null, 2)
+  } else {
+    throw new Error('Windows credential encryption is unavailable.')
+  }
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`
+  await fs.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 })
   await fs.rename(temp, file).catch(async () => {
-    await fs.writeFile(file, JSON.stringify(tokens, null, 2), 'utf8')
+    await fs.writeFile(file, serialized, { encoding: 'utf8', mode: 0o600 })
     await fs.unlink(temp).catch(() => undefined)
   })
 }
@@ -344,23 +386,42 @@ async function spotifyFetch(
   endpoint: string,
   init: RequestInit = {}
 ): Promise<Response> {
+  if (rateLimitedUntil > Date.now()) {
+    const waitSec = Math.max(1, Math.ceil((rateLimitedUntil - Date.now()) / 1000))
+    return new Response(JSON.stringify({ error: { status: 429, message: `Rate limited. Retry in ${waitSec}s.` } }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': String(waitSec) }
+    })
+  }
   const token = await getAccessToken(clientId)
-  const response = await fetchSpotifyWithTimeout(`https://api.spotify.com/v1${endpoint}`, {
-    ...init,
-    headers: {
-      ...(init.headers || {}),
-      Authorization: `Bearer ${token}`
+  const recordRateLimit = (res: Response): Response => {
+    if (res.status === 429) {
+      const rawRetry = Number(res.headers.get('retry-after'))
+      const seconds = Number.isFinite(rawRetry) && rawRetry > 0 ? Math.min(rawRetry, 120) : 15
+      rateLimitedUntil = Date.now() + seconds * 1000
     }
-  })
-  if (response.status === 401) {
-    const retryToken = await getAccessToken(clientId, true)
-    return fetchSpotifyWithTimeout(`https://api.spotify.com/v1${endpoint}`, {
+    return res
+  }
+  const response = recordRateLimit(
+    await fetchSpotifyWithTimeout(`https://api.spotify.com/v1${endpoint}`, {
       ...init,
       headers: {
         ...(init.headers || {}),
-        Authorization: `Bearer ${retryToken}`
+        Authorization: `Bearer ${token}`
       }
     })
+  )
+  if (response.status === 401) {
+    const retryToken = await getAccessToken(clientId, true)
+    return recordRateLimit(
+      await fetchSpotifyWithTimeout(`https://api.spotify.com/v1${endpoint}`, {
+        ...init,
+        headers: {
+          ...(init.headers || {}),
+          Authorization: `Bearer ${retryToken}`
+        }
+      })
+    )
   }
   return response
 }
@@ -412,14 +473,26 @@ export async function connect(clientId: string, port: number): Promise<SpotifySt
       if (settled) return
       settled = true
       authInProgress = false
+      cancelActiveConnect = null
       if (timeout) clearTimeout(timeout)
       server.close()
       server.closeAllConnections?.()
       fn()
     }
+    cancelActiveConnect = () => finish(() => reject(new Error('Spotify sign-in was cancelled.')))
+
+    const pageHeaders = {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'"
+    }
 
     const server = http.createServer(async (request, response) => {
       try {
+        if (request.method !== 'GET' || request.headers.host !== `127.0.0.1:${port}`) {
+          response.writeHead(404).end()
+          return
+        }
         const requestUrl = new URL(request.url || '/', uri)
         if (requestUrl.pathname !== '/callback') {
           response.writeHead(404).end()
@@ -429,16 +502,23 @@ export async function connect(clientId: string, port: number): Promise<SpotifySt
         const code = requestUrl.searchParams.get('code')
         const returnedState = requestUrl.searchParams.get('state')
 
-        if (error || !code || returnedState !== state) {
-          response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        if (returnedState !== state) {
+          // Do not abort an active sign-in on a mismatched state (prevents local DoS).
+          response.writeHead(400, pageHeaders)
+          response.end(resultPage(false, 'The sign-in state did not match. Return to Notch and try again.'))
+          return
+        }
+
+        if (error || !code) {
+          response.writeHead(200, pageHeaders)
           response.end(resultPage(false, error || 'The sign-in response did not look right.'))
           finish(() => reject(new Error('Spotify sign-in was cancelled.')))
           return
         }
 
-        const tokens = await exchangeCode(clientId, code, verifier, port)
+        const tokens = await exchangeCode(clientId.trim(), code, verifier, port)
         await saveTokens(tokens)
-        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        response.writeHead(200, pageHeaders)
         response.end(resultPage(true, 'Notch is connected to Spotify. You can close this tab.'))
         finish(() =>
           resolve({
@@ -451,7 +531,7 @@ export async function connect(clientId: string, port: number): Promise<SpotifySt
           })
         )
       } catch (error) {
-        response.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' })
+        response.writeHead(500, pageHeaders)
         response.end(resultPage(false, error instanceof Error ? error.message : 'Sign-in failed.'))
         finish(() => reject(error instanceof Error ? error : new Error('Spotify sign-in failed.')))
       }
@@ -1012,9 +1092,24 @@ export async function performAction(
   }
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) =>
+    char === '&'
+      ? '&amp;'
+      : char === '<'
+        ? '&lt;'
+        : char === '>'
+          ? '&gt;'
+          : char === '"'
+            ? '&quot;'
+            : '&#39;'
+  )
+}
+
 function resultPage(success: boolean, message: string): string {
   const accent = success ? '#a8e36b' : '#ff6f61'
   const title = success ? 'Connected.' : 'Not connected.'
+  const safeMessage = escapeHtml(String(message || '').slice(0, 400))
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1045,7 +1140,7 @@ function resultPage(success: boolean, message: string): string {
   <div class="card">
     <div class="brand"><span class="dot"></span> Notch × Spotify</div>
     <h1>${title}</h1>
-    <p>${message}</p>
+    <p>${safeMessage}</p>
     <small>You can close this tab and return to Notch.</small>
   </div>
 </body>

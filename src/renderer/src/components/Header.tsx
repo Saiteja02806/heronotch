@@ -1,7 +1,9 @@
-import { Maximize2, Minimize2, Settings2 } from 'lucide-react'
+import { Check, Maximize2, Minimize2, Settings2, SlidersHorizontal } from 'lucide-react'
 import { motion } from 'framer-motion'
+import { useEffect } from 'react'
 import { useApp } from '../state/AppContext'
 import { useNowWhen } from '../state/clock'
+import { useHomeEdit } from '../state/HomeEditContext'
 import { SECTION_META, sectionPrefs, visibleSections } from '../lib/sections'
 import { formatDateShort, todayKey } from '../lib/time'
 
@@ -43,12 +45,17 @@ export function SectionNav() {
 
 export function Header() {
   const { page, setPage, state, openSettings, updateSettings, expanded, updateState } = useApp()
+  const { editing, setEditing } = useHomeEdit()
   const now = useNowWhen(expanded)
   const compact = state.settings.panelSize === 'compact'
   const firstSection = visibleSections(sectionPrefs(state), { compact })[0]
   const clock = new Date(now).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
   const hasUpdateNotice =
     updateState?.status === 'available' || updateState?.status === 'downloaded'
+
+  useEffect(() => {
+    if ((!expanded || page !== 'home') && editing) setEditing(false)
+  }, [expanded, page, editing, setEditing])
 
   return (
     <header className="topbar">
@@ -59,6 +66,19 @@ export function Header() {
           <span>{formatDateShort(todayKey())}</span>
           <strong>{clock}</strong>
         </div>
+        {page === 'home' && (
+          <button
+            type="button"
+            data-home-edit-toggle="true"
+            className={`close-notch is-customize ${editing ? 'is-active' : ''}`}
+            onClick={() => setEditing((current) => !current)}
+            title={editing ? 'Finish customizing Home' : 'Customize Home sections and layout'}
+            aria-pressed={editing}
+          >
+            {editing ? <Check size={13} /> : <SlidersHorizontal size={13} />}
+            <span>{editing ? 'Done' : 'Customize'}</span>
+          </button>
+        )}
         <button
           data-demo-settings-btn="true"
           className={`icon-button has-badge ${page === 'settings' ? 'is-on' : ''}`}

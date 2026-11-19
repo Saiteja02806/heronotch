@@ -324,8 +324,8 @@ export function MediaProvider({ children }: { children: ReactNode }) {
     if (presenceHidden) return
     void refreshPlayer(true)
     // A collapsed notch only draws a slim progress line, and that line is
-    // extrapolated from the last sample, so it does not need a read a second.
-    const pollMs = status?.connected ? 5000 : expanded ? 1000 : 3000
+    // extrapolated from the last sample, so it does not need frequent polls.
+    const pollMs = status?.connected ? (expanded ? 5000 : 15_000) : expanded ? 1000 : 3000
     const interval = setInterval(() => void refreshPlayer(true), pollMs)
     return () => clearInterval(interval)
   }, [hasSource, expanded, presenceHidden, status?.connected, refreshPlayer])
@@ -385,7 +385,23 @@ export function MediaProvider({ children }: { children: ReactNode }) {
         actionPending.current = false
         pollVersion.current += 1
         setPending(null)
-        applyPlayback(retainPlayback(result, playbackRef.current, selected.preference))
+        const previous = playbackRef.current
+        const mergedResult =
+          result.source === 'local' &&
+          statusRef.current?.connected &&
+          previous?.source === 'api' &&
+          (!result.localSessionId || result.localSessionId.toLowerCase().includes('spotify'))
+            ? {
+                ...result,
+                source: 'api' as const,
+                queueAvailable: true,
+                device: previous.device ?? result.device,
+                volume: previous.volume,
+                shuffle: previous.shuffle,
+                repeat: previous.repeat
+              }
+            : result
+        applyPlayback(retainPlayback(mergedResult, previous, selected.preference))
         setError(null)
         if (!phaseFromDemo(statusRef.current?.demoPhase)) setPhase('idle')
         if (nextAction.type === 'play' || nextAction.type === 'pause') {

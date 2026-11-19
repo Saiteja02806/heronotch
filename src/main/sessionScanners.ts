@@ -150,6 +150,14 @@ async function scanCursor(): Promise<CodingSession[]> {
           (/generating|running|streaming|in_progress/i.test(String(parsed.status || '')) ||
             (Array.isArray(parsed.generatingBubbleIds) && parsed.generatingBubbleIds.length > 0))
         seen.add(rawId)
+        let decodedDir: string | null = null
+        if (directory) {
+          try {
+            decodedDir = decodeURIComponent(directory)
+          } catch {
+            decodedDir = directory
+          }
+        }
         found.push(
           session({
             provider: 'cursor',
@@ -157,7 +165,7 @@ async function scanCursor(): Promise<CodingSession[]> {
             rawId,
             title,
             fallbackTitle: 'Cursor chat',
-            directory: directory ? decodeURIComponent(directory) : null,
+            directory: decodedDir,
             updatedAt,
             active,
             subagent: header?.subagent === true,
@@ -499,11 +507,36 @@ async function scanVsCodeFamily(): Promise<CodingSession[]> {
     candidates.sort((a, b) => b.mtime - a.mtime)
     const found: CodingSession[] = []
     for (const candidate of candidates.slice(0, MAX_PER_PROVIDER)) {
+      const rawText = await readTextCapped(candidate.file).catch(() => '')
+      if (!rawText) continue
       let parsed: VsCodeChatFile | null = null
       try {
-        parsed = JSON.parse(await readTextCapped(candidate.file)) as VsCodeChatFile
+        parsed = JSON.parse(rawText) as VsCodeChatFile
       } catch {
-        continue
+        // Files exceeding the readTextCapped byte limit truncate mid-JSON; recover
+        // header fields from the prefix rather than silently dropping the session.
+        const customTitle = rawText.match(/"customTitle"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1]
+        const sessionId = rawText.match(/"sessionId"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1]
+        const firstText = rawText.match(/"message"\s*:\s*\{[^{}]*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1]
+        const lastDate = rawText.match(/"lastMessageDate"\s*:\s*(\d+)/)?.[1]
+        const createdDate = rawText.match(/"creationDate"\s*:\s*(\d+)/)?.[1]
+        if (customTitle || sessionId || firstText) {
+          const unescape = (v?: string): string | undefined => {
+            if (!v) return undefined
+            try {
+              return JSON.parse(`"${v}"`) as string
+            } catch {
+              return v
+            }
+          }
+          parsed = {
+            sessionId: unescape(sessionId),
+            customTitle: unescape(customTitle),
+            lastMessageDate: lastDate ? Number(lastDate) : undefined,
+            creationDate: createdDate ? Number(createdDate) : undefined,
+            requests: firstText ? [{ message: { text: unescape(firstText) } }] : undefined
+          }
+        }
       }
       if (!parsed) continue
       const first = parsed.requests?.find((request) => request?.message?.text)?.message?.text

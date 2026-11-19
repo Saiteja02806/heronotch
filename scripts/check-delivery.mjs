@@ -259,14 +259,31 @@ test('Anti Gravity steps confirm the message bytes and honour the step mark', as
       (await delivery.confirmDeliveredMessage('antigravity', rawId, 'not there', options)).check,
       'missing'
     )
+    const capturedMark = await delivery.captureDeliveryMark('antigravity', rawId, { home })
+    assert.equal(capturedMark?.stepIndex, 4)
     assert.equal(
       (
         await delivery.confirmDeliveredMessage('antigravity', rawId, TRICKY, {
           ...options,
-          mark: { stepIndex: 4 }
+          mark: capturedMark
         })
       ).check,
       'missing'
+    )
+    const logDir = path.join(home, '.gemini', 'antigravity', 'brain', rawId, '.system_generated', 'logs')
+    await mkdir(logDir, { recursive: true })
+    await writeFile(
+      path.join(logDir, 'transcript.jsonl'),
+      `${JSON.stringify({ step_index: 5, type: 'SYSTEM_MESSAGE', content: 'queued via agentapi' })}\n`
+    )
+    assert.equal(
+      (
+        await delivery.confirmDeliveredMessage('antigravity', rawId, 'queued via agentapi', {
+          ...options,
+          mark: capturedMark
+        })
+      ).check,
+      'confirmed'
     )
     assert.equal(await delivery.sessionPresence('antigravity', rawId, { home }), 'exists')
     assert.equal(await delivery.sessionPresence('antigravity', 'unknown-id', { home }), 'unknown')

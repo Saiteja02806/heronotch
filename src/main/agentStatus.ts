@@ -22,12 +22,21 @@ import type {
   AgentPermission,
   AgentQuestion,
   AgentQuestionOption,
+  AgentQuestionResponse,
   AgentQuestionStep,
+  AgentQuestionStepAnswer,
   AgentSnapshot,
   AgentState,
   AgentStatus,
   AgentTool
 } from '../shared/types'
+import {
+  normalizeQuestionResponse,
+  questionSteps,
+  stepAnswerDetailedTexts,
+  stepAnswerTexts,
+  summarizeQuestionAnswers
+} from '../shared/questionAnswers'
 
 const TOOLS: AgentTool[] = ['antigravity', 'claude', 'codex', 'cursor', 'gemini', 'cline', 'copilot', 'deepai', 'grok']
 const STATES: AgentState[] = ['working', 'waiting', 'done']
@@ -267,68 +276,27 @@ function decisionFor(
 }
 
 function questionStepList(question: AgentQuestion): AgentQuestionStep[] {
-  if (question.steps && question.steps.length > 0) return question.steps
-  return [
-    {
-      title: question.title,
-      detail: question.detail,
-      options: question.options,
-      multiSelect: question.multiSelect
-    }
-  ]
+  return questionSteps(question)
 }
 
-function normalizeChoiceMatrix(question: AgentQuestion, choices: number[] | number[][]): number[][] {
-  const steps = questionStepList(question)
-  if (!Array.isArray(choices) || choices.length === 0) {
-    throw new Error('Pick at least one option.')
-  }
-  const isMatrix = Array.isArray(choices[0])
-  if (!isMatrix) {
-    const step0 = steps[0]
-    const valid = [...new Set(choices as number[])]
-      .filter((choice) => Number.isInteger(choice) && choice >= 0 && choice < step0.options.length)
-      .sort((a, b) => a - b)
-    if (valid.length === 0) throw new Error('Pick at least one option.')
-    if (step0.multiSelect === false && valid.length > 1) valid.splice(1)
-    return [valid]
-  }
-  const matrix = choices as number[][]
-  const out: number[][] = []
-  for (let i = 0; i < steps.length; i += 1) {
-    const step = steps[i]
-    const rawStepChoices = Array.isArray(matrix[i]) ? matrix[i] : []
-    const valid = [...new Set(rawStepChoices)]
-      .filter((choice) => Number.isInteger(choice) && choice >= 0 && choice < step.options.length)
-      .sort((a, b) => a - b)
-    if (valid.length === 0) throw new Error('Pick at least one option.')
-    if (step.multiSelect === false && valid.length > 1) valid.splice(1)
-    out.push(valid)
-  }
-  return out
+function normalizeStepAnswers(
+  question: AgentQuestion,
+  response: AgentQuestionResponse
+): AgentQuestionStepAnswer[] {
+  return normalizeQuestionResponse(questionStepList(question), response)
 }
 
-function summarizeAnsweredChoiceMatrix(question: AgentQuestion, choiceMatrix: number[][]): string {
-  const steps = questionStepList(question)
-  return choiceMatrix
-    .map((stepChoices, sIdx) => {
-      const step = steps[sIdx] || steps[0]
-      return stepChoices
-        .map((index) => step.options[index]?.label || '')
-        .filter(Boolean)
-        .join(' | ')
-    })
-    .filter(Boolean)
-    .join(' · ')
+function summarizeAnsweredSteps(question: AgentQuestion, answers: AgentQuestionStepAnswer[]): string {
+  return summarizeQuestionAnswers(questionStepList(question), answers)
 }
 
 /** A session asked the user to pick from options and the answer came from the
  * notch. Hook output cannot select an option, so the answer rides back as the
  * block reason: the tool reads it as the user's reply and moves on. */
-function decisionForQuestion(
+export function decisionForQuestion(
   tool: AgentTool,
   question: AgentQuestion,
-  choiceMatrix: number[][],
+  stepAnswers: AgentQuestionStepAnswer[],
   hookEventName?: string,
   rawToolInput?: Record<string, unknown> | null
 ): object {
@@ -337,18 +305,15 @@ function decisionForQuestion(
     rawToolInput && Array.isArray(rawToolInput.questions)
       ? (rawToolInput.questions as Record<string, unknown>[])
       : null
-  const answeredSteps = choiceMatrix
-    .map((stepChoices, sIdx) => {
+  const answeredSteps = stepAnswers
+    .map((stepAnswer, sIdx) => {
       const step = steps[sIdx]
       if (!step) return null
-      const picked = stepChoices
-        .map((index) => step.options[index])
-        .filter((option): option is AgentQuestionOption => Boolean(option))
-      if (picked.length === 0) return null
-      const answer = picked
-        .map((option) => (option.description ? `${option.label} (${option.description})` : option.label))
-        .join(' | ')
-      const plainAnswer = picked.map((option) => option.label).join(', ')
+      const detailed = stepAnswerDetailedTexts(step, stepAnswer)
+      const plain = stepAnswerTexts(step, stepAnswer)
+      if (plain.length === 0) return null
+      const answer = detailed.join(' | ')
+      const plainAnswer = plain.join(', ')
       const rawKey = typeof rawQuestions?.[sIdx]?.question === 'string' ? rawQuestions[sIdx].question : step.title
       return { title: step.title, rawKey, answer, plainAnswer }
     })
@@ -443,6 +408,26 @@ function arrayFrom(value: unknown): unknown[] | null {
     }
   }
   return null
+}
+
+const QUESTION_TOOL_NAME_RE =
+  /^(?:AskUserQuestion|ask_?user(?:_?question)?|ask_?questions?|ask_?followup_?question|request_?user_?input(?:_?async)?)$/i
+
+function extractHookToolName(body: Record<string, unknown>): string {
+  const nestedToolCall = objectFrom(body.tool_call) ?? objectFrom(body.toolCall)
+  const preTool = objectFrom(body.preToolUse)
+  const raw =
+    body.tool_name ??
+    body.toolName ??
+    nestedToolCall?.name ??
+    preTool?.toolName ??
+    body.name
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+function isQuestionToolHook(body: Record<string, unknown>): boolean {
+  const name = extractHookToolName(body)
+  return Boolean(name && QUESTION_TOOL_NAME_RE.test(name))
 }
 
 /** Recognise a multiple-choice question in a hook payload across Claude Code,
@@ -543,7 +528,11 @@ function parseQuestion(body: Record<string, unknown>): ParsedQuestion | null {
   return null
 }
 
-function finish(id: string, reply: 'allow' | 'deny' | null, choiceMatrix?: number[][]): void {
+function finish(
+  id: string,
+  reply: 'allow' | 'deny' | null,
+  stepAnswers?: AgentQuestionStepAnswer[]
+): void {
   const entry = held.get(id)
   if (!entry) return
   clearTimeout(entry.timer)
@@ -552,9 +541,9 @@ function finish(id: string, reply: 'allow' | 'deny' | null, choiceMatrix?: numbe
   const answeredQuestion =
     entry.kind === 'question' &&
     entry.question &&
-    choiceMatrix &&
-    choiceMatrix.length > 0 &&
-    choiceMatrix[0].length > 0
+    stepAnswers &&
+    stepAnswers.length > 0 &&
+    stepAnswers.some((ans) => ans.choices.length > 0 || Boolean(ans.customText))
   if (reply) {
     statuses.set(item.tool, {
       tool: item.tool,
@@ -568,7 +557,7 @@ function finish(id: string, reply: 'allow' | 'deny' | null, choiceMatrix?: numbe
     statuses.set(item.tool, {
       tool: item.tool,
       state: 'working',
-      title: `Answered in Notch: ${summarizeAnsweredChoiceMatrix(entry.question!, choiceMatrix!)}`,
+      title: `Answered in Notch: ${summarizeAnsweredSteps(entry.question!, stepAnswers!)}`,
       detail: entry.question!.title,
       at: Date.now()
     })
@@ -581,7 +570,7 @@ function finish(id: string, reply: 'allow' | 'deny' | null, choiceMatrix?: numbe
       res.end(
         JSON.stringify(
           answeredQuestion
-            ? decisionForQuestion(item.tool, entry.question, choiceMatrix!, hookEventName, rawToolInput)
+            ? decisionForQuestion(item.tool, entry.question, stepAnswers!, hookEventName, rawToolInput)
             : {}
         )
       )
@@ -609,19 +598,19 @@ export function decide(id: string, reply: 'allow' | 'deny'): void {
   throw new Error('That request is no longer waiting.')
 }
 
-/** Send the user's chosen options back to the session that is waiting. */
-export function decideQuestion(id: string, choices: number[] | number[][]): void {
+/** Send the user's chosen options and/or custom typed text back to the session that is waiting. */
+export function decideQuestion(id: string, response: AgentQuestionResponse): void {
   const entry = held.get(id)
   if (entry) {
     if (entry.kind !== 'question' || !entry.question) throw new Error('That request is not a question.')
-    const matrix = normalizeChoiceMatrix(entry.question, choices)
-    finish(id, null, matrix)
+    const answers = normalizeStepAnswers(entry.question, response)
+    finish(id, null, answers)
     return
   }
   const nativeQ = getNativeQuestions().find((q) => q.id === id)
   if (nativeQ) {
-    const matrix = normalizeChoiceMatrix(nativeQ, choices)
-    decideNativeQuestion(id, matrix)
+    const answers = normalizeStepAnswers(nativeQ, response)
+    decideNativeQuestion(id, answers)
     return
   }
   if (hasNativePermission(id)) {
@@ -651,13 +640,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   res.setHeader('Cache-Control', 'no-store')
   res.setHeader('Referrer-Policy', 'no-referrer')
   res.setHeader('X-Content-Type-Options', 'nosniff')
-  // The bridge is loopback-only and token-guarded, so a browser page on the
-  // desktop can safely check its own status without a preflight failure.
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', '*')
   if (req.method === 'OPTIONS') {
-    res.writeHead(204).end()
+    res.writeHead(405).end()
     return
   }
   if (!authorized(req)) {
@@ -688,8 +672,21 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           : Array.isArray(body.choice)
             ? body.choice
             : null
+        const rawAnswers = Array.isArray(body.answers) ? body.answers : null
+        const rawCustomText = typeof body.customText === 'string' ? body.customText : null
         if (body.release === true) {
           releaseQuestion(body.id)
+        } else if (rawAnswers) {
+          const parsedAnswers: AgentQuestionStepAnswer[] = rawAnswers.map((row) => {
+            const entry = row && typeof row === 'object' ? (row as Record<string, unknown>) : {}
+            const choices = Array.isArray(entry.choices) ? entry.choices.map(Number) : []
+            const customText = typeof entry.customText === 'string' ? entry.customText : undefined
+            return customText ? { choices, customText } : { choices }
+          })
+          decideQuestion(body.id, parsedAnswers)
+        } else if (rawCustomText && rawCustomText.trim()) {
+          const choices = rawChoice && !Array.isArray(rawChoice[0]) ? rawChoice.map(Number) : []
+          decideQuestion(body.id, [{ choices, customText: rawCustomText }])
         } else if (rawChoice) {
           const parsedChoice: number[] | number[][] = Array.isArray(rawChoice[0])
             ? (rawChoice as unknown[][]).map((row) => (Array.isArray(row) ? row.map(Number) : []))
@@ -717,15 +714,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           : typeof body.hookEventName === 'string'
             ? body.hookEventName
             : undefined
-      // A permission-shaped hook can carry a multiple-choice question (Claude
-      // Code's AskUserQuestion rides PreToolUse like any other tool), so check
-      // for options before treating it as approve-or-deny.
-      const parsedQuestion = parseQuestion(body)
+      // Only parse multiple-choice questions on explicit question hooks, or on
+      // permission hooks whose tool name is a known interactive question tool
+      // (so ordinary tools whose inputs happen to have `options` are never
+      // auto-approved as questions).
+      const parsedQuestion =
+        kind === 'question' || (kind === 'permission' && isQuestionToolHook(body))
+          ? parseQuestion(body)
+          : null
       if (parsedQuestion) {
-        if (kind !== 'question' && kind !== 'permission') {
-          res.writeHead(400).end('Questions ride permission hooks.')
-          return
-        }
         const id = randomBytes(9).toString('hex')
         const question: AgentQuestion = {
           id,
@@ -1619,7 +1616,11 @@ export async function sendCodexDesktopMessage(
         : { reason: 'error' as const, error: res.error || 'Codex Desktop rejected the message.' }
     })
   } catch (cause) {
-    return { reason: 'error', error: cause instanceof Error ? cause.message : String(cause) }
+    const message = cause instanceof Error ? cause.message : String(cause)
+    if (/ENOENT|ECONNREFUSED|timeout/i.test(message)) {
+      return { reason: 'no-owner' }
+    }
+    return { reason: 'error', error: message }
   }
 }
 
@@ -1783,6 +1784,17 @@ async function resolveAntiGravityDaemon(): Promise<{ httpPort: number; csrfToken
   candidates.sort((a, b) => b.mtime - a.mtime)
   for (const candidate of candidates.slice(0, 6)) {
     try {
+      const pidMatch = path.basename(candidate.file).match(/^hub_(\d+)\.json$/)
+      if (pidMatch) {
+        const pid = Number(pidMatch[1])
+        if (Number.isInteger(pid) && pid > 0) {
+          try {
+            process.kill(pid, 0)
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException)?.code === 'ESRCH') continue
+          }
+        }
+      }
       const parsed = JSON.parse(await fs.readFile(candidate.file, 'utf8')) as {
         httpPort?: number
         csrfToken?: string
@@ -1795,6 +1807,7 @@ async function resolveAntiGravityDaemon(): Promise<{ httpPort: number; csrfToken
       }).catch(() => null)
       if (!res) continue
       await res.body?.cancel().catch(() => undefined)
+      if (!res.ok) continue
       agTargetCache = { at: Date.now(), httpPort, csrfToken }
       return agTargetCache
     } catch {
@@ -1962,14 +1975,20 @@ function parseAntiGravityWaitingStep(
       step.runCommand && typeof step.runCommand === 'object'
         ? (step.runCommand as Record<string, unknown>)
         : null
-    const cmd = clean(rc?.proposedCommandLine ?? rc?.commandLine, 320)
+    const rawCmd =
+      typeof rc?.proposedCommandLine === 'string'
+        ? rc.proposedCommandLine
+        : typeof rc?.commandLine === 'string'
+          ? rc.commandLine
+          : ''
+    const cmd = clean(rawCmd, 320)
     title = cmd ? `Run ${cmd}` : 'Run terminal command'
     detailText = clean(rc?.cwd ?? convTitle, 600)
     buildPermissionPayload = (reply) => ({
       runCommand: {
         confirm: reply === 'allow',
-        proposedCommandLine: cmd,
-        submittedCommandLine: cmd
+        proposedCommandLine: rawCmd || cmd,
+        submittedCommandLine: rawCmd || cmd
       }
     })
   } else {
@@ -3013,15 +3032,15 @@ function decideNativePermission(id: string, reply: 'allow' | 'deny'): boolean {
   return true
 }
 
-function decideNativeQuestion(id: string, choiceMatrix: number[][]): boolean {
+function decideNativeQuestion(id: string, stepAnswers: AgentQuestionStepAnswer[]): boolean {
   const question = nativeQuestions.get(id)
   if (!question) return false
   nativeQuestions.delete(id)
 
   const stepList = questionStepList(question)
   const chosenLabelsPerStep = stepList.map((step, sIdx) => {
-    const indices = choiceMatrix[sIdx] || []
-    return indices.map((i) => step.options[i]?.label || '').filter(Boolean)
+    const ans = stepAnswers[sIdx] || { choices: [] }
+    return stepAnswerTexts(step, ans)
   })
   const summaryLabels = chosenLabelsPerStep.map((labels) => labels.join(', ')).filter(Boolean).join(' · ')
 
@@ -3030,15 +3049,17 @@ function decideNativeQuestion(id: string, choiceMatrix: number[][]): boolean {
     agActiveItems.delete(id)
     if (detail && detail.rawQuestions) {
       const responses = detail.rawQuestions.map((q, qIdx) => {
-        const pickedIndices = choiceMatrix[qIdx] || []
-        const selectedOptionIds = pickedIndices
+        const ans = stepAnswers[qIdx] || { choices: [] }
+        const selectedOptionIds = ans.choices
           .map((optIdx) => String(q.options?.[optIdx]?.id ?? ''))
           .filter(Boolean)
+        const writeInResponse = ans.customText?.trim() || ''
         return {
           question: q.question,
           options: q.options,
           ...(q.isMultiSelect || q.is_multi_select || q.multiSelect ? { isMultiSelect: true } : {}),
-          selectedOptionIds
+          selectedOptionIds,
+          ...(writeInResponse ? { writeInResponse } : {})
         }
       })
       sendAntiGravityInteraction(detail, { askQuestion: { responses } })
@@ -3067,11 +3088,12 @@ function decideNativeQuestion(id: string, choiceMatrix: number[][]): boolean {
       item && item.rawQuestions.length > 0
         ? item.rawQuestions
             .map((q, idx) => {
-              const picked = choiceMatrix[idx] || []
-              return picked
+              const ans = stepAnswers[idx] || { choices: [] }
+              const picked = ans.choices
                 .map((i) => clean(q.options?.[i]?.label ?? q.options?.[i]?.text, 140))
                 .filter(Boolean)
-                .join(', ')
+              if (ans.customText?.trim()) picked.push(ans.customText.trim())
+              return picked.join(', ')
             })
             .filter(Boolean)
             .join(' · ')
@@ -3082,10 +3104,11 @@ function decideNativeQuestion(id: string, choiceMatrix: number[][]): boolean {
           ? item.rawQuestions
           : stepList.map((s) => ({ question: s.title, options: [] }))
       const labelsPerStep = rawQs.map((q, idx) => {
-        const picked = choiceMatrix[idx] || []
-        const labels = picked
+        const ans = stepAnswers[idx] || { choices: [] }
+        const labels = ans.choices
           .map((i) => clean(q.options?.[i]?.label ?? q.options?.[i]?.text, 240))
           .filter(Boolean)
+        if (ans.customText?.trim()) labels.push(ans.customText.trim())
         return labels.length > 0 ? labels : chosenLabelsPerStep[idx] || []
       })
       void submitCodexAsyncQuestionReply(item.threadId, item.callId, rawQs, labelsPerStep).then((res) => {
@@ -3178,11 +3201,14 @@ function releaseNativeQuestion(id: string): boolean {
 export function isNotchHookEntry(entry: unknown): boolean {
   const raw = JSON.stringify(entry)
   if (!raw) return false
-  if (raw.includes('127.0.0.1:')) return true
+  const matchesNotch = (text: string): boolean =>
+    text.includes('127.0.0.1:') &&
+    (text.includes('/hook?tool=') || text.includes('/status?tool=') || text.includes('X-Notch-Token'))
+  if (matchesNotch(raw)) return true
   const match = raw.match(/-EncodedCommand\s+([A-Za-z0-9+/=]+)/i)
   if (!match) return false
   try {
-    return Buffer.from(match[1], 'base64').toString('utf16le').includes('127.0.0.1:')
+    return matchesNotch(Buffer.from(match[1], 'base64').toString('utf16le'))
   } catch {
     return false
   }

@@ -68,3 +68,13 @@ test('a vanished session can be dropped with its messages', () => {
   assert.equal(queue.size('s2'), 1)
   assert.deepEqual(queue.sessions(), ['s2'])
 })
+
+test('AppContext onSendResult ignores queued status so queued sends never show a failure toast', () => {
+  const appCtx = readFileSync(new URL('../src/renderer/src/state/AppContext.tsx', import.meta.url), 'utf8')
+  const start = appCtx.indexOf('window.notch.sessions.onSendResult')
+  assert.ok(start > 0, 'AppContext must subscribe to onSendResult')
+  const block = appCtx.slice(start, start + 700)
+  assert.match(block, /if\s*\(\s*result\.status\s*===\s*'queued'\s*\)\s*return/)
+  assert.match(block, /if\s*\(\s*result\.status\s*===\s*'delivered'\s*\)\s*return/)
+  assert.match(block, /if\s*\(\s*result\.status\s*===\s*'unconfirmed'\s*\)\s*(?:return|\{[\s\S]*?return[\s\S]*?\})/)
+})

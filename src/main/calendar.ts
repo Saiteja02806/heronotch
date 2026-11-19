@@ -11,7 +11,7 @@ import { createCalendarDiskCache } from './calendarCache'
 const BASE = 'https://gswnffijfmhinavyxitz.supabase.co'
 // Dev preview: NOTCH_CALENDAR_STUB=1 runs this UI against fixtures so the
 // agenda can be built and checked before the backend is deployed.
-const STUB = process.env.NOTCH_CALENDAR_STUB === '1'
+const STUB = !app.isPackaged && process.env.NOTCH_CALENDAR_STUB === '1'
 // Public client key. No management token, service-role key or Google secret belongs here.
 const PUBLIC_KEY = 'sb_publishable_fB-rNuZeIxz_bsQQNy_v4A_zby4Dz51'
 const REDIRECT = 'http://127.0.0.1:43822/calendar/callback'
@@ -27,7 +27,7 @@ class CalendarRequestError extends Error {
 }
 const sessionPath = () => path.join(app.getPath('userData'), 'calendar-session.enc')
 const cachePath = (): string | null => {
-  if (process.env.NOTCH_CALENDAR_CACHE_PATH) return process.env.NOTCH_CALENDAR_CACHE_PATH
+  if (!app.isPackaged && process.env.NOTCH_CALENDAR_CACHE_PATH) return process.env.NOTCH_CALENDAR_CACHE_PATH
   if (STUB) return null
   return path.join(app.getPath('userData'), 'calendar-cache.enc')
 }
@@ -52,7 +52,7 @@ async function request(url: string, init: RequestInit = {}) {
   if (!response.ok) {
     if (response.status === 404 && data.code === 'NOT_FOUND') throw new CalendarRequestError('The Notch Calendar backend is not available yet.', 404)
     const message = url.includes('/functions/v1/notch-calendar') && typeof data.error === 'string'
-      ? data.error.slice(0, 240) : 'Todaywise sign-in failed. Please reconnect Google Calendar.'
+      ? data.error.slice(0, 240) : 'Notch Calendar sign-in failed. Please reconnect Google Calendar.'
     throw new CalendarRequestError(message, response.status)
   }
   return data
@@ -73,14 +73,19 @@ async function loadSession(): Promise<Session | null> {
 }
 async function saveSession(value: Session) {
   if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is unavailable. Calendar sign-in was not saved.')
-  await fs.mkdir(path.dirname(sessionPath()), { recursive: true })
-  const tmp = `${sessionPath()}.tmp`
-  await fs.writeFile(tmp, safeStorage.encryptString(JSON.stringify(value)), { mode: 0o600 })
-  await fs.rename(tmp, sessionPath())
+  const target = sessionPath()
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  const encrypted = safeStorage.encryptString(JSON.stringify(value))
+  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`
+  await fs.writeFile(tmp, encrypted, { mode: 0o600 })
+  await fs.rename(tmp, target).catch(async () => {
+    await fs.writeFile(target, encrypted, { mode: 0o600 })
+    await fs.unlink(tmp).catch(() => undefined)
+  })
   current = value
 }
 function sessionFrom(data: any): Session {
-  if (!data.access_token || !data.refresh_token || !data.user?.id || !Number.isFinite(data.expires_in)) throw new Error('Todaywise returned an incomplete sign-in.')
+  if (!data.access_token || !data.refresh_token || !data.user?.id || !Number.isFinite(data.expires_in)) throw new Error('Notch Calendar returned an incomplete sign-in.')
   return { accessToken: data.access_token, refreshToken: data.refresh_token,
     expiresAt: Date.now() + data.expires_in * 1000, userId: data.user.id, email: data.user.email || '' }
 }
@@ -133,11 +138,22 @@ export async function calendarStatus(): Promise<CalendarStatus> {
     await diskCache.clear()
     return { configured: true, signedIn: false, connected: false, userId: null, email: null }
   }
-  const signedIn = await session()
-  const data = await backend({ action: 'status' }, signedIn)
-  const nextStatus: CalendarStatus = { configured: true, signedIn: true, connected: data.connected === true, userId: signedIn.userId, email: signedIn.email }
-  diskCache.recordStatus(nextStatus)
-  return nextStatus
+  try {
+    const signedIn = await session()
+    const data = await backend({ action: 'status' }, signedIn)
+    const nextStatus: CalendarStatus = { configured: true, signedIn: true, connected: data.connected === true, userId: signedIn.userId, email: signedIn.email }
+    if (!nextStatus.connected) await diskCache.clear()
+    else diskCache.recordStatus(nextStatus)
+    return nextStatus
+  } catch (error) {
+    if (error instanceof CalendarRequestError && (error.status === 400 || error.status === 401 || error.status === 403)) {
+      current = null
+      await diskCache.clear()
+      await fs.unlink(sessionPath()).catch(() => undefined)
+      return { configured: true, signedIn: false, connected: false, userId: null, email: null }
+    }
+    throw error
+  }
 }
 export function cancelCalendarConnect(): void { cancelLogin?.() }
 export function connectCalendar(): Promise<CalendarStatus> {
@@ -167,7 +183,13 @@ async function beginConnect(): Promise<CalendarStatus> {
       if (error) reject(error); else resolve(result!)
     }
     const server = createServer(async (req, res) => {
-      const url = new URL(req.url || '/', REDIRECT)
+      let url: URL
+      try {
+        url = new URL(req.url || '/', REDIRECT)
+      } catch {
+        res.writeHead(400).end('Bad request')
+        return
+      }
       res.setHeader('Cache-Control', 'no-store')
       res.setHeader('Content-Type', 'text/plain; charset=utf-8')
       if (req.method !== 'GET' || req.headers.host !== '127.0.0.1:43822' || url.pathname !== '/calendar/callback') {
@@ -206,7 +228,7 @@ async function beginConnect(): Promise<CalendarStatus> {
 }
 export async function disconnectCalendar(): Promise<void> {
   cancelCalendarConnect()
-  const saved = await loadSession()
+  const saved = await loadSession().catch(() => null)
   if (saved) {
     await backend({ action: 'disconnect' }).catch(() => undefined)
   }

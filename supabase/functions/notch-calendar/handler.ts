@@ -91,7 +91,15 @@ export function createCalendarHandler(config: Config, fetcher: typeof fetch = fe
       body: JSON.stringify({ encrypted_grant: await encrypt(userId, next), updated_at: new Date().toISOString() })
     })
     if (!updated.ok) throw new Failure(503, 'Calendar authorization could not be refreshed.')
-    if (!(await updated.json()).length) throw new Failure(409, 'Calendar authorization changed. Try again.')
+    if (!(await updated.json()).length) {
+      // Another concurrent request (e.g. calendars + day events) may have won the CAS update.
+      // Re-read the winning grant once before failing with 409.
+      const latest = await readGrant(userId)
+      if (latest && subjects.includes(latest.grant.subject) && latest.grant.expiresAt > Date.now() + 60000) {
+        return latest.grant
+      }
+      throw new Failure(409, 'Calendar authorization changed. Try again.')
+    }
     return next
   }
   async function google(grant: Grant, path: string, init: RequestInit = {}) {
@@ -114,7 +122,7 @@ export function createCalendarHandler(config: Config, fetcher: typeof fetch = fe
     if (typeof input !== 'string' || !input || input === '.' || input === '..' || input.length > 1024 || /[\x00-\x1f]/.test(input)) throw new Failure(400, 'Choose a calendar.')
     return encodeURIComponent(input)
   }
-  function eventBody(input: Data) {
+  function eventBody(input: Data, forPatch = false) {
     if (!input || typeof input.title !== 'string' || !input.title.trim() || input.title.length > 1024 ||
       typeof input.description !== 'string' || input.description.length > 16000 ||
       typeof input.location !== 'string' || input.location.length > 2048 || typeof input.allDay !== 'boolean') {
@@ -134,18 +142,28 @@ export function createCalendarHandler(config: Config, fetcher: typeof fetch = fe
       catch { throw new Failure(400, 'Choose a valid time zone.') }
       if (typeof input.timeZone !== 'string' || !input.timeZone) throw new Failure(400, 'A time zone is required.')
     }
-    return { summary: input.title.trim(), description: input.description, location: input.location,
-      start: input.allDay ? { date: input.start } : { dateTime: input.start, timeZone: input.timeZone },
-      end: input.allDay ? { date: input.end } : { dateTime: input.end, timeZone: input.timeZone } }
+    // Google Calendar Merge Patch requires explicit nulls to switch between
+    // all-day (`date`) and timed (`dateTime`) events.
+    return {
+      summary: input.title.trim(),
+      description: input.description,
+      location: input.location,
+      start: input.allDay
+        ? (forPatch ? { date: input.start, dateTime: null, timeZone: null } : { date: input.start })
+        : (forPatch ? { date: null, dateTime: input.start, timeZone: input.timeZone } : { dateTime: input.start, timeZone: input.timeZone }),
+      end: input.allDay
+        ? (forPatch ? { date: input.end, dateTime: null, timeZone: null } : { date: input.end })
+        : (forPatch ? { date: null, dateTime: input.end, timeZone: input.timeZone } : { dateTime: input.end, timeZone: input.timeZone })
+    }
   }
   return async (req: Request): Promise<Response> => {
     try {
       if (req.method !== 'POST') return json({ error: 'Use POST.' }, 405)
       if (!Object.values(config).every(Boolean)) throw new Failure(503, 'Calendar backend is not configured.')
       const authorization = req.headers.get('Authorization') || ''
-      if (!/^Bearer \S+$/.test(authorization)) throw new Failure(401, 'Sign in to Todaywise first.')
+      if (!/^Bearer \S+$/.test(authorization)) throw new Failure(401, 'Sign in to Notch Calendar first.')
       const auth = await request(`${base}/auth/v1/user`, { headers: { apikey: config.serviceKey, Authorization: authorization } })
-      if (!auth.ok) throw new Failure(401, 'Your Todaywise session has expired. Sign in again.')
+      if (!auth.ok) throw new Failure(401, 'Your Notch Calendar session has expired. Sign in again.')
       const user = await auth.json()
       if (typeof user.id !== 'string') throw new Failure(401, 'Invalid session.')
       const subjects: string[] = (user.identities || []).filter((i: Data) => i.provider === 'google')
@@ -218,7 +236,7 @@ export function createCalendarHandler(config: Config, fetcher: typeof fetch = fe
       }
       if (body.action === 'create' || body.action === 'update') {
         const draft = body.draft
-        const payload = eventBody(draft)
+        const payload = eventBody(draft, body.action === 'update')
         if (typeof draft.id !== 'string' || !/^[a-zA-Z0-9_-]{1,1024}$/.test(draft.id)) throw new Failure(400, 'Invalid event identifier.')
         if (body.action === 'update') {
           if (typeof draft.etag !== 'string' || !draft.etag || /[\r\n]/.test(draft.etag)) throw new Failure(400, 'Refresh the event before editing.')

@@ -44,7 +44,8 @@ interface ParsedV2Form {
 }
 
 function opencodeServicePath(): string {
-  if (process.env.NOTCH_OPENCODE_SERVICE_FILE) {
+  const isPackagedElectron = Boolean(process.versions?.electron) && !process.defaultApp
+  if (!isPackagedElectron && process.env.NOTCH_OPENCODE_SERVICE_FILE) {
     return process.env.NOTCH_OPENCODE_SERVICE_FILE
   }
   const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state')
@@ -60,13 +61,21 @@ export async function readOpenCodeService(): Promise<OpenCodeServiceInfo | null>
     const raw = await fs.readFile(opencodeServicePath(), 'utf8')
     const parsed = JSON.parse(raw) as {
       url?: unknown
+      pid?: unknown
       password?: unknown
       auth?: { username?: unknown; password?: unknown }
+    }
+    if (typeof parsed.pid === 'number' && Number.isInteger(parsed.pid) && parsed.pid > 0) {
+      try {
+        process.kill(parsed.pid, 0)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ESRCH') return null
+      }
     }
     if (typeof parsed.url !== 'string' || !parsed.url) return null
     const url = new URL(parsed.url)
     const host = url.hostname.toLowerCase()
-    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') return null
+    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1' && host !== '[::1]') return null
     const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80))
     if (!Number.isInteger(port) || port < 1 || port > 65535) return null
     const password =
@@ -79,9 +88,10 @@ export async function readOpenCodeService(): Promise<OpenCodeServiceInfo | null>
       typeof parsed.auth?.username === 'string' && parsed.auth.username
         ? parsed.auth.username
         : 'opencode'
+    const baseHost = host === '::1' || host === '[::1]' ? '[::1]' : '127.0.0.1'
     return {
       port,
-      baseUrl: `http://127.0.0.1:${port}`,
+      baseUrl: `http://${baseHost}:${port}`,
       ...(password ? { authHeader: basicAuthHeader(username, password) } : {})
     }
   } catch {
@@ -192,7 +202,8 @@ function parseV2Form(raw: unknown): ParsedV2Form | null {
           { label: 'Yes', description: '' },
           { label: 'No', description: '' }
         ],
-        multiSelect: false
+        multiSelect: false,
+        allowCustom: false
       })
       fieldMap.push({
         key,

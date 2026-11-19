@@ -476,13 +476,17 @@ export function PlannerPage() {
       let link: { eventId?: string; eventEtag?: string } = {}
       if (book.canSync && payload.title.trim()) {
         const eventId = existing?.eventId || book.newEventId()
+        const liveEvent = existing?.eventId
+          ? (book.events || []).find((ev) => ev.id === existing.eventId)
+          : undefined
+        const resolvedEtag = liveEvent?.etag || existing?.eventEtag
         const draft = taskEventDraft(
           payload,
           eventId,
-          existing?.eventId ? existing?.eventEtag : undefined,
+          existing?.eventId ? resolvedEtag : undefined,
           payload.timeZone || displayTimeZone
         )
-        const result = await book.saveDraft(draft, Boolean(existing?.eventEtag))
+        const result = await book.saveDraft(draft, Boolean(resolvedEtag))
         if (result.ok) {
           link = { eventId: result.event.id, eventEtag: result.event.etag }
         } else if (result.uncertain) {

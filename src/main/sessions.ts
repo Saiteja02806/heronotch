@@ -23,6 +23,7 @@ import {
   type DeliveryMark
 } from './sessionDelivery'
 import { sendCodexDesktopMessage } from './agentStatus'
+import { autoSubmitInClaudeApp, findLiveClaudeDesktopSession } from './claudeDesktop'
 import {
   antiGravityEnv,
   describeAgentFailure,
@@ -712,7 +713,10 @@ async function scanDeepAi(): Promise<CodingSession[]> {
 async function scanClaude(): Promise<CodingSession[]> {
   const root = path.join(os.homedir(), '.claude', 'projects')
   try {
-    const projects = await fs.readdir(root, { withFileTypes: true })
+    const [projects, appIndex] = await Promise.all([
+      fs.readdir(root, { withFileTypes: true }),
+      readClaudeAppIndex()
+    ])
     const candidates: { file: string; mtime: number }[] = []
     for (const project of projects) {
       if (!project.isDirectory()) continue
@@ -720,6 +724,8 @@ async function scanClaude(): Promise<CodingSession[]> {
       const files = await fs.readdir(dir).catch(() => [] as string[])
       for (const file of files) {
         if (!file.endsWith('.jsonl')) continue
+        const rawId = path.basename(file, '.jsonl')
+        if (appIndex.excludedCliIds.has(rawId)) continue
         const full = path.join(dir, file)
         const stat = await fs.stat(full).catch(() => null)
         if (stat && stat.size > 0) candidates.push({ file: full, mtime: stat.mtimeMs })
@@ -728,7 +734,7 @@ async function scanClaude(): Promise<CodingSession[]> {
     candidates.sort((a, b) => b.mtime - a.mtime)
     const picked: CodingSession[] = []
     for (const candidate of candidates.slice(0, 16)) {
-      const session = await claudeSessionFromFile(candidate.file, candidate.mtime)
+      const session = await claudeSessionFromFile(candidate.file, candidate.mtime, appIndex.titleByCliId)
       if (session) picked.push(session)
     }
     return picked
@@ -738,7 +744,11 @@ async function scanClaude(): Promise<CodingSession[]> {
   }
 }
 
-async function claudeSessionFromFile(file: string, mtime: number): Promise<CodingSession | null> {
+async function claudeSessionFromFile(
+  file: string,
+  mtime: number,
+  appTitles?: Map<string, string>
+): Promise<CodingSession | null> {
   try {
     const handle = await fs.open(file, 'r')
     try {
@@ -791,6 +801,9 @@ async function claudeSessionFromFile(file: string, mtime: number): Promise<Codin
       if (tailSummary.updatedAt !== null) updatedAt = tailSummary.updatedAt
 
       if (!sessionId) sessionId = path.basename(file, '.jsonl')
+      if (!customTitle && appTitles?.get(sessionId)) {
+        customTitle = appTitles.get(sessionId) || ''
+      }
       // Only treat unclosed recent turns as live; completed (`end_turn`, `cost-state`, `stop_hook_summary`) are at rest.
       const active = isClaudeSessionActive({
         subagent,
@@ -882,15 +895,63 @@ async function findCommandOnPath(names: string[]): Promise<string | null> {
 
 async function findClaudeCli(): Promise<string | null> {
   const home = os.homedir()
+  const bundled: { full: string; mtime: number }[] = []
+  const local = process.env.LOCALAPPDATA
+  if (local) {
+    const dataDir = path.join(local, 'Claude-Data')
+    const packages = await fs.readdir(dataDir, { withFileTypes: true }).catch(() => [])
+    for (const pkg of packages) {
+      if (!pkg.isDirectory()) continue
+      const codeDir = path.join(dataDir, pkg.name, 'claude-code')
+      const versions = await fs.readdir(codeDir, { withFileTypes: true }).catch(() => [])
+      for (const ver of versions) {
+        if (!ver.isDirectory()) continue
+        const verDir = path.join(codeDir, ver.name)
+        const directExe = path.join(verDir, 'claude.exe')
+        const directStat = await fs.stat(directExe).catch(() => null)
+        if (directStat?.isFile()) bundled.push({ full: directExe, mtime: directStat.mtimeMs })
+        const hashes = await fs.readdir(verDir, { withFileTypes: true }).catch(() => [])
+        for (const hash of hashes) {
+          if (!hash.isDirectory()) continue
+          const hashedExe = path.join(verDir, hash.name, 'claude.exe')
+          const stat = await fs.stat(hashedExe).catch(() => null)
+          if (stat?.isFile()) bundled.push({ full: hashedExe, mtime: stat.mtimeMs })
+        }
+      }
+    }
+  }
   const candidates = [
     path.join(home, '.local', 'bin', 'claude.exe'),
     path.join(home, '.local', 'bin', 'claude.cmd'),
     path.join(home, 'AppData', 'Roaming', 'npm', 'claude.cmd')
   ]
   for (const candidate of candidates) {
-    if (await fs.stat(candidate).then((stat) => stat.isFile()).catch(() => false)) return candidate
+    const stat = await fs.stat(candidate).catch(() => null)
+    if (stat?.isFile()) bundled.push({ full: candidate, mtime: stat.mtimeMs })
   }
+  bundled.sort((a, b) => b.mtime - a.mtime)
+  if (bundled[0]?.full) return bundled[0].full
   return findCommandOnPath(['claude'])
+}
+
+/** Strip host Claude Code session variables so a Notch process restarted from a
+ * Claude Code terminal never leaks its host session or pipe into child CLIs. */
+export function cleanClaudeEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const cleaned: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (
+      key === 'CLAUDECODE' ||
+      key === 'CLAUDE_PID' ||
+      key === 'CLAUDE_EFFORT' ||
+      key.startsWith('CLAUDE_CODE_') ||
+      key.startsWith('CLAUDE_AGENT_SDK_') ||
+      key.startsWith('CLAUDE_BG_')
+    ) {
+      continue
+    }
+    cleaned[key] = value
+  }
+  return cleaned
 }
 
 function processProvider(process: ProcessInfo): SessionProvider | null {
@@ -952,11 +1013,20 @@ function buildPresence(processes: ProcessInfo[], sessions: CodingSession[]): App
 let inFlightScan: Promise<SessionsSnapshot> | null = null
 
 export function scanSessions(): Promise<SessionsSnapshot> {
-  if (inFlightScan) return inFlightScan
-  inFlightScan = performScan().finally(() => {
-    inFlightScan = null
+  if (!inFlightScan) {
+    inFlightScan = performScan().finally(() => {
+      inFlightScan = null
+    })
+  }
+  return inFlightScan.then((snapshot) => {
+    const held = outbox.counts()
+    for (const session of snapshot.sessions) {
+      const count = held.get(session.id)
+      if (count) session.queued = count
+      else delete session.queued
+    }
+    return snapshot
   })
-  return inFlightScan
 }
 
 function demoSnapshot(): SessionsSnapshot {
@@ -1007,7 +1077,8 @@ function demoSnapshot(): SessionsSnapshot {
 }
 
 async function performScan(): Promise<SessionsSnapshot> {
-  if (process.env.NOTCH_DEMO_SESSIONS === '1') return demoSnapshot()
+  const isPackagedElectron = Boolean(process.versions?.electron) && !process.defaultApp
+  if (!isPackagedElectron && process.env.NOTCH_DEMO_SESSIONS === '1') return demoSnapshot()
   try {
     const [processes, names] = await Promise.all([
       scanProcesses(),
@@ -1124,7 +1195,7 @@ async function claudeAuthState(cli: string): Promise<ClaudeAuthState> {
       execFile(
         command,
         args,
-        { windowsHide: true, timeout: 8000, maxBuffer: 200_000 },
+        { windowsHide: true, timeout: 8000, maxBuffer: 200_000, env: cleanClaudeEnv(process.env) },
         (_error, out) => resolve(typeof out === 'string' ? out : '')
       )
     } catch {
@@ -1194,28 +1265,62 @@ const CLAUDE_OPEN_IN_APP_MESSAGE =
 
 const claudeAppIds = new Map<string, string>()
 
-/** The Claude app keeps one record per chat, named after its own `local_…` id,
- * that carries the Claude Code session id it resumes (`cliSessionId`). Find the
- * app's id for a Claude Code session, so its own deep link opens that exact chat. */
-async function claudeAppSessionId(cliId: string): Promise<string | null> {
-  const known = claudeAppIds.get(cliId)
-  if (known) return known
+interface ClaudeAppIndex {
+  at: number
+  appIdByCliId: Map<string, string>
+  excludedCliIds: Set<string>
+  pendingRewindCliIds: Set<string>
+  titleByCliId: Map<string, string>
+  /** Where each chat's `local_…json` record lives, keyed by the app's own id. */
+  fileByAppId: Map<string, string>
+}
+
+let claudeAppIndexCache: ClaudeAppIndex | null = null
+
+function claudeAppSessionRoots(): string[] {
   const roots: string[] = []
   const local = process.env.LOCALAPPDATA
   if (local) {
     // Store (MSIX) install: %LOCALAPPDATA%\Claude-Data\claude_<package hash>
-    const dataDir = path.join(local, 'Claude-Data')
-    const entries = await fs.readdir(dataDir, { withFileTypes: true }).catch(() => [])
-    for (const entry of entries) {
-      if (entry.isDirectory()) roots.push(path.join(dataDir, entry.name, 'claude-code-sessions'))
-    }
+    roots.push(path.join(local, 'Claude-Data'))
   }
   if (process.env.APPDATA) roots.push(path.join(process.env.APPDATA, 'Claude', 'claude-code-sessions'))
   if (process.platform === 'darwin') {
     roots.push(path.join(os.homedir(), 'Library', 'Application Support', 'Claude', 'claude-code-sessions'))
   }
+  return roots
+}
 
-  // Layout: <root>/<account>/<org>/local_<id>.json
+/** Index Claude Desktop's `claude-code-sessions` records: maps both current
+ * `cliSessionId` and rewound `priorCliSessionIds` to the app's `local_…` id,
+ * collects superseded/archived ids so `scanClaude()` excludes ghost forks,
+ * notes chats with a pending rewind fork, and reads the app's sidebar title. */
+export async function readClaudeAppIndex(customRoots?: string[]): Promise<ClaudeAppIndex> {
+  if (!customRoots && claudeAppIndexCache && Date.now() - claudeAppIndexCache.at < 3000) {
+    return claudeAppIndexCache
+  }
+  const appIdByCliId = new Map<string, string>()
+  const excludedCliIds = new Set<string>()
+  const pendingRewindCliIds = new Set<string>()
+  const titleByCliId = new Map<string, string>()
+  const fileByAppId = new Map<string, string>()
+
+  const roots: string[] = []
+  if (customRoots) {
+    roots.push(...customRoots)
+  } else {
+    for (const candidate of claudeAppSessionRoots()) {
+      if (candidate.endsWith('Claude-Data')) {
+        const entries = await fs.readdir(candidate, { withFileTypes: true }).catch(() => [])
+        for (const entry of entries) {
+          if (entry.isDirectory()) roots.push(path.join(candidate, entry.name, 'claude-code-sessions'))
+        }
+      } else {
+        roots.push(candidate)
+      }
+    }
+  }
+
   for (const root of roots) {
     const accounts = await fs.readdir(root, { withFileTypes: true }).catch(() => [])
     for (const account of accounts) {
@@ -1229,12 +1334,43 @@ async function claudeAppSessionId(cliId: string): Promise<string | null> {
         for (const file of files) {
           if (!/^local_[A-Za-z0-9-]{1,64}\.json$/.test(file)) continue
           const text = await fs.readFile(path.join(orgDir, file), 'utf8').catch(() => '')
-          if (!text.includes(cliId)) continue
+          if (!text) continue
           try {
-            const record = JSON.parse(text) as { sessionId?: unknown; cliSessionId?: unknown }
-            if (record.cliSessionId === cliId && typeof record.sessionId === 'string') {
-              claudeAppIds.set(cliId, record.sessionId)
-              return record.sessionId
+            const record = JSON.parse(text) as {
+              sessionId?: unknown
+              cliSessionId?: unknown
+              priorCliSessionIds?: unknown
+              pendingRewindTo?: unknown
+              isArchived?: unknown
+              title?: unknown
+            }
+            const appId = typeof record.sessionId === 'string' ? record.sessionId : null
+            if (appId) fileByAppId.set(appId, path.join(orgDir, file))
+            const cliId = typeof record.cliSessionId === 'string' ? record.cliSessionId : null
+            const archived = record.isArchived === true
+            if (Array.isArray(record.priorCliSessionIds)) {
+              for (const prior of record.priorCliSessionIds) {
+                if (typeof prior === 'string' && prior) {
+                  excludedCliIds.add(prior)
+                  if (appId) {
+                    appIdByCliId.set(prior, appId)
+                    claudeAppIds.set(prior, appId)
+                  }
+                }
+              }
+            }
+            if (cliId) {
+              if (archived) excludedCliIds.add(cliId)
+              if (typeof record.pendingRewindTo === 'string' && record.pendingRewindTo.trim()) {
+                pendingRewindCliIds.add(cliId)
+              }
+              if (appId) {
+                appIdByCliId.set(cliId, appId)
+                claudeAppIds.set(cliId, appId)
+              }
+              if (typeof record.title === 'string' && record.title.trim()) {
+                titleByCliId.set(cliId, record.title.trim())
+              }
             }
           } catch {
             // A record mid-write; try the next one.
@@ -1243,23 +1379,163 @@ async function claudeAppSessionId(cliId: string): Promise<string | null> {
       }
     }
   }
-  return null
+
+  const index: ClaudeAppIndex = {
+    at: Date.now(),
+    appIdByCliId,
+    excludedCliIds,
+    pendingRewindCliIds,
+    titleByCliId,
+    fileByAppId
+  }
+  if (!customRoots) claudeAppIndexCache = index
+  return index
 }
 
-/** Nothing outside the Claude app can type into a chat it owns, so hand the
- * message over: put it on the clipboard and open that exact chat in the app. */
-async function handOffToClaudeApp(session: CodingSession, message: string): Promise<string> {
-  clipboard.writeText(message)
-  const appId = await claudeAppSessionId(session.rawId).catch(() => null)
-  if (appId) {
-    try {
-      await shell.openExternal(`claude://claude.ai/epitaxy/${encodeURIComponent(appId)}`)
-      return 'This chat is open in the Claude app, so Notch opened it there and copied your message. Press Ctrl+V, then Enter.'
-    } catch {
-      // Fall through: the message is still on the clipboard.
-    }
+/** The Claude app keeps one record per chat, named after its own `local_…` id,
+ * that carries the Claude Code session id it resumes (`cliSessionId`). Find the
+ * app's id for a Claude Code session, so its own deep link opens that exact chat. */
+async function claudeAppSessionId(cliId: string): Promise<string | null> {
+  const known = claudeAppIds.get(cliId)
+  if (known) return known
+  const index = await readClaudeAppIndex()
+  return index.appIdByCliId.get(cliId) ?? null
+}
+
+interface ClaudeDesktopLiveState {
+  live: boolean
+  appId: string | null
+  busy: boolean
+}
+
+/** A Claude chat only needs the Claude desktop app when a live Claude Desktop
+ * child process currently owns it in memory (tracked via `~/.claude/sessions/<pid>.json`
+ * or `Win32_Process --input-format stream-json`), or when a pending rewind is
+ * queued in `local_*.json`. Idle/unloaded sidebar chats can be resumed directly
+ * in the background via `claude --resume`, and Claude Desktop incrementally loads
+ * the updated `.jsonl` when the user opens them later. */
+async function inspectClaudeDesktopState(rawId: string): Promise<ClaudeDesktopLiveState> {
+  const liveSession = await findLiveClaudeDesktopSession(rawId).catch(() => null)
+  if (liveSession) {
+    const appId = liveSession.hostSessionId || (await claudeAppSessionId(rawId).catch(() => null))
+    return { live: true, appId, busy: liveSession.busy }
   }
-  return 'This chat is open in the Claude app. Notch copied your message: switch to the chat in Claude, press Ctrl+V, then Enter.'
+  const index = await readClaudeAppIndex().catch(() => null)
+  if (index?.pendingRewindCliIds.has(rawId)) {
+    return { live: true, appId: index.appIdByCliId.get(rawId) ?? null, busy: false }
+  }
+  if (await claudeOpenInApp(rawId)) {
+    return { live: true, appId: index?.appIdByCliId.get(rawId) ?? null, busy: false }
+  }
+  return { live: false, appId: index?.appIdByCliId.get(rawId) ?? null, busy: false }
+}
+
+/** When the Claude app last focused a chat, read straight from its record.
+ * A regex instead of JSON.parse: records carry a large prompt snapshot and this
+ * is polled several times a second while a send waits. */
+async function claudeChatLastFocusedAt(file: string): Promise<number> {
+  const text = await fs.readFile(file, 'utf8').catch(() => '')
+  const match = text.match(/"lastFocusedAt"\s*:\s*(\d+)/)
+  return match ? Number(match[1]) : 0
+}
+
+/** The newest `lastFocusedAt` among the other chats stored beside `file`. */
+async function otherClaudeChatsLastFocusedAt(file: string): Promise<number> {
+  const dir = path.dirname(file)
+  const self = path.basename(file)
+  const files = await fs.readdir(dir).catch(() => [] as string[])
+  let newest = 0
+  for (const name of files) {
+    if (name === self || !/^local_[A-Za-z0-9-]{1,64}\.json$/.test(name)) continue
+    newest = Math.max(newest, await claudeChatLastFocusedAt(path.join(dir, name)))
+  }
+  return newest
+}
+
+/** Wait until the Claude app is showing the chat stored in `file`: its
+ * `lastFocusedAt` is newer than every other chat's was before the deep link.
+ * Bringing the window forward is not enough, because the app comes forward on
+ * whatever chat it last showed and only then navigates. */
+async function waitForClaudeChatFocus(file: string, othersBefore: number, timeoutMs = 6000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if ((await claudeChatLastFocusedAt(file)) > othersBefore) return true
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  return false
+}
+
+const CLAUDE_PASTE_NOTE =
+  'This chat is open in the Claude app, so Notch opened it there and copied your message. Press Ctrl+V, then Enter.'
+const CLAUDE_SWITCH_NOTE =
+  'This chat is open in the Claude app. Notch copied your message: switch to the chat in Claude, press Ctrl+V, then Enter.'
+
+/** Deliver into a chat currently live in Claude Desktop: open that exact chat
+ * via `claude://`, wait until the app is really showing it, then paste and press
+ * Enter strictly while the Claude desktop window holds foreground focus. Any
+ * doubt along the way falls back to "press Ctrl+V, then Enter" with the message
+ * on the clipboard, which can never send to the wrong chat. */
+async function sendViaClaudeDesktop(
+  session: CodingSession,
+  message: string,
+  desktopState: ClaudeDesktopLiveState
+): Promise<{
+  ok: boolean
+  pending?: boolean
+  handedOff?: boolean
+  note?: string
+  code?: string
+}> {
+  const appId = desktopState.appId || (await claudeAppSessionId(session.rawId).catch(() => null))
+  const mark = await within(captureDeliveryMark('claude', session.rawId), 600, undefined)
+  const previousClipboard = await Promise.resolve(clipboard.readText()).catch(() => '')
+  clipboard.writeText(message)
+  const handOff = (note: string) => ({ ok: true, handedOff: true, note, code: 'claude-open-in-app' })
+
+  if (!appId) return handOff(CLAUDE_SWITCH_NOTE)
+  const recordFile = (await readClaudeAppIndex().catch(() => null))?.fileByAppId.get(appId) ?? null
+
+  desktopSends.add(session.id)
+  prepareReplyWatch(session, message)
+  let tracking = false
+  try {
+    // Measured before the deep link, so a chat that the link brings up reads as
+    // newer than anything the user had focused before.
+    const othersBefore = recordFile ? await otherClaudeChatsLastFocusedAt(recordFile) : 0
+    await shell.openExternal(`claude://claude.ai/epitaxy/${encodeURIComponent(appId)}`)
+    // Without the record there is no way to tell which chat is on screen, so
+    // never press Enter blind: leave the paste to the user.
+    if (!recordFile || !(await waitForClaudeChatFocus(recordFile, othersBefore))) {
+      discardReplyWatch(session.id)
+      return handOff(CLAUDE_PASTE_NOTE)
+    }
+    const submit = await autoSubmitInClaudeApp()
+    if (submit.status === 'sent') {
+      // The paste has been consumed (Enter followed it), so the user's own
+      // clipboard comes back now rather than only after a confirmed delivery.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      const current = await Promise.resolve(clipboard.readText()).catch(() => '')
+      if (previousClipboard && previousClipboard !== message && current === message) {
+        clipboard.writeText(previousClipboard)
+      }
+      tracking = true
+      trackDesktopDelivery(session, message, mark, {
+        replyAlreadyPrepared: true,
+        timeoutMs: desktopState.busy || session.active ? 30_000 : 12_000,
+        unconfirmedCode: 'claude-sent-unconfirmed',
+        unconfirmedError:
+          'Notch typed your message into this chat in Claude but could not confirm it was sent. Check the chat in Claude before sending it again.'
+      })
+      return { ok: true, pending: true }
+    }
+    discardReplyWatch(session.id)
+    return handOff(CLAUDE_PASTE_NOTE)
+  } catch {
+    discardReplyWatch(session.id)
+    return handOff(CLAUDE_SWITCH_NOTE)
+  } finally {
+    if (!tracking) desktopSends.delete(session.id)
+  }
 }
 
 /** For the Connected tools panel: is Claude messaging ready on this PC? */
@@ -1278,9 +1554,22 @@ export async function startClaudeSignIn(): Promise<{ ok: boolean; error?: string
   if (process.platform !== 'win32') return { ok: false, error: 'Run `claude auth login` in a terminal.' }
   try {
     const child = spawn(
-      'cmd.exe',
-      [`/d /s /c "start "Claude sign-in" cmd /k ""${cli}" auth login""`],
-      { detached: true, stdio: 'ignore', windowsVerbatimArguments: true }
+      'powershell.exe',
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-WindowStyle',
+        'Hidden',
+        '-Command',
+        "Start-Process -FilePath $env:NOTCH_CLAUDE_CLI -ArgumentList 'auth','login'"
+      ],
+      {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env: { ...process.env, NOTCH_CLAUDE_CLI: cli }
+      }
     )
     child.unref()
     claudeSignedInAt = 0
@@ -1396,7 +1685,10 @@ function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
 
 function markQueue(sessionId: string, count: number): void {
   const session = lastSessions.get(sessionId)
-  if (session) session.queued = count
+  if (session) {
+    if (count > 0) session.queued = count
+    else delete session.queued
+  }
 }
 
 function emitQueuedFailure(sessionId: string, message: string, code: string): void {
@@ -1416,9 +1708,9 @@ let queueTimer: NodeJS.Timeout | null = null
 let queueTimerAt = 0
 
 /** The renderer asks for a scan every 15 s, but only while the panel is open.
- * While anything is queued, keep a slow scan running in the background so a
- * held message is not stranded until the user reopens Notch. */
-function scheduleQueueTick(delay = 10_000): void {
+ * While anything is queued, keep a background scan running so a held message
+ * is delivered promptly once the active turn finishes. */
+function scheduleQueueTick(delay = 3_000): void {
   if (outbox.counts().size === 0) return
   const targetAt = Date.now() + delay
   if (queueTimer) {
@@ -1475,10 +1767,7 @@ async function resolveNodeCmdEntry(cmdPath: string): Promise<{ node: string; scr
   }
 }
 
-function quoteCmdArg(value: string): string {
-  const escaped = value.replace(/%/g, '%%').replace(/\r?\n/g, ' ').replace(/"/g, '\\"')
-  return `"${escaped}"`
-}
+const preparingSends = new Set<string>()
 
 /** After each scan: hand the next held message to every session that has gone
  * quiet. One at a time, oldest first, so a burst never overtakes itself. */
@@ -1503,19 +1792,26 @@ function drainOutbox(): void {
       continue
     }
     outboxMissCounts.delete(sessionId)
-    if (session.active || runningSends.has(sessionId) || draining.has(sessionId)) continue
+    if (
+      session.active ||
+      runningSends.has(sessionId) ||
+      desktopSends.has(sessionId) ||
+      preparingSends.has(sessionId) ||
+      draining.has(sessionId)
+    ) {
+      continue
+    }
     const next = outbox.peek(sessionId)
     if (!next) continue
     draining.add(sessionId)
     void (async () => {
-      if (session.provider === 'codex' && (await codexThreadIsOpen(session.rawId))) {
-        scheduleQueueTick(4_000)
-        return
-      }
       const taken = outbox.take(sessionId)
       if (!taken) return
       markQueue(sessionId, outbox.size(sessionId))
-      await deliverSessionMessage(session, taken.message, { emitEarlyFailure: true })
+      const result = await deliverSessionMessage(session, taken.message, { emitEarlyFailure: true })
+      if (!result.ok && result.code === 'codex-open') {
+        scheduleQueueTick(4_000)
+      }
     })()
       .catch(() => undefined)
       .finally(() => {
@@ -1558,51 +1854,60 @@ export async function sendSessionMessage(
         'DeepAI Code does not yet expose a local channel another app can deliver a message through, so Notch did not send anything. Message the thread from the DeepAI Code app.'
     }
   }
-  if (runningSends.has(sessionId) || desktopSends.has(sessionId)) {
+  if (runningSends.has(sessionId) || desktopSends.has(sessionId) || preparingSends.has(sessionId)) {
     return { ok: false, error: 'A message is already being sent to this session.' }
   }
-  if (session.provider === 'claude' && (await claudeOpenInApp(session.rawId))) {
-    // A second `claude --resume` would write behind the app's back and never be
-    // answered, so hand the message to the app instead of sending it.
-    const note = await handOffToClaudeApp(session, message)
-    return { ok: true, handedOff: true, note, code: 'claude-open-in-app' }
-  }
-  // The scan can be minutes old and providers delete conversations, so a send
-  // must not target a row the store no longer has.
-  const presence = await within(sessionPresence(session.provider, session.rawId), 600, 'unknown')
-  if (presence === 'gone') {
-    return {
-      ok: false,
-      error: `That conversation is no longer in ${PROVIDER_LABELS[session.provider]}. Refresh the session list and open it again.`,
-      code: 'session-gone'
-    }
-  }
-
-  // Never type into an agent that is mid-turn: hold the message and deliver it
-  // when that turn ends. The queue is strict FIFO per session.
-  if (session.active) {
-    const position = outbox.push(sessionId, message)
-    if (!position) {
-      return {
-        ok: false,
-        error: `This session already has ${MAX_QUEUED_PER_SESSION} messages waiting. Let it finish first.`,
-        code: 'queue-full'
+  preparingSends.add(sessionId)
+  try {
+    if (session.provider === 'claude') {
+      const desktopState = await inspectClaudeDesktopState(session.rawId)
+      if (desktopState.live) {
+        // A live Claude Desktop child process owns this chat in memory, so a
+        // background `claude --resume` would bypass the open window. Open the
+        // chat in Claude Desktop and auto-paste + submit while Claude holds focus.
+        return sendViaClaudeDesktop(session, message, desktopState)
       }
     }
-    sessionSendEvents.emit('result', {
-      sessionId,
-      provider: session.provider,
-      label: PROVIDER_LABELS[session.provider],
-      ok: true,
-      status: 'queued',
-      position
-    } satisfies SessionSendResult)
-    scheduleQueueTick()
-    return { ok: true, queued: true, position }
-  }
+    // The scan can be minutes old and providers delete conversations, so a send
+    // must not target a row the store no longer has.
+    const presence = await within(sessionPresence(session.provider, session.rawId), 600, 'unknown')
+    if (presence === 'gone') {
+      return {
+        ok: false,
+        error: `That conversation is no longer in ${PROVIDER_LABELS[session.provider]}. Refresh the session list and open it again.`,
+        code: 'session-gone'
+      }
+    }
 
-  markQueue(sessionId, outbox.size(sessionId))
-  return deliverSessionMessage(session, message)
+    // Never type into an agent that is mid-turn or jump ahead of queued messages:
+    // hold the message and deliver it strictly FIFO per session.
+    if (session.active || outbox.size(sessionId) > 0 || draining.has(sessionId)) {
+      const position = outbox.push(sessionId, message)
+      if (!position) {
+        return {
+          ok: false,
+          error: `This session already has ${MAX_QUEUED_PER_SESSION} messages waiting. Let it finish first.`,
+          code: 'queue-full'
+        }
+      }
+      markQueue(sessionId, position)
+      sessionSendEvents.emit('result', {
+        sessionId,
+        provider: session.provider,
+        label: PROVIDER_LABELS[session.provider],
+        ok: true,
+        status: 'queued',
+        position
+      } satisfies SessionSendResult)
+      scheduleQueueTick()
+      return { ok: true, queued: true, position }
+    }
+
+    markQueue(sessionId, outbox.size(sessionId))
+    return await deliverSessionMessage(session, message)
+  } finally {
+    preparingSends.delete(sessionId)
+  }
 }
 
 const desktopSends = new Set<string>()
@@ -1640,34 +1945,57 @@ function watchAgentError(session: CodingSession, message: string, mark: Delivery
   })()
 }
 
-/** Follows a message typed into an open Codex Desktop thread until it is in the
- * transcript, then reports the result like any other send. */
-function trackDesktopDelivery(session: CodingSession, message: string, mark: DeliveryMark | undefined): void {
+/** Follows a message sent into an open Desktop app thread (Codex or Claude)
+ * until it lands in the transcript, then reports the result like any other send. */
+function trackDesktopDelivery(
+  session: CodingSession,
+  message: string,
+  mark: DeliveryMark | undefined,
+  options?: {
+    timeoutMs?: number
+    unconfirmedCode?: string
+    unconfirmedError?: string
+    replyAlreadyPrepared?: boolean
+    onConfirmed?: () => void | Promise<void>
+  }
+): void {
   desktopSends.add(session.id)
-  prepareReplyWatch(session, message)
+  if (!options?.replyAlreadyPrepared) prepareReplyWatch(session, message)
   armReplyWatch(session, message)
   void (async () => {
     let status: SessionSendResult['status'] = 'unconfirmed'
-    let error: string | undefined = 'Notch could not confirm this message landed in the thread.'
-    const deadline = Date.now() + 30_000
+    let error: string | undefined =
+      options?.unconfirmedError || 'Notch could not confirm this message landed in the thread.'
+    let code: string | undefined = options?.unconfirmedCode
+    const deadline = Date.now() + (options?.timeoutMs ?? 30_000)
     while (Date.now() < deadline) {
-      const report = await confirmDeliveredMessage('codex', session.rawId, message, { mark, retryMs: 0 }).catch(
-        () => null
-      )
+      const report = await confirmDeliveredMessage(session.provider, session.rawId, message, {
+        mark,
+        retryMs: 0
+      }).catch(() => null)
       if (report?.check === 'confirmed') {
         status = 'delivered'
         error = undefined
+        code = undefined
         break
       }
       if (report?.check === 'missing' && report.reason?.startsWith(AGENT_ERROR_PREFIX)) {
         status = 'failed'
         error = report.reason
+        code = 'agent-error'
         break
       }
       await new Promise((resolve) => setTimeout(resolve, 1000))
     }
     desktopSends.delete(session.id)
-    emitSendResult(session, status, error)
+    if (status === 'delivered') {
+      try {
+        await options?.onConfirmed?.()
+      } catch {
+        // Never break delivery notifications if cleanup fails.
+      }
+    }
+    emitSendResult(session, status, error, code)
     if (status === 'delivered') watchAgentError(session, message, mark)
   })()
 }
@@ -1727,7 +2055,7 @@ async function deliverSessionMessage(
     // Claude Code has no writer lock like Codex's, but a headless resume while
     // a turn is still streaming would interleave two writers in one
     // transcript. Wait for the turn to end instead.
-    if (await claudeOpenInApp(session.rawId)) {
+    if ((await inspectClaudeDesktopState(session.rawId)).live) {
       return failEarly(CLAUDE_OPEN_IN_APP_MESSAGE, 'claude-open-in-app')
     }
     if (session.active) {
@@ -1748,6 +2076,7 @@ async function deliverSessionMessage(
     // "--" ends option parsing, so a message that begins with a dash is still
     // the prompt instead of an unknown option.
     args = ['--resume', session.rawId, '--print', '--', message]
+    env = cleanClaudeEnv(process.env)
   } else if (session.provider === 'antigravity') {
     const target = await findAntiGravityTarget()
     if (!target) {
@@ -1812,14 +2141,17 @@ async function deliverSessionMessage(
   const finish = (
     status: SessionSendResult['status'],
     error?: string,
-    code?: string
+    code?: string,
+    processEnded = true
   ): void => {
+    if (processEnded) {
+      clearChildTimeout()
+      if (child && runningSends.get(sessionId) === child) runningSends.delete(sessionId)
+      if (outbox.size(sessionId) > 0) scheduleQueueTick(200)
+    }
     if (settled) return
     settled = true
     stopProbe()
-    clearChildTimeout()
-    runningSends.delete(sessionId)
-    if (outbox.size(sessionId) > 0) scheduleQueueTick(200)
     if (status === 'delivered') watchAgentError(session, message, mark)
     const result: SessionSendResult = {
       sessionId,
@@ -1840,17 +2172,33 @@ async function deliverSessionMessage(
   const launch = (): void => {
     attempt += 1
     clearChildTimeout()
-    // Custom non-Node `.cmd`/`.bat` shims still go through cmd.exe with verbatim quoting.
+    // Custom non-Node `.cmd`/`.bat` shims cannot be spawned directly without a
+    // shell, and cmd.exe quoting is unsafe for arbitrary prompts. Invoke via
+    // PowerShell with args passed strictly through JSON env vars so no shell
+    // metacharacters (&, |, >, ", %) are ever interpreted.
     const needsShell = /\.(cmd|bat)$/i.test(command)
     const stdio: ('ignore' | 'pipe')[] = [stdinText ? 'pipe' : 'ignore', 'pipe', 'pipe']
     const spawned = needsShell
-      ? spawn('cmd.exe', ['/d', '/s', '/c', `"${[command, ...args].map(quoteCmdArg).join(' ')}"`], {
-          cwd: session.directory || os.homedir(),
-          env,
-          windowsHide: true,
-          windowsVerbatimArguments: true,
-          stdio
-        })
+      ? spawn(
+          'powershell.exe',
+          [
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            '$a = @(ConvertFrom-Json -InputObject $env:NOTCH_CLI_ARGS); & $env:NOTCH_CLI_CMD @a; exit $LASTEXITCODE'
+          ],
+          {
+            cwd: session.directory || os.homedir(),
+            env: {
+              ...env,
+              NOTCH_CLI_CMD: command,
+              NOTCH_CLI_ARGS: JSON.stringify(args)
+            },
+            windowsHide: true,
+            stdio
+          }
+        )
       : spawn(command, args, {
           cwd: session.directory || os.homedir(),
           env,
@@ -1863,7 +2211,7 @@ async function deliverSessionMessage(
     childTimeout = setTimeout(() => {
       if (child === spawned && !spawned.killed) {
         killProcessTree(spawned)
-        finish('failed', 'The agent command timed out.')
+        finish('failed', 'The agent command timed out.', undefined, true)
       }
     }, CLI_TIMEOUT_MS)
     childTimeout.unref?.()
@@ -1871,11 +2219,15 @@ async function deliverSessionMessage(
     spawned.stderr?.on('data', collect)
     spawned.on('error', (error) => {
       clearChildTimeout()
+      if (runningSends.get(sessionId) === spawned) runningSends.delete(sessionId)
+      if (outbox.size(sessionId) > 0) scheduleQueueTick(200)
       noteReplyCliExited(sessionId, 1)
-      finish('failed', error.message)
+      finish('failed', error.message, undefined, true)
     })
     spawned.on('exit', (code) => {
       clearChildTimeout()
+      if (runningSends.get(sessionId) === spawned) runningSends.delete(sessionId)
+      if (outbox.size(sessionId) > 0) scheduleQueueTick(200)
       noteReplyCliExited(sessionId, code)
       void settle(code)
     })
@@ -1927,7 +2279,9 @@ async function deliverSessionMessage(
       void verifyDelivery(0)
         .then((report) => {
           if (report.check === 'confirmed') {
-            finish('delivered')
+            // Notify UI immediately while keeping runningSends & childTimeout owned
+            // until the streaming CLI actually exits.
+            finish('delivered', undefined, undefined, false)
             stopProbe()
           }
         })
@@ -1949,7 +2303,13 @@ async function deliverSessionMessage(
     // the user cancelled, a daemon that answered late), and an exit code of zero
     // proves nothing on its own. A refused dial is the one case where nothing
     // can have arrived, so it is not worth polling for.
-    const delivery = await verifyDelivery(commandFailed && failedAtTransport ? 0 : undefined)
+    const retryOverride =
+      commandFailed && failedAtTransport
+        ? 0
+        : !commandFailed && session.provider === 'antigravity'
+          ? 6000
+          : undefined
+    const delivery = await verifyDelivery(retryOverride)
     if (delivery.check === 'confirmed') {
       finish('delivered')
       return

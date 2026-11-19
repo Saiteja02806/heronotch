@@ -179,9 +179,15 @@ const api: NotchApi = {
   }
 }
 
+declare const __NOTCH_INCLUDE_DEMO__: boolean
+
 contextBridge.exposeInMainWorld('notch', api)
 
-if (process.env.NOTCH_DEMO === '1' || process.argv.includes('--demo')) {
+if (
+  typeof __NOTCH_INCLUDE_DEMO__ !== 'undefined' &&
+  __NOTCH_INCLUDE_DEMO__ &&
+  (process.env.NOTCH_DEMO === '1' || process.argv.includes('--demo'))
+) {
   const demoApi: DemoApi = {
     getConfig: () => invoke('demo:get-config'),
     getPostureVideo: () => invoke('demo:get-posture-video'),

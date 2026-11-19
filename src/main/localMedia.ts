@@ -32,7 +32,7 @@ $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-O
 function Await($operation, $resultType) {
   $asTask = $asTaskGeneric.MakeGenericMethod($resultType)
   $task = $asTask.Invoke($null, @($operation))
-  $task.Wait(-1) | Out-Null
+  if (-not $task.Wait(4000)) { throw 'SMTC timeout' }
   $task.Result
 }
 [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime] | Out-Null
@@ -396,10 +396,10 @@ async function pruneMediaArt(): Promise<void> {
 }
 
 function scheduleRestart(): void {
-  if (stopping || restartTimer) return
+  if (stopping || paused || restartTimer) return
   restartTimer = setTimeout(() => {
     restartTimer = null
-    startLocalMediaMonitor()
+    if (!stopping && !paused) startLocalMediaMonitor()
   }, 3000)
 }
 
@@ -502,7 +502,8 @@ async function handleMonitorLine(line: string): Promise<void> {
 }
 
 export function startLocalMediaMonitor(): void {
-  if (process.platform !== 'win32' || monitor || stopping || paused) return
+  if (process.platform !== 'win32' || monitor || paused) return
+  stopping = false
   buffer = ''
   const artDir = mediaArtDir()
   const artDll = mediaArtDll()
@@ -567,22 +568,20 @@ export function startLocalMediaMonitor(): void {
     }
   }
   child.on('error', () => {
-    if (monitor === child) {
-      monitor = null
-      buffer = ''
-      flushPendingOnExit()
-    }
-    scheduleRestart()
+    if (monitor !== child) return
+    monitor = null
+    buffer = ''
+    flushPendingOnExit()
+    if (!paused && !stopping) scheduleRestart()
   })
   child.on('exit', () => {
-    if (monitor === child) {
-      monitor = null
-      buffer = ''
-      flushPendingOnExit()
-    }
+    if (monitor !== child) return
+    monitor = null
+    buffer = ''
+    flushPendingOnExit()
     latest = null
     sessions = []
-    if (!paused) scheduleRestart()
+    if (!paused && !stopping) scheduleRestart()
   })
 }
 

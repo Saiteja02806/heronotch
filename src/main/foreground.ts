@@ -299,6 +299,7 @@ ${browserSetup}
 # Thread.Sleep keeps the loop out of the PowerShell pipeline entirely.
 while ($true) {
   try {
+    if (-not (Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue)) { break }
     [Console]::Out.WriteLine([NotchFore]::Sample())
     [Console]::Out.Flush()
   } catch {
@@ -357,10 +358,19 @@ export function buildForegroundExeArgs(target: TargetSize, browserOnly: boolean,
 }
 
 let child: ChildProcess | null = null
+let restartTimer: ReturnType<typeof setTimeout> | null = null
+let consecutiveFailures = 0
+let forcePowerShell = false
 let stopped = false
 let listener: ((sample: ForegroundSample) => void) | null = null
 let target: TargetSize | null = null
 let watchBrowser = false
+
+function clearRestartTimer(): void {
+  if (!restartTimer) return
+  clearTimeout(restartTimer)
+  restartTimer = null
+}
 
 export function startForegroundWatch(
   onSample: (sample: ForegroundSample) => void,
@@ -372,8 +382,10 @@ export function startForegroundWatch(
   watchBrowser = browserOnly
   if (process.platform !== 'win32' || child) return
   stopped = false
+  clearRestartTimer()
   const effectiveTarget = target || { width: 1920, height: 1080 }
-  const helperExe = resolveForegroundExe()
+  const helperExe = forcePowerShell ? '' : resolveForegroundExe()
+  const startedAt = Date.now()
   try {
     child = helperExe
       ? spawn(helperExe, buildForegroundExeArgs(effectiveTarget, watchBrowser), {
@@ -397,10 +409,15 @@ export function startForegroundWatch(
         )
   } catch {
     child = null
+    if (helperExe) {
+      forcePowerShell = true
+      startForegroundWatch(onSample)
+    }
     return
   }
   const spawned = child
   let buffer = ''
+  let sawSample = false
   spawned.stderr?.on('data', () => undefined)
   spawned.stdout?.setEncoding('utf8')
   spawned.stdout?.on('data', (chunk: string) => {
@@ -413,6 +430,10 @@ export function startForegroundWatch(
       if (line.startsWith('{')) {
         try {
           const parsed = JSON.parse(line) as ForegroundSample
+          if (!sawSample) {
+            sawSample = true
+            consecutiveFailures = 0
+          }
           onSample({
             process: String(parsed.process || ''),
             fullscreen: Boolean(parsed.fullscreen),
@@ -429,9 +450,21 @@ export function startForegroundWatch(
   const restart = (): void => {
     if (child !== spawned) return
     child = null
-    if (!stopped) setTimeout(() => {
+    if (stopped) return
+    const ranShort = !sawSample || Date.now() - startedAt < 5_000
+    consecutiveFailures = ranShort ? consecutiveFailures + 1 : 0
+    if (helperExe && consecutiveFailures >= 3) {
+      forcePowerShell = true
+      consecutiveFailures = 0
+    }
+    if (consecutiveFailures >= 6) return
+    const delay = Math.min(30_000, 3_000 * Math.pow(2, Math.max(0, consecutiveFailures - 1)))
+    clearRestartTimer()
+    restartTimer = setTimeout(() => {
+      restartTimer = null
       if (!stopped && !child) startForegroundWatch(onSample)
-    }, 3000)
+    }, delay)
+    restartTimer.unref?.()
   }
   spawned.once('error', restart)
   spawned.once('exit', restart)
@@ -456,18 +489,21 @@ export function setForegroundTarget(next: TargetSize, browserOnly = watchBrowser
   const current = listener
   const previous = child
   child = null
+  clearRestartTimer()
   previous?.kill()
   startForegroundWatch(current)
 }
 
 export function stopForegroundWatch(): void {
   stopped = true
+  clearRestartTimer()
   child?.kill()
   child = null
 }
 
 export function pauseForegroundWatch(): void {
   stopped = true
+  clearRestartTimer()
   child?.kill()
   child = null
 }
@@ -475,5 +511,6 @@ export function pauseForegroundWatch(): void {
 export function resumeForegroundWatch(): void {
   if (!listener) return
   stopped = false
+  consecutiveFailures = 0
   startForegroundWatch(listener)
 }

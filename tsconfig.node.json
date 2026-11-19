@@ -11,7 +11,7 @@
     "noEmit": true,
     "types": ["node"],
     "paths": {
-      "@demo/*": ["./demo/*"],
+      "@demo/*": ["./src/demo-stub/*"],
       "@shared/*": ["./src/shared/*"]
     }
   },
@@ -20,7 +20,7 @@
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
     "src/shared/**/*.ts",
-    "demo/main/**/*.ts",
-    "demo/shared/**/*.ts"
+    "src/demo-stub/main/**/*.ts",
+    "src/demo-stub/shared/**/*.ts"
   ]
 }

@@ -1,13 +1,21 @@
-import { Check, HelpCircle, Loader2, ShieldAlert } from 'lucide-react'
-import { useState } from 'react'
-import type { AgentQuestion, AgentQuestionStep } from '../../../shared/types'
+import { Check, CornerDownLeft, HelpCircle, Loader2 } from 'lucide-react'
+import { useRef, useState } from 'react'
+import type { AgentQuestion, AgentQuestionStep, AgentQuestionStepAnswer } from '../../../shared/types'
 import { agentToolLabel } from '../../../shared/agentTools'
 import { useApp } from '../state/AppContext'
 
+interface StepDraft {
+  choices: number[]
+  customText: string
+}
+
+const EMPTY_DRAFT: StepDraft = { choices: [], customText: '' }
+
 function QuestionCard({ question, busy }: { question: AgentQuestion; busy: boolean }) {
   const { decideAgentQuestion, releaseAgentQuestion } = useApp()
+  const customInputRef = useRef<HTMLInputElement | null>(null)
   const [stepIndex, setStepIndex] = useState(0)
-  const [byStep, setByStep] = useState<Record<number, number[]>>({})
+  const [byStep, setByStep] = useState<Record<number, StepDraft>>({})
   const steps: AgentQuestionStep[] =
     question.steps && question.steps.length > 0
       ? question.steps
@@ -24,18 +32,61 @@ function QuestionCard({ question, busy }: { question: AgentQuestion; busy: boole
   const totalSteps = steps.length
   const isLastStep = clampedStep >= totalSteps - 1
   const multi = currentStep.multiSelect
-  const picked = byStep[clampedStep] || []
-  const canSend = multi && picked.length > 0 && !busy
+  const allowCustom = currentStep.allowCustom !== false
+  const draft = byStep[clampedStep] || EMPTY_DRAFT
+  const picked = draft.choices
+  const customText = draft.customText
+  const trimmedCustom = customText.trim()
+  const hasCustom = allowCustom && trimmedCustom.length > 0
+  const selectedCount = picked.length + (hasCustom ? 1 : 0)
+  const canSend = multi && selectedCount > 0 && !busy
   const subDetail =
     currentStep.detail || (totalSteps === 1 && question.detail ? question.detail : '')
 
-  const submitAll = (finalStepChoices: number[]): void => {
-    if (totalSteps === 1) {
-      void decideAgentQuestion(question.id, finalStepChoices)
+  const setCurrentDraft = (next: StepDraft): void => {
+    setByStep((prev) => ({
+      ...prev,
+      [clampedStep]: next
+    }))
+  }
+
+  const toStepAnswer = (entry: StepDraft): AgentQuestionStepAnswer => {
+    const trimmed = entry.customText.trim()
+    const sorted = [...entry.choices].sort((a, b) => a - b)
+    return trimmed ? { choices: sorted, customText: trimmed } : { choices: sorted }
+  }
+
+  const submitAll = (finalDraft: StepDraft): void => {
+    const answers: AgentQuestionStepAnswer[] = steps.map((_, idx) =>
+      toStepAnswer(idx === clampedStep ? finalDraft : byStep[idx] || EMPTY_DRAFT)
+    )
+    void decideAgentQuestion(question.id, answers)
+  }
+
+  const commitMultiOrCustom = (): void => {
+    if (busy) return
+    if (multi) {
+      if (selectedCount === 0) return
+      const nextDraft: StepDraft = {
+        choices: [...picked].sort((a, b) => a - b),
+        customText: allowCustom ? trimmedCustom : ''
+      }
+      if (!isLastStep) {
+        setCurrentDraft(nextDraft)
+        setStepIndex(clampedStep + 1)
+        return
+      }
+      submitAll(nextDraft)
       return
     }
-    const matrix = steps.map((_, idx) => (idx === clampedStep ? finalStepChoices : byStep[idx] || []))
-    void decideAgentQuestion(question.id, matrix)
+    if (!hasCustom) return
+    const nextDraft: StepDraft = { choices: [], customText: trimmedCustom }
+    if (!isLastStep) {
+      setCurrentDraft(nextDraft)
+      setStepIndex(clampedStep + 1)
+      return
+    }
+    submitAll(nextDraft)
   }
 
   return (
@@ -45,10 +96,24 @@ function QuestionCard({ question, busy }: { question: AgentQuestion; busy: boole
           <HelpCircle size={13} />
         </span>
         <div>
-          <strong>
-            {agentToolLabel(question.tool)} asks
-            {totalSteps > 1 ? ` · ${clampedStep + 1}/${totalSteps}` : ''}
-          </strong>
+          <div className="agent-question-meta">
+            <strong>
+              {agentToolLabel(question.tool)} asks
+              {totalSteps > 1 ? ` · ${clampedStep + 1} of ${totalSteps}` : ''}
+            </strong>
+            {totalSteps > 1 && (
+              <span className="notch-question-steps" aria-hidden="true">
+                {steps.map((_, idx) => (
+                  <i
+                    key={idx}
+                    className={
+                      idx === clampedStep ? 'is-current' : idx < clampedStep ? 'is-done' : ''
+                    }
+                  />
+                ))}
+              </span>
+            )}
+          </div>
           <span>{currentStep.title}</span>
           {subDetail && <small>{subDetail}</small>}
         </div>
@@ -65,22 +130,26 @@ function QuestionCard({ question, busy }: { question: AgentQuestion; busy: boole
               title={option.description || option.label}
               onClick={() => {
                 if (multi) {
-                  setByStep((prev) => ({
-                    ...prev,
-                    [clampedStep]: selected
+                  setCurrentDraft({
+                    choices: selected
                       ? picked.filter((item) => item !== index)
-                      : [...picked, index]
-                  }))
+                      : [...picked, index],
+                    customText
+                  })
                   return
                 }
+                const nextDraft: StepDraft = { choices: [index], customText: '' }
                 if (!isLastStep) {
-                  setByStep((prev) => ({ ...prev, [clampedStep]: [index] }))
+                  setCurrentDraft(nextDraft)
                   setStepIndex(clampedStep + 1)
                   return
                 }
-                submitAll([index])
+                submitAll(nextDraft)
               }}
             >
+              <span className="agent-question-num" aria-hidden="true">
+                {index + 1}
+              </span>
               <span className="agent-question-label">
                 {option.label}
                 {option.description && <em>{option.description}</em>}
@@ -89,6 +158,58 @@ function QuestionCard({ question, busy }: { question: AgentQuestion; busy: boole
             </button>
           )
         })}
+
+        {allowCustom && (
+          <div
+            className={`agent-question-option agent-question-other${hasCustom ? ' is-picked' : ''}`}
+            onClick={() => customInputRef.current?.focus()}
+          >
+            <span className="agent-question-num" aria-hidden="true">
+              {currentStep.options.length + 1}
+            </span>
+            <input
+              ref={customInputRef}
+              type="text"
+              className="agent-question-other-input"
+              placeholder="Type your own answer…"
+              value={customText}
+              disabled={busy}
+              maxLength={2000}
+              aria-label="Type your own answer"
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) =>
+                setCurrentDraft({
+                  choices: multi ? picked : [],
+                  customText: event.target.value
+                })
+              }
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  commitMultiOrCustom()
+                }
+              }}
+            />
+            {!multi ? (
+              <button
+                type="button"
+                className="agent-question-other-send"
+                disabled={busy || !hasCustom}
+                title={isLastStep ? 'Send typed answer (Enter)' : 'Next step (Enter)'}
+                aria-label={isLastStep ? 'Send typed answer' : 'Next step'}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  commitMultiOrCustom()
+                }}
+              >
+                <span>{isLastStep ? 'Send' : 'Next'}</span>
+                <CornerDownLeft size={11} />
+              </button>
+            ) : (
+              hasCustom && <Check size={12} />
+            )}
+          </div>
+        )}
       </div>
       <div className="agent-question-foot">
         {clampedStep > 0 && (
@@ -106,20 +227,12 @@ function QuestionCard({ question, busy }: { question: AgentQuestion; busy: boole
             type="button"
             className="primary-button"
             disabled={!canSend}
-            onClick={() => {
-              const sorted = [...picked].sort((a, b) => a - b)
-              if (!isLastStep) {
-                setByStep((prev) => ({ ...prev, [clampedStep]: sorted }))
-                setStepIndex(clampedStep + 1)
-                return
-              }
-              submitAll(sorted)
-            }}
+            onClick={commitMultiOrCustom}
           >
             <Check size={11} />{' '}
             {isLastStep
-              ? `Send answer${picked.length > 1 ? ` (${picked.length})` : ''}`
-              : `Next step${picked.length > 1 ? ` (${picked.length})` : ''}`}
+              ? `Send answer${selectedCount > 1 ? ` (${selectedCount})` : ''}`
+              : `Next step${selectedCount > 1 ? ` (${selectedCount})` : ''}`}
           </button>
         )}
         <button
@@ -141,10 +254,6 @@ export function AgentStatus() {
   const compact = state.settings.panelSize === 'compact'
 
   const pending = snapshot?.pending || []
-  const waitingTools = new Set<string>([
-    ...pending.map((item) => item.tool),
-    ...questions.map((item) => item.tool)
-  ])
   // Only interrupt the Sessions page when a tool is actually waiting on the
   // user: an approval or a question. "Done" and "quiet" notices are not worth the room.
   if (pending.length === 0 && questions.length === 0) return null
@@ -192,7 +301,6 @@ export function AgentStatus() {
           </div>
         </article>
       ))}
-
     </section>
   )
 }

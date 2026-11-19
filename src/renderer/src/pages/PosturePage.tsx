@@ -22,7 +22,95 @@ import { ProgressRing } from '../components/ProgressRing'
 import { useApp } from '../state/AppContext'
 import { useNowWhen } from '../state/clock'
 import { GUIDE_CAPTURE_S, GUIDE_STEPS, SETUP_LEAD_S, SETUP_TOTAL_S, usePosture } from '../state/PostureContext'
-import { formatMinutes } from '../lib/time'
+import { dateKey, formatMinutes, parseDateKey } from '../lib/time'
+import type { PostureDay } from '../../../shared/types'
+
+/** Less than this much coached time in a day is too little to call it good or bad. */
+const WEEK_MIN_SECONDS = 60
+
+function goodShare(day: { goodSeconds: number; badSeconds: number } | undefined): number | null {
+  if (!day) return null
+  const total = day.goodSeconds + day.badSeconds
+  return total >= WEEK_MIN_SECONDS ? day.goodSeconds / total : null
+}
+
+/** Share of good time across the days that have enough coached time, or null. */
+function poolShare(list: ({ goodSeconds: number; badSeconds: number } | undefined)[]): number | null {
+  let good = 0
+  let total = 0
+  for (const day of list) {
+    if (!day || day.goodSeconds + day.badSeconds < WEEK_MIN_SECONDS) continue
+    good += day.goodSeconds
+    total += day.goodSeconds + day.badSeconds
+  }
+  return total > 0 ? good / total : null
+}
+
+/**
+ * The last seven days, so the person can see whether the coach is actually
+ * changing how they sit, not just how today went. Today is live; earlier days
+ * come from the history the main process files at midnight.
+ */
+function PostureWeek({
+  days,
+  today
+}: {
+  days: PostureDay[]
+  today: { goodSeconds: number; badSeconds: number }
+}) {
+  const byKey = new Map(days.map((day) => [day.dayKey, day]))
+  const now = new Date()
+  const keyFor = (offset: number): string => {
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset)
+    return dateKey(date)
+  }
+  const todayKeyValue = keyFor(0)
+  const dayAt = (offset: number) => (offset === 0 ? today : byKey.get(keyFor(offset)))
+  const week = Array.from({ length: 7 }, (_, index) => 6 - index).map((offset) => ({
+    key: keyFor(offset),
+    share: goodShare(dayAt(offset))
+  }))
+  const thisWeek = poolShare(Array.from({ length: 7 }, (_, offset) => dayAt(offset)))
+  const lastWeek = poolShare(Array.from({ length: 7 }, (_, index) => byKey.get(keyFor(index + 7))))
+  if (week.every((day) => day.share === null)) return null
+  const change = thisWeek !== null && lastWeek !== null ? Math.round((thisWeek - lastWeek) * 100) : null
+
+  return (
+    <div className="posture-week">
+      <div className="posture-week-head">
+        <span>Last 7 days</span>
+        <span>
+          {thisWeek !== null ? `${Math.round(thisWeek * 100)}% good` : ''}
+          {change !== null && change !== 0 && (
+            <em className={change > 0 ? 'is-up' : 'is-down'}>
+              {change > 0 ? `up ${change}` : `down ${Math.abs(change)}`} on last week
+            </em>
+          )}
+        </span>
+      </div>
+      <div className="posture-week-bars">
+        {week.map((day) => {
+          const label = parseDateKey(day.key).toLocaleDateString(undefined, { weekday: 'narrow' })
+          const name = parseDateKey(day.key).toLocaleDateString(undefined, { weekday: 'long' })
+          return (
+            <div
+              key={day.key}
+              className={`posture-week-day ${day.key === todayKeyValue ? 'is-today' : ''}`}
+              title={day.share === null ? `${name}: not enough time coached` : `${name}: ${Math.round(day.share * 100)}% good`}
+            >
+              <span className="posture-week-column">
+                {day.share !== null && (
+                  <span className="posture-week-fill" style={{ height: `${Math.max(6, Math.round(day.share * 100))}%` }} />
+                )}
+              </span>
+              <small>{label}</small>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
 
 function scoreColor(score: number, threshold: number): string {
   if (score >= threshold) return '#4ade80'
@@ -525,8 +613,12 @@ export function PosturePage() {
               type="button"
               className="soft-button compact"
               onClick={posture.calibrate}
-              disabled={!hasScore}
-              title="Set current upright posture as your baseline"
+              disabled={!hasScore || Boolean(posture.guide) || Boolean(posture.profile)}
+              title={
+                posture.profile
+                  ? 'Not needed after the 3-step setup. Use Redo setup to change it.'
+                  : 'Set current upright posture as your baseline'
+              }
             >
               <Crosshair size={13} /> Calibrate
             </button>
@@ -583,6 +675,10 @@ export function PosturePage() {
                     : 'No baseline'}
                 </span>
               </div>
+              <PostureWeek
+                days={state.posture.days ?? []}
+                today={{ goodSeconds: posture.goodSeconds, badSeconds: posture.badSeconds }}
+              />
             </div>
           ) : (
             <p>{panelCopy}</p>

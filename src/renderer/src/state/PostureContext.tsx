@@ -318,7 +318,9 @@ const PROFILE_KEYS = ['neck', 'forwardHead', 'headOffset', 'tilt', 'headTilt', '
 /** The least natural wobble assumed per signal, so a very still person does not make noise look huge. */
 const SPREAD_FLOOR: PostureProfilePose = {
   neck: 0.02,
-  forwardHead: 0.04,
+  // A webcam's depth reading jitters by several hundredths even when you are
+  // still; a tighter floor let that jitter alone push the score down.
+  forwardHead: 0.06,
   headOffset: 0.015,
   tilt: 0.01,
   headTilt: 0.01,
@@ -394,9 +396,115 @@ function buildProfile(
   }
 }
 
-/** Where the alert line sits: this far along the way to the person's own bad pose. */
-const PROFILE_FREE = 0.1
+/**
+ * The good pose is where the person wants to be; the bad pose is how they really
+ * sit when they stop paying attention. The job is to catch the slide early, while
+ * getting back is a small correction, not once the habit has already taken over.
+ *
+ * `along` is how far the person has moved from good toward one of their own bad
+ * poses (0 at good, 1 at the recorded habit). The score is 100 inside a small
+ * free zone for natural wobble, crosses the default line (65) a quarter of the way
+ * to the habit, and keeps falling from there to the floor at the habit itself.
+ */
+const PROFILE_FREE = 0.08
+const PROFILE_NUDGE = 0.25
 const PROFILE_FULL = 1
+const DEFAULT_LINE = 65
+
+function scoreFromAlong(along: number): number {
+  if (along <= PROFILE_FREE) return 100
+  if (along <= PROFILE_NUDGE) {
+    return Math.round(100 - (100 - DEFAULT_LINE) * ((along - PROFILE_FREE) / (PROFILE_NUDGE - PROFILE_FREE)))
+  }
+  const rest = Math.min(1, (along - PROFILE_NUDGE) / (PROFILE_FULL - PROFILE_NUDGE))
+  return Math.max(8, Math.round(DEFAULT_LINE - (DEFAULT_LINE - 8) * rest))
+}
+
+/**
+ * Bad posture that does not look like the recorded habit still counts: leaning on
+ * one elbow, a tilted head, a dropped chin. Each posture signal is read in one
+ * direction only (a taller neck is not a fault), in units of the person's own
+ * wobble, with a wider floor than the profile axis uses because a webcam's depth
+ * reading jitters. Distance (scale) is left out: sitting back upright is fine,
+ * and coming close is already the recorded "close" pose.
+ */
+const DRIFT_KEYS = ['neck', 'forwardHead', 'headOffset', 'tilt', 'headTilt'] as const
+type DriftKey = (typeof DRIFT_KEYS)[number]
+const DRIFT_FLOOR: Record<DriftKey, number> = {
+  neck: 0.025,
+  forwardHead: 0.06,
+  headOffset: 0.015,
+  tilt: 0.012,
+  headTilt: 0.012
+}
+/** Up to this many wobbles away from good is ordinary movement. */
+const DRIFT_FREE_Z = 3
+/** At this many wobbles away a drift counts as much as a quarter of the way to the habit. */
+const DRIFT_NUDGE_Z = 4.5
+
+function driftFrom(
+  x: PostureSample,
+  good: PostureProfilePose,
+  spread: PostureProfilePose
+): { key: DriftKey; along: number } {
+  let best: { key: DriftKey; z: number } = { key: 'neck', z: 0 }
+  for (const key of DRIFT_KEYS) {
+    const wobble = Math.max(spread[key], DRIFT_FLOOR[key])
+    // Neck is the one signal where smaller is worse.
+    const worse = key === 'neck' ? good.neck - x.neck : x[key] - good[key]
+    const z = worse / wobble
+    if (z > best.z) best = { key, z }
+  }
+  const over = Math.max(0, best.z - DRIFT_FREE_Z) / (DRIFT_NUDGE_Z - DRIFT_FREE_Z)
+  return { key: best.key, along: best.z > DRIFT_FREE_Z ? PROFILE_FREE + over * (PROFILE_NUDGE - PROFILE_FREE) : 0 }
+}
+
+/** Which signal moves a reading furthest toward `target`, in the person's own units. */
+function leadingSignal(
+  x: PostureSample,
+  good: PostureProfilePose,
+  target: PostureProfilePose,
+  spread: PostureProfilePose
+): (typeof PROFILE_KEYS)[number] {
+  let best: (typeof PROFILE_KEYS)[number] = 'neck'
+  let bestValue = -Infinity
+  for (const key of PROFILE_KEYS) {
+    const wobble = Math.max(spread[key], SPREAD_FLOOR[key])
+    const value = ((target[key] - good[key]) / wobble) * ((x[key] - good[key]) / wobble)
+    if (value > bestValue) {
+      bestValue = value
+      best = key
+    }
+  }
+  return best
+}
+
+/** What to do about the signal that is drifting, named so the body can act on it. */
+function habitAdvice(
+  key: (typeof PROFILE_KEYS)[number],
+  x: PostureSample,
+  good: PostureProfilePose
+): string {
+  const sideName = (value: -1 | 0 | 1): string => (value < 0 ? 'right' : 'left')
+  switch (key) {
+    case 'neck':
+      return 'Your head is dropping. Lift your chin and sit tall.'
+    case 'forwardHead':
+      return 'Your head is pushing toward the screen. Bring it back over your shoulders.'
+    case 'scale':
+      return x.scale < good.scale
+        ? 'You are sliding back into the chair. Sit up straight again.'
+        : 'You are leaning in to the screen. Sit back a little.'
+    case 'tilt':
+      return x.sides.tilt === 0
+        ? 'Your shoulders are uneven. Level them and let them drop.'
+        : `Your ${sideName(x.sides.tilt)} shoulder is up. Drop it and level your shoulders.`
+    case 'headTilt':
+      return 'Your head is tilted. Keep it upright.'
+    case 'headOffset':
+      return 'Your head has moved off to one side. Bring it back over your shoulders.'
+  }
+}
 
 function scoreWithProfile(
   metrics: PostureSample,
@@ -404,15 +512,18 @@ function scoreWithProfile(
 ): { score: number; advice: string; parts: PosturePart[] } {
   const toBad = progressAlong(metrics, profile.good, profile.bad, profile.spread)
   const toClose = progressAlong(metrics, profile.good, profile.close, profile.spread)
-  const along = Math.max(toBad, toClose)
-  const unit = Math.min(1, Math.max(0, (along - PROFILE_FREE) / (PROFILE_FULL - PROFILE_FREE)))
-  const score = Math.max(8, Math.min(100, Math.round(100 - 65 * unit)))
+  const drift = driftFrom(metrics, profile.good, profile.spread)
+  const along = Math.max(toBad, toClose, drift.along)
+  const score = scoreFromAlong(along)
+
   let advice = 'Good posture. Nice.'
-  if (along > 0.3) {
-    advice =
-      toBad >= toClose
-        ? 'Sit up straight. Your back and head are dropping forward.'
-        : 'Sit back a little. You are close to the screen.'
+  // Speak up a little before the nudge line, so the person can correct on their own.
+  if (along > PROFILE_FREE + 0.06) {
+    const key =
+      drift.along >= toBad && drift.along >= toClose
+        ? drift.key
+        : leadingSignal(metrics, profile.good, toBad >= toClose ? profile.bad : profile.close, profile.spread)
+    advice = habitAdvice(key, metrics, profile.good)
   }
   return { score, advice, parts: [] }
 }
@@ -595,12 +706,6 @@ function computeMetrics(
     headMid = midpoint(le, re)
     headZ = (leftEar.z + rightEar.z) / 2
     headTilt = Math.abs(le.y - re.y) / shoulderWidth
-    // Against the width of the head, not the shoulders: sitting back makes the
-    // shoulders look narrow, which used to turn an ordinary head angle into a
-    // "turned away" frame and the page then claimed nobody was there.
-    if (nose && visibility(nose) > 0.35) {
-      yaw = Math.abs(px(nose).x - headMid.x) / Math.max(1, Math.abs(le.x - re.x))
-    }
   } else if ((hasLeftEar || hasRightEar) && nose) {
     // One ear occluded (headset, hair, slight turn): blend the visible ear's
     // vertical level with the nose's horizontal center so neck height doesn't
@@ -615,6 +720,18 @@ function computeMetrics(
     headZ = nose.z
   } else {
     return null
+  }
+
+  // Yaw is measured against the width of the head, not the shoulders: sitting
+  // back makes the shoulders look narrow, which used to turn an ordinary head
+  // angle into a "turned away" frame. Both ear positions are used even when
+  // one is hidden, because the model still places a hidden ear, and a big turn
+  // is exactly when one ear disappears. Gating on ear visibility left those
+  // frames with a yaw of 0, so looking at a second monitor scored as a slouch.
+  if (nose && visibility(nose) > 0.35 && leftEar && rightEar) {
+    const le = px(leftEar)
+    const re = px(rightEar)
+    yaw = Math.abs(px(nose).x - (le.x + re.x) / 2) / Math.max(1, Math.abs(le.x - re.x))
   }
 
   const neck = (shoulderMid.y - headMid.y) / shoulderWidth
@@ -770,7 +887,7 @@ class LandmarkSmoother {
 }
 
 export function PostureProvider({ children }: { children: ReactNode }) {
-  const { state, update, showToast, expanded, page } = useApp()
+  const { state, update, showToast, expanded, page, presenceHidden } = useApp()
   const uiRef = useRef({ expanded, page })
   uiRef.current = { expanded, page }
   const traceEnabledRef = useRef(false)
@@ -871,6 +988,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
   const awayOverrideRef = useRef(0)
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const restartAttemptsRef = useRef(0)
+  const detectErrorsRef = useRef(0)
   const mutedSinceRef = useRef<number | null>(null)
   const cancelRestart = useCallback(() => {
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current)
@@ -879,6 +997,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
   const scheduleRestart = useCallback(
     (reason: string) => {
       if (restartTimerRef.current) return
+      if (restartAttemptsRef.current >= 5) return
       const delay = Math.min(RESTART_MAX_MS, RESTART_BASE_MS * 2 ** restartAttemptsRef.current)
       restartAttemptsRef.current = Math.min(restartAttemptsRef.current + 1, 10)
       if (traceEnabledRef.current) {
@@ -910,11 +1029,23 @@ export function PostureProvider({ children }: { children: ReactNode }) {
   // totals stay, so turning the section back on resumes exactly where it left off.
   const postureVisible = sectionVisible(state, 'posture')
   const enabled = posture.enabled && postureVisible
-  // The camera runs only while the coach is on and not paused for absence.
-  const active = enabled && !awayPaused
+  // The camera runs only while the coach is on, not paused for absence, and
+  // the desktop session is visible/unlocked.
+  const active = enabled && !awayPaused && !presenceHidden
 
   const persistStats = useCallback(() => {
     const today = todayKey()
+    // The day can turn while nothing is scored (asleep overnight, away pause).
+    // Saving then would file yesterday's totals under today's date, so start
+    // the new day at zero here instead of waiting for the next scored frame.
+    if (dayKeyRef.current !== today) {
+      dayKeyRef.current = today
+      goodRef.current = 0
+      badRef.current = 0
+      lastAlertRef.current = 0
+      setGoodDisplay(0)
+      setBadDisplay(0)
+    }
     update({
       posture: {
         goodSeconds: Math.round(goodRef.current),
@@ -1069,11 +1200,11 @@ export function PostureProvider({ children }: { children: ReactNode }) {
             minPosePresenceConfidence: 0.45,
             minTrackingConfidence: 0.45
           })
-          // A missing GPU can leave the GPU delegate pending forever, which
-          // keeps the camera on and the score blank. Fall back to CPU.
+          // A missing or rejected GPU delegate must cleanly fall back to CPU
+          // instead of throwing out of Promise.race.
           const gpuCreate = PoseLandmarker.createFromOptions(vision, landmarkerOptions('GPU'))
           const gpuLandmarker = await Promise.race([
-            gpuCreate,
+            gpuCreate.catch(() => null),
             new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500))
           ])
           if (cancelled) {
@@ -1411,9 +1542,10 @@ export function PostureProvider({ children }: { children: ReactNode }) {
                       })
                     }
                     const setup = setupRef.current
-                    if (guideRef.current) {
-                      // The 3-step setup is running: hold scoring, keep the camera
-                      // timing clean, and sample only during the hold.
+                    if (guideRef.current && guideRef.current.phase !== 'ready') {
+                      // A 3-step setup step is counting down or holding: pause scoring,
+                      // keep the camera timing clean, and sample only during the hold.
+                      // While the setup only waits for "Ready", scoring carries on.
                       lastTickRef.current = now
                       if (guideRef.current.phase === 'capture') {
                         guideRef.current.samples[guideRef.current.step].push(stable)
@@ -1521,6 +1653,7 @@ export function PostureProvider({ children }: { children: ReactNode }) {
                   }
                 }
               } catch (error) {
+                detectErrorsRef.current += 1
                 setStatus('no-pose')
                 setScore(null)
                 setMetrics(null)
@@ -1534,6 +1667,10 @@ export function PostureProvider({ children }: { children: ReactNode }) {
                   message: error instanceof Error ? error.message : String(error)
                 })
                 traceStatus('detect-error')
+                if (detectErrorsRef.current >= 5) {
+                  detectErrorsRef.current = 0
+                  scheduleRestart('detect-error')
+                }
               }
             } else {
               // Count in ~180 ms units so the stall timeouts below keep meaning
@@ -1564,7 +1701,8 @@ export function PostureProvider({ children }: { children: ReactNode }) {
             const absentTooLong =
               !cancelled &&
               !setupRef.current &&
-              !guideRef.current &&
+              // A setup waiting for "Ready" must not keep the camera on for an empty chair.
+              !(guideRef.current && guideRef.current.phase !== 'ready') &&
               performance.now() - lastPresenceRef.current >
                 awayAfterMs(awayStreakRef.current, awayOverrideRef.current)
             if (absentTooLong) {
@@ -1622,11 +1760,14 @@ export function PostureProvider({ children }: { children: ReactNode }) {
         // A camera another app is holding, or one that has not woken up yet,
         // comes back by itself. A denied permission does not, so retrying it
         // would only spam the log. Toast once per outage, not once per retry.
-        const denied =
+        const nonRetriable =
           caught instanceof Error &&
-          (caught.name === 'NotAllowedError' || caught.name === 'SecurityError')
+          (caught.name === 'NotAllowedError' ||
+            caught.name === 'SecurityError' ||
+            caught.name === 'NotFoundError' ||
+            caught.name === 'OverconstrainedError')
         if (restartAttemptsRef.current === 0) showToast('Posture coach', message, 'error')
-        if (!denied) scheduleRestart('start-failed')
+        if (!nonRetriable) scheduleRestart('start-failed')
       }
     }
 
@@ -1653,6 +1794,9 @@ export function PostureProvider({ children }: { children: ReactNode }) {
       if (guideRef.current) {
         guideRef.current = null
         setGuide(null)
+        // Without a finished setup the coach cannot score, so offer it again
+        // when the camera comes back (after an away pause or a restart).
+        if (!postureRef.current.baseline) autoSetupRef.current = false
       }
       persistStats()
     }
@@ -1773,6 +1917,16 @@ export function PostureProvider({ children }: { children: ReactNode }) {
   const calibratingRef = useRef(false)
   const calibrate = useCallback(() => {
     if (calibratingRef.current) return
+    // After the 3-step setup the score comes from the saved good and bad poses,
+    // so a new baseline would change nothing while claiming it had.
+    if (postureRef.current.profile) {
+      showToast(
+        'Not needed',
+        'The 3-step setup already knows how you sit. Use Redo setup to change it.',
+        'default'
+      )
+      return
+    }
     if (!metricsRef.current) {
       showToast('Posture coach', 'Sit in view of the camera first, then calibrate.', 'error')
       return

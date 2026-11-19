@@ -253,6 +253,19 @@ function getAutoUpdater(): AppUpdater {
       safeLog(`updater: downloaded v${version}`)
     })
 
+    updater.on('error', (cause: Error) => {
+      safeLog(`updater: event error (${cause?.message || String(cause)})`)
+      if (state.status === 'downloading' || state.status === 'downloaded') {
+        publish({
+          status: 'error',
+          progress: null,
+          bytesPerSecond: null,
+          error: friendlyUpdaterError(cause),
+          canAutoInstall: false
+        })
+      }
+    })
+
     // BaseUpdater emits before-quit-for-update on Electron's built-in autoUpdater.
     // Hook it so Notch's close-prevention flag (`quitting`) always opens cleanly.
     const handleQuit = (): void => {
@@ -265,7 +278,8 @@ function getAutoUpdater(): AppUpdater {
 }
 
 async function checkGitHubReleaseApi(manual: boolean, previous: UpdateState): Promise<UpdateState> {
-  const endpoint = process.env.NOTCH_UPDATE_API_URL?.trim() || GITHUB_LATEST_API_URL
+  const endpoint =
+    (!app.isPackaged ? process.env.NOTCH_UPDATE_API_URL?.trim() : '') || GITHUB_LATEST_API_URL
   try {
     const response = await fetch(endpoint, {
       headers: {
@@ -570,7 +584,7 @@ export function installUpdate(): boolean {
 
 export function openUpdateRelease(): void {
   const candidate = state.downloadUrl || state.releaseUrl || GITHUB_RELEASES_URL
-  if (/^https:\/\/([\w-]+\.)?(github\.com|githubusercontent\.com)\//i.test(candidate)) {
+  if (/^https:\/\/github\.com\/Saiteja02806\/heronotch(\/|$)/i.test(candidate)) {
     void shell.openExternal(candidate)
     return
   }

@@ -19,6 +19,7 @@ import { execFile, spawn } from 'node:child_process'
 import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync, promises as fs } from 'node:fs'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 import {
   agentStatusEvents,
   agentStatusStart,
@@ -70,9 +71,12 @@ import {
   deactivateStoredLicense,
   getLicenseState,
   initLicense,
+  isLicenseUnlocked,
   validateStoredLicense
 } from './license'
 import { flushState, getState, initState, persistNow, replaceState, setState, stateEvents, updateTask } from './state'
+
+const isCaptureMode = !app.isPackaged && Boolean(process.env.NOTCH_CAPTURE)
 
 if (isDemoMode) {
   initDemoSandbox()
@@ -81,7 +85,7 @@ if (isDemoMode) {
   }
 }
 
-if (process.env.NOTCH_CAPTURE) {
+if (isCaptureMode) {
   app.disableHardwareAcceleration()
 }
 
@@ -131,8 +135,10 @@ function loadAgentToken(): string {
 
 function syncAgentBridge(): void {
   const settings = getState().settings
-  const enabled = settings.agentStatus !== false
-  const wanted = enabled ? settings.agentStatusPort || 7432 : 0
+  const enabled = isLicenseUnlocked() && settings.agentStatus !== false
+  const rawPort = Number(settings.agentStatusPort)
+  const validPort = Number.isInteger(rawPort) && rawPort >= 1024 && rawPort <= 65535 ? rawPort : 7432
+  const wanted = enabled ? validPort : 0
   if (wanted === agentPort) return
   agentPort = wanted
   if (wanted) agentStatusStart(wanted, agentToken)
@@ -410,6 +416,7 @@ function applyBounds(): void {
   ) {
     mainWindow.setBounds(next, false)
   }
+  lastShapeKey = ''
   applyWindowShape()
 }
 
@@ -559,11 +566,11 @@ function applyWindowShape(): void {
         : [full]
     const key = nextRects.map((r) => `${r.x},${r.y},${r.width},${r.height}`).join(';')
     if (key === lastShapeKey) return
-    lastShapeKey = key
     // Focus mode owns the whole screen so the backdrop can take a click.
     // With focus mode off, the renderer sends only the panel (and any
     // toast) so the rest of the desktop keeps the mouse.
     mainWindow.setShape(nextRects)
+    lastShapeKey = key
   } catch {
     // setShape is experimental; if it is unavailable the window still works,
     // it just keeps its rectangular input area.
@@ -653,7 +660,8 @@ function syncEscapeShortcut(): void {
   // notch is expanded and unfocused; a focused window handles Esc itself, which
   // keeps "Esc leaves a text field" working inside the notch.
   if (!mainWindow || mainWindow.isDestroyed()) return
-  const want = expanded && !mainWindow.isFocused() && nativeDialogs === 0
+  const want =
+    expanded && !mainWindow.isFocused() && nativeDialogs === 0 && !getState().settings.pinOnOpen
   const registered = globalShortcut.isRegistered('Escape')
   try {
     if (want && !registered) {
@@ -721,19 +729,24 @@ async function showRendererFailure(details: Electron.RenderProcessGoneDetails): 
     : ['Retry', 'Quit']
   const quitIndex = buttons.length - 1
 
-  void dialog
-    .showMessageBox({
-      type: 'error',
-      title: 'Notch could not open',
-      message: sacBlocked
-        ? 'Smart App Control is blocking Notch.'
-        : 'Notch is running, but its window cannot be displayed.',
-      detail,
-      buttons,
-      defaultId: 0,
-      cancelId: quitIndex,
-      noLink: true
-    })
+  const messageBoxOptions: Electron.MessageBoxOptions = {
+    type: 'error',
+    title: 'Notch could not open',
+    message: sacBlocked
+      ? 'Smart App Control is blocking Notch.'
+      : 'Notch is running, but its window cannot be displayed.',
+    detail,
+    buttons,
+    defaultId: 0,
+    cancelId: quitIndex,
+    noLink: true
+  }
+
+  void withNativeDialog(() =>
+    mainWindow && !mainWindow.isDestroyed()
+      ? dialog.showMessageBox(mainWindow, messageBoxOptions)
+      : dialog.showMessageBox(messageBoxOptions)
+  )
     .then(({ response }) => {
       failureDialogOpen = false
       mainWindow?.setSkipTaskbar(true)
@@ -867,17 +880,29 @@ function createWindow(): void {
   applyBounds()
   syncBackgroundThrottling()
 
+  const rendererIndexFile = path.join(__dirname, '../renderer/index.html')
+  const allowedRendererHref = pathToFileURL(rendererIndexFile).href.toLowerCase()
+  const isAllowedRendererUrl = (candidate: string): boolean => {
+    const devUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : ''
+    if (devUrl && candidate.startsWith(devUrl)) return true
+    const clean = candidate.split(/[?#]/)[0].toLowerCase()
+    return clean === allowedRendererHref
+  }
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/i.test(url)) void shell.openExternal(url)
+    if (isSafeExternalUrl(url)) void shell.openExternal(url).catch(() => undefined)
     return { action: 'deny' }
   })
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    const devUrl = process.env.ELECTRON_RENDERER_URL
-    if (devUrl && url.startsWith(devUrl)) return
-    if (url.startsWith('file://')) return
+    if (isAllowedRendererUrl(url)) return
     event.preventDefault()
-    if (/^https?:/i.test(url)) void shell.openExternal(url)
+    if (isSafeExternalUrl(url)) void shell.openExternal(url).catch(() => undefined)
+  })
+
+  mainWindow.webContents.on('will-redirect', (event, url) => {
+    if (isAllowedRendererUrl(url)) return
+    event.preventDefault()
   })
 
   mainWindow.once('ready-to-show', () => revealWindow('ready-to-show'))
@@ -994,13 +1019,13 @@ function createWindow(): void {
     syncEscapeShortcut()
   })
 
-  if (process.env.ELECTRON_RENDERER_URL) {
+  if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    void mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+    void mainWindow.loadFile(rendererIndexFile)
   }
 
-  const capturePath = process.env.NOTCH_CAPTURE
+  const capturePath = isCaptureMode ? process.env.NOTCH_CAPTURE : undefined
   if (capturePath) {
     mainWindow.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
@@ -1208,7 +1233,56 @@ function refreshVaultWatcher(force = false): void {
   })
 }
 
+function isSafeExternalUrl(raw: unknown, allowObsidian = false): raw is string {
+  if (typeof raw !== 'string') return false
+  try {
+    const parsed = new URL(raw)
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') return true
+    if (allowObsidian && parsed.protocol === 'obsidian:') return true
+    return false
+  } catch {
+    return false
+  }
+}
+
+function requireLicensed(): void {
+  if (!isLicenseUnlocked()) {
+    throw new Error('Activate your Notch license to use this feature.')
+  }
+}
+
+const VALID_AGENT_TOOLS = new Set(['claude', 'codex', 'cursor', 'gemini', 'antigravity', 'opencode'])
+
+function sanitizeShapeRects(list: unknown[]): Electron.Rectangle[] {
+  const usable: Electron.Rectangle[] = []
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue
+    const rect = item as Record<string, unknown>
+    const x = Number(rect.x)
+    const y = Number(rect.y)
+    const width = Number(rect.width)
+    const height = Number(rect.height)
+    if (
+      Number.isFinite(x) &&
+      Number.isFinite(y) &&
+      Number.isFinite(width) &&
+      Number.isFinite(height) &&
+      width > 0 &&
+      height > 0
+    ) {
+      usable.push({
+        x: Math.round(x),
+        y: Math.round(y),
+        width: Math.round(width),
+        height: Math.round(height)
+      })
+    }
+  }
+  return usable
+}
+
 function requireVault(requested?: string): string {
+  requireLicensed()
   const vaultPath = getState().settings.vaultPath
   if (!vaultPath) throw new Error('Choose a notes folder first.')
   if (requested && path.resolve(requested) !== path.resolve(vaultPath)) {
@@ -1233,8 +1307,22 @@ function registerIpc(): void {
   ipcMain.handle('license:deactivate', () => deactivateStoredLicense())
 
   ipcMain.handle('app:set-state', (_event, patch: AppStatePatch) => {
+    requireLicensed()
     const before = getState()
-    const next = setState(patch)
+    // Vault path can only be selected via the native folder picker dialog (or cleared to null),
+    // preventing renderer code from pivoting filesystem access to an arbitrary directory.
+    let safePatch = patch
+    if (
+      !isDemoMode &&
+      patch?.settings &&
+      'vaultPath' in patch.settings &&
+      patch.settings.vaultPath !== null &&
+      patch.settings.vaultPath !== before.settings.vaultPath
+    ) {
+      const { vaultPath: _ignored, ...restSettings } = patch.settings
+      safePatch = { ...patch, settings: restSettings }
+    }
+    const next = setState(safePatch)
     // Turning the posture coach on or off is the user's standing choice. Write it
     // now instead of waiting for the save timer, so a quick exit cannot lose it.
     if (patch.posture?.enabled !== undefined) void persistNow()
@@ -1313,7 +1401,7 @@ function registerIpc(): void {
       if (payload && typeof payload === 'object' && 'focusOff' in payload) {
         if (!expanded) return
         const list = Array.isArray(payload.rects) ? payload.rects : []
-        const usable = list.filter((item) => item && item.width > 0 && item.height > 0)
+        const usable = sanitizeShapeRects(list)
         expandedShape = usable.length > 0 ? usable : null
         applyWindowShape()
         return
@@ -1322,8 +1410,9 @@ function registerIpc(): void {
       // The tab and a corner notice are far apart, so the collapsed shape is a
       // list of regions. One box around both would block the whole desktop.
       const rects = Array.isArray(payload) ? payload : payload ? [payload] : []
-      const usable = rects.filter((item) => item && item.width > 0 && item.height > 0)
+      const usable = sanitizeShapeRects(rects)
       if (usable.length > 0) collapsedShape = usable
+      else if (payload === null) collapsedShape = null
       applyWindowShape()
     }
   )
@@ -1338,26 +1427,32 @@ function registerIpc(): void {
   })
 
   ipcMain.on('app:notify', (_event, title: string, body: string, silent?: boolean) => {
-    if (!isDemoMode) showNotification(title, body, silent === true)
+    if (!isDemoMode && typeof title === 'string' && typeof body === 'string') {
+      showNotification(title, body, silent === true)
+    }
   })
 
   ipcMain.on('app:open-external', (_event, url: string) => {
-    if (!isDemoMode && /^(https?:|obsidian:)/i.test(url)) void shell.openExternal(url)
+    if (!isDemoMode && isSafeExternalUrl(url, true)) {
+      void shell.openExternal(url).catch(() => undefined)
+    }
   })
 
   ipcMain.on('app:copy-text', (_event, text: string) => {
-    clipboard.writeText(text)
+    if (typeof text === 'string') clipboard.writeText(text)
   })
 
-  ipcMain.handle('posture:trace-enabled', () => Boolean(process.env.NOTCH_POSTURE_TRACE))
+  ipcMain.handle('posture:trace-enabled', () => !app.isPackaged && Boolean(process.env.NOTCH_POSTURE_TRACE))
 
   // The posture coach releases the camera when nobody is in frame for a while and
   // wakes on any keyboard or mouse activity, which only the OS can report.
   ipcMain.handle('system:idle-seconds', () => powerMonitor.getSystemIdleTime())
-  ipcMain.handle('posture:away-override', () => Number(process.env.NOTCH_POSTURE_AWAY_MS) || 0)
+  ipcMain.handle('posture:away-override', () =>
+    !app.isPackaged ? Number(process.env.NOTCH_POSTURE_AWAY_MS) || 0 : 0
+  )
 
   ipcMain.on('posture:trace', (_event, sample: unknown) => {
-    const target = process.env.NOTCH_POSTURE_TRACE
+    const target = !app.isPackaged ? process.env.NOTCH_POSTURE_TRACE : ''
     if (!target) return
     try {
       void fs.appendFile(target, `${JSON.stringify(sample)}\n`)
@@ -1427,7 +1522,7 @@ function registerIpc(): void {
       },
       onChaptersDone: (chapters) => {
         logLine(`demo:done chapters=${chapters.length}`)
-        if (process.env.NOTCH_DEMO_DONE_FILE) {
+        if (!app.isPackaged && process.env.NOTCH_DEMO_DONE_FILE) {
           void fs.writeFile(process.env.NOTCH_DEMO_DONE_FILE, JSON.stringify(chapters, null, 2), 'utf8').catch(() => {})
         }
       }
@@ -1438,7 +1533,16 @@ function registerIpc(): void {
   let transfer: Awaited<ReturnType<typeof startTransfer>> | null = null
   let qr = ''
   let starting = false
-  ipcMain.handle('agent:status',()=>agentSnapshot())
+  const stopActiveTransfer = (): void => {
+    transfer?.stop()
+    transfer = null
+    qr = ''
+  }
+  stopTransferHook = stopActiveTransfer
+  ipcMain.handle('agent:status', () => {
+    requireLicensed()
+    return agentSnapshot()
+  })
   const agentConnections = async (): Promise<import('../shared/types').AgentConnection[]> => {
     const rows = await toolConnections()
     // Claude approvals ride hooks, but messaging from Sessions goes through the
@@ -1464,77 +1568,159 @@ function registerIpc(): void {
     )
     return rows
   }
-  ipcMain.handle('agent:connections',()=>agentConnections())
-  ipcMain.handle('agent:claude-login',()=>sessions.startClaudeSignIn())
-  ipcMain.handle('agent:reconnect',async()=>{
-    if(agentPort>0&&agentToken) await syncInstalledToolHooks(agentPort,agentToken)
+  ipcMain.handle('agent:connections', () => {
+    requireLicensed()
     return agentConnections()
   })
-  ipcMain.handle('agent:setup',(_event,tool:import('../shared/types').AgentTool)=>setupSnippet(tool,agentPort||getState().settings.agentStatusPort||7432,agentToken))
-  ipcMain.handle('agent:decide',(_event,id:string,reply:'allow'|'deny')=>agentDecide(id,reply))
-  ipcMain.handle('agent:questionDecide',(_event,id:string,choices:number[] | number[][])=>agentDecideQuestion(id,choices))
-  ipcMain.handle('agent:questionRelease',(_event,id:string)=>agentReleaseQuestion(id))
-  ipcMain.handle('approvals:list',()=>approvalClient(getState().settings.openCodeApprovalPort || 0).list())
-  ipcMain.handle('approvals:decide',(_event,key,reply,port)=>{
-    if(port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
-    return approvalClient(port).decide(key,reply)
+  ipcMain.handle('agent:claude-login', () => {
+    requireLicensed()
+    return sessions.startClaudeSignIn()
   })
-  ipcMain.handle('approvals:questions',()=>approvalClient(getState().settings.openCodeApprovalPort || 0).listQuestions())
-  ipcMain.handle('approvals:questionReply',(_event,id:string,answers:string[][],port:number)=>{
-    if(port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
-    return approvalClient(port).replyQuestion(id,answers)
+  ipcMain.handle('agent:reconnect', async () => {
+    requireLicensed()
+    if (agentPort > 0 && agentToken) await syncInstalledToolHooks(agentPort, agentToken)
+    return agentConnections()
   })
-  ipcMain.handle('approvals:questionReject',(_event,id:string,port:number)=>{
-    if(port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
+  ipcMain.handle('agent:setup', (_event, tool: import('../shared/types').AgentTool) => {
+    requireLicensed()
+    if (typeof tool !== 'string' || !VALID_AGENT_TOOLS.has(tool)) {
+      throw new Error('Unknown agent tool.')
+    }
+    return setupSnippet(tool, agentPort || getState().settings.agentStatusPort || 7432, agentToken)
+  })
+  ipcMain.handle('agent:decide', (_event, id: string, reply: 'allow' | 'deny') => {
+    requireLicensed()
+    return agentDecide(id, reply)
+  })
+  ipcMain.handle(
+    'agent:questionDecide',
+    (_event, id: string, response: import('../shared/types').AgentQuestionResponse) => {
+      requireLicensed()
+      return agentDecideQuestion(id, response)
+    }
+  )
+  ipcMain.handle('agent:questionRelease', (_event, id: string) => {
+    requireLicensed()
+    return agentReleaseQuestion(id)
+  })
+  ipcMain.handle('approvals:list', () => {
+    requireLicensed()
+    return approvalClient(getState().settings.openCodeApprovalPort || 0).list()
+  })
+  ipcMain.handle('approvals:decide', (_event, key, reply, port) => {
+    requireLicensed()
+    if (port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
+    return approvalClient(port).decide(key, reply)
+  })
+  ipcMain.handle('approvals:questions', () => {
+    requireLicensed()
+    return approvalClient(getState().settings.openCodeApprovalPort || 0).listQuestions()
+  })
+  ipcMain.handle('approvals:questionReply', (_event, id: string, answers: string[][], port: number) => {
+    requireLicensed()
+    if (port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
+    return approvalClient(port).replyQuestion(id, answers)
+  })
+  ipcMain.handle('approvals:questionReject', (_event, id: string, port: number) => {
+    requireLicensed()
+    if (port !== getState().settings.openCodeApprovalPort) throw new Error('OpenCode connection changed.')
     return approvalClient(port).rejectQuestion(id)
   })
-  ipcMain.handle('phone:start', async (_event, file:Parcel|null, options?:{clipboard?:boolean;text?:string}) => {
-    if(starting || (transfer && transfer.expires>Date.now())) throw new Error('A transfer is already open.')
+  ipcMain.handle('phone:start', async (_event, file: Parcel | null, options?: { clipboard?: boolean; text?: string }) => {
+    requireLicensed()
+    if (transfer && transfer.expires <= Date.now()) stopActiveTransfer()
+    if (starting || (transfer && transfer.expires > Date.now())) throw new Error('A transfer is already open.')
     starting = true
     try {
       const typed = options?.text ?? ''
-      let parcel:Parcel|null = file
-      if(typed.trim()) parcel = {name:'note.txt',bytes:Buffer.from(typed,'utf8'),text:true}
-      else if(options?.clipboard) parcel = {name:'clipboard.txt',bytes:Buffer.from(await clipboard.readText()),text:true}
+      let parcel: Parcel | null = file
+      if (typed.trim()) parcel = { name: 'note.txt', bytes: Buffer.from(typed, 'utf8'), text: true }
+      else if (options?.clipboard) parcel = { name: 'clipboard.txt', bytes: Buffer.from(await clipboard.readText()), text: true }
       transfer = await startTransfer(phoneHost(), parcel)
-      qr = qrImage(transfer.url,app.getAppPath())
-    } catch(error){transfer?.stop();transfer=null;throw error} finally {starting=false}
+      qr = qrImage(transfer.url, app.getAppPath())
+    } catch (error) {
+      stopActiveTransfer()
+      throw error
+    } finally {
+      starting = false
+    }
   })
-  ipcMain.handle('phone:status',()=>{
-    if(!transfer || transfer.expires<=Date.now()){transfer=null;return null}
-    const item=transfer.peek()
-    return {qr,received:item?{name:item.name,text:item.text}:null}
+  ipcMain.handle('phone:status', () => {
+    requireLicensed()
+    if (!transfer) return null
+    if (transfer.expires <= Date.now()) {
+      stopActiveTransfer()
+      return null
+    }
+    const item = transfer.peek()
+    return { qr, received: item ? { name: item.name, text: item.text } : null }
   })
-  ipcMain.handle('phone:collect',async ()=>{
-    const current=transfer
-    const item=current?.peek()
-    if(!item || !current || current.expires<=Date.now()) throw new Error('Transfer expired.')
-    if(item.text) await clipboard.writeText(Buffer.from(item.bytes).toString('utf8'))
+  ipcMain.handle('phone:collect', async () => {
+    requireLicensed()
+    const current = transfer
+    const item = current?.peek()
+    if (!item || !current || current.expires <= Date.now()) {
+      if (current && current.expires <= Date.now()) stopActiveTransfer()
+      throw new Error('Transfer expired.')
+    }
+    if (item.text) await clipboard.writeText(Buffer.from(item.bytes).toString('utf8'))
     else {
-      const choice=await withNativeDialog(()=>dialog.showSaveDialog({defaultPath:path.join(app.getPath('downloads'), /^\.+$/.test(item.name) ? 'received' : item.name)}))
-      if(choice.canceled || !choice.filePath)return
-      await fs.writeFile(choice.filePath,item.bytes)
+      const saveOptions: Electron.SaveDialogOptions = {
+        defaultPath: path.join(app.getPath('downloads'), /^\.+$/.test(item.name) ? 'received' : item.name)
+      }
+      const choice = await withNativeDialog(() =>
+        mainWindow && !mainWindow.isDestroyed()
+          ? dialog.showSaveDialog(mainWindow, saveOptions)
+          : dialog.showSaveDialog(saveOptions)
+      )
+      if (choice.canceled || !choice.filePath) return
+      await fs.writeFile(choice.filePath, item.bytes)
     }
     current.collected(item)
   })
-  ipcMain.handle('phone:stop',()=>{transfer?.stop();transfer=null;qr=''})
-  app.once('before-quit',()=>transfer?.stop())
-  ipcMain.handle('calendar:snapshot', () => calendar.calendarSnapshot())
-  ipcMain.handle('calendar:status', () => calendar.calendarStatus())
-  ipcMain.handle('calendar:connect', () => calendar.connectCalendar())
+  ipcMain.handle('phone:stop', () => {
+    stopActiveTransfer()
+  })
+  app.once('before-quit', () => stopActiveTransfer())
+  ipcMain.handle('calendar:snapshot', () => {
+    requireLicensed()
+    return calendar.calendarSnapshot()
+  })
+  ipcMain.handle('calendar:status', () => {
+    requireLicensed()
+    return calendar.calendarStatus()
+  })
+  ipcMain.handle('calendar:connect', () => {
+    requireLicensed()
+    return calendar.connectCalendar()
+  })
   ipcMain.handle('calendar:cancel-connect', () => calendar.cancelCalendarConnect())
-  ipcMain.handle('calendar:disconnect', () => calendar.disconnectCalendar())
-  ipcMain.handle('calendar:list', () => calendar.listCalendars())
-  ipcMain.handle('calendar:events', (_event, calendarId, date, timeZone) =>
-    calendar.calendarEvents(calendarId, date, timeZone)
-  )
-  ipcMain.handle('calendar:save', (_event, calendarId, draft, editing) => calendar.saveCalendarEvent(calendarId, draft, editing))
-  ipcMain.handle('calendar:delete', (_event, calendarId, eventId) => calendar.deleteCalendarEvent(calendarId, eventId))
+  ipcMain.handle('calendar:disconnect', () => {
+    requireLicensed()
+    return calendar.disconnectCalendar()
+  })
+  ipcMain.handle('calendar:list', () => {
+    requireLicensed()
+    return calendar.listCalendars()
+  })
+  ipcMain.handle('calendar:events', (_event, calendarId, date, timeZone) => {
+    requireLicensed()
+    return calendar.calendarEvents(calendarId, date, timeZone)
+  })
+  ipcMain.handle('calendar:save', (_event, calendarId, draft, editing) => {
+    requireLicensed()
+    return calendar.saveCalendarEvent(calendarId, draft, editing)
+  })
+  ipcMain.handle('calendar:delete', (_event, calendarId, eventId) => {
+    requireLicensed()
+    return calendar.deleteCalendarEvent(calendarId, eventId)
+  })
 
   ipcMain.handle('notch:displays', () => listDisplays())
   ipcMain.handle('notch:get-backdrop', () => backdrop.getCachedBackdrop())
 
   ipcMain.handle('obsidian:choose-vault', async () => {
+    requireLicensed()
     if (!mainWindow) return null
     const result = await withNativeDialog(() =>
       dialog.showOpenDialog(mainWindow!, {
@@ -1545,7 +1731,7 @@ function registerIpc(): void {
     )
     if (result.canceled || !result.filePaths[0]) return null
     const chosen = result.filePaths[0]
-    setState({ settings: { vaultPath: chosen } })
+    setState({ settings: { vaultPath: chosen }, notes: { lastPath: null } })
     refreshVaultWatcher(true)
     return chosen
   })
@@ -1559,6 +1745,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('spotify:status', async () => {
+    requireLicensed()
     const status = await spotify.getStatus(getState().settings.spotifyRedirectPort)
     const local = localMedia.getLocalStatus()
     return {
@@ -1571,6 +1758,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('spotify:connect', async () => {
+    requireLicensed()
     const settings = getState().settings
     const status = await spotify.connect(settings.spotifyClientId, settings.spotifyRedirectPort)
     const local = localMedia.getLocalStatus()
@@ -1578,12 +1766,14 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('spotify:disconnect', async () => {
+    requireLicensed()
     const status = await spotify.disconnect(getState().settings.spotifyRedirectPort)
     const local = localMedia.getLocalStatus()
     return { ...status, localAvailable: local.available, localTitle: local.title, localArtist: local.artist }
   })
 
   ipcMain.handle('spotify:player', async () => {
+    requireLicensed()
     const settings = getState().settings
     const preference = normalizeMediaPreference(settings.mediaSource)
     const status = await spotify.getStatus(settings.spotifyRedirectPort)
@@ -1609,6 +1799,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('spotify:queue', async () => {
+    requireLicensed()
     const settings = getState().settings
     const preference = normalizeMediaPreference(settings.mediaSource)
     const status = await spotify.getStatus(settings.spotifyRedirectPort)
@@ -1617,6 +1808,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('spotify:library', async () => {
+    requireLicensed()
     const settings = getState().settings
     const preference = normalizeMediaPreference(settings.mediaSource)
     const status = await spotify.getStatus(settings.spotifyRedirectPort)
@@ -1764,6 +1956,7 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
 }
 
   ipcMain.handle('spotify:action', (_event, action, target?: MediaControlTarget) => {
+    requireLicensed()
     // Freeze the displayed session before entering the queue. A closed player
     // must never redirect a queued command to another Windows session.
     const preference = normalizeMediaPreference(getState().settings.mediaSource)
@@ -1775,12 +1968,13 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
           (preference !== 'auto' && sessionId !== preference)) {
         throw new Error('The player changed. Choose the song again.')
       }
+      const localAvailable = Boolean(sessionId && localMedia.isLocalAvailable(sessionId))
       // A browser video session is never a transport target, even if one was
-      // saved before music apps were the only supported sources.
-      if (sessionId && !isMusicSourceId(sessionId)) {
+      // saved before music apps were the only supported sources. Browser YouTube
+      // Music sessions are validated by localMedia (using track album/title).
+      if (sessionId && !isMusicSourceId(sessionId) && !localAvailable) {
         throw new Error('Notch controls Spotify and YouTube Music only. Open one of those and try again.')
       }
-      const localAvailable = Boolean(sessionId && localMedia.isLocalAvailable(sessionId))
       const canRecoverSpotify =
         action?.type === 'play' &&
         Boolean(sessionId && sessionId.toLowerCase().includes('spotify'))
@@ -1837,26 +2031,35 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
   })
 
   ipcMain.handle('spotify:launch', async (_event, target?: string) => {
+    requireLicensed()
     const ok = await openSpotifyApp(typeof target === 'string' ? target : 'spotify:')
     logLine(
       `spotify launch ok=${ok} registered=${spotifyDesktopAvailable()} target=${typeof target === 'string' ? target : 'spotify:'}`
     )
     return ok
   })
-  ipcMain.handle('sessions:scan', () => sessions.scanSessions())
+  ipcMain.handle('sessions:scan', () => {
+    requireLicensed()
+    return sessions.scanSessions()
+  })
   ipcMain.handle('sessions:open-project', (_event, directory: string) => {
+    requireLicensed()
     return sessions.openSessionProject(directory)
   })
   ipcMain.handle('sessions:send', (_event, sessionId: string, message: string) => {
+    requireLicensed()
     return sessions.sendSessionMessage(sessionId, message)
   })
   ipcMain.handle('sessions:verify', (_event, sessionId: string, message: string) => {
+    requireLicensed()
     return sessions.verifySessionMessage(sessionId, message)
   })
   ipcMain.handle('sessions:codex-lock', (_event, sessionId: string) => {
+    requireLicensed()
     return sessions.codexThreadLock(sessionId)
   })
   ipcMain.handle('sessions:focus-codex', () => {
+    requireLicensed()
     return new Promise<boolean>((resolve) => {
       const command =
         "$p = Get-Process ChatGPT -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; if ($p -and (New-Object -ComObject WScript.Shell).AppActivate($p.Id)) { 'ok' } else { 'no' }"
@@ -1889,11 +2092,15 @@ function registerGlobalShortcuts(): void {
   }
 }
 
+let stopTransferHook: (() => void) | null = null
+let openCodeTimer: ReturnType<typeof setInterval> | null = null
+let backdropTimer: ReturnType<typeof setInterval> | null = null
+let licensedServicesActive = false
+
 // Capture runs (NOTCH_CAPTURE) are throwaway verification instances that read
 // a synthetic state file and quit after writing their PNG. Let them start next
 // to the live notch instead of refusing, so a capture never has to close it.
-const gotLock =
-  isDemoMode || Boolean(process.env.NOTCH_CAPTURE) || app.requestSingleInstanceLock()
+const gotLock = isDemoMode || isCaptureMode || app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
@@ -1931,25 +2138,114 @@ if (!gotLock) {
     logLine(
       `display bounds=${JSON.stringify(primaryDisplay.bounds)} workArea=${JSON.stringify(primaryDisplay.workArea)} scale=${primaryDisplay.scaleFactor}`
     )
-    session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
-      callback(permission === 'media')
+    session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+      if (
+        permission === 'media' &&
+        isLicenseUnlocked() &&
+        mainWindow &&
+        !mainWindow.isDestroyed() &&
+        contents === mainWindow.webContents
+      ) {
+        const mediaTypes = (details as { mediaTypes?: string[] } | undefined)?.mediaTypes
+        callback(!mediaTypes || mediaTypes.every((type) => type === 'video'))
+        return
+      }
+      callback(false)
     })
-    session.defaultSession.setPermissionCheckHandler((_contents, permission) => {
-      return permission === 'media'
+    session.defaultSession.setPermissionCheckHandler((contents, permission, _origin, details) => {
+      if (
+        permission === 'media' &&
+        isLicenseUnlocked() &&
+        mainWindow &&
+        !mainWindow.isDestroyed() &&
+        contents === mainWindow.webContents
+      ) {
+        const mediaType = (details as { mediaType?: string } | undefined)?.mediaType
+        return !mediaType || mediaType === 'video'
+      }
+      return false
     })
     await initState()
 
     syncLoginItem(getState().settings.launchAtLogin)
     registerIpc()
+
+    let detectingOpenCode = false
+    const autoDetectOpenCode = (): void => {
+      if (
+        detectingOpenCode ||
+        sessionLocked ||
+        !isLicenseUnlocked() ||
+        getState().settings.agentStatus === false
+      ) {
+        return
+      }
+      detectingOpenCode = true
+      void detectOpenCodePort()
+        .then((found) => {
+          if (found && getState().settings.openCodeApprovalPort !== found) {
+            const next = setState({ settings: { openCodeApprovalPort: found } })
+            sendToRenderer('state:updated', next)
+            logLine(`opencode port auto-detected ${found}`)
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          detectingOpenCode = false
+        })
+    }
+
+    const startLicensedServices = (): void => {
+      if (licensedServicesActive || isDemoMode) return
+      licensedServicesActive = true
+      syncAgentBridge()
+      localMedia.startLocalMediaMonitor()
+      startForegroundWatch(
+        handleForegroundSample,
+        displayPhysicalSize(notchDisplay()),
+        getState().settings.browserOnly === true
+      )
+      refreshVaultWatcher(true)
+      scheduleReminders()
+      if (!openCodeTimer) {
+        autoDetectOpenCode()
+        openCodeTimer = setInterval(autoDetectOpenCode, 60_000)
+        openCodeTimer.unref?.()
+      }
+    }
+
+    const stopLicensedServices = (): void => {
+      if (!licensedServicesActive) return
+      licensedServicesActive = false
+      if (openCodeTimer) {
+        clearInterval(openCodeTimer)
+        openCodeTimer = null
+      }
+      stopTransferHook?.()
+      agentPort = 0
+      agentStatusStop()
+      sessions.stopSessionActivity()
+      localMedia.stopLocalMediaMonitor()
+      stopForegroundWatch()
+      obsidian.closeVaultWatcher()
+      clearReminderTimers()
+    }
+
     await initLicense({
       isDemoMode,
-      isCapture: Boolean(process.env.NOTCH_CAPTURE),
+      isCapture: isCaptureMode,
       log: logLine,
-      onStateChange: (next) => sendToRenderer('license:state', next)
+      onStateChange: (next) => {
+        sendToRenderer('license:state', next)
+        if (!isDemoMode && appInitialized) {
+          if (isLicenseUnlocked()) startLicensedServices()
+          else stopLicensedServices()
+        }
+      }
     })
     initUpdater({
       isDemoMode,
-      isCapture: Boolean(process.env.NOTCH_CAPTURE),
+      isCapture: isCaptureMode,
       autoCheck: getState().settings.autoCheckUpdates !== false,
       log: logLine,
       onStateChange: (next) => sendToRenderer('updater:state', next),
@@ -1963,31 +2259,9 @@ if (!gotLock) {
     })
     if (!isDemoMode) {
       agentToken = loadAgentToken()
-      syncAgentBridge()
       agentStatusEvents.on('change', (value) => {
-        sendToRenderer('agent:update', value)
+        if (isLicenseUnlocked()) sendToRenderer('agent:update', value)
       })
-      // OpenCode only shows approvals/questions when its server port is known.
-      // Find it automatically so nobody has to type it into settings.
-      let detectingOpenCode = false
-      const autoDetectOpenCode = (): void => {
-        if (detectingOpenCode) return
-        detectingOpenCode = true
-        void detectOpenCodePort()
-          .then((found) => {
-            if (found && getState().settings.openCodeApprovalPort !== found) {
-              const next = setState({ settings: { openCodeApprovalPort: found } })
-              sendToRenderer('state:updated', next)
-              logLine(`opencode port auto-detected ${found}`)
-            }
-          })
-          .catch(() => undefined)
-          .finally(() => {
-            detectingOpenCode = false
-          })
-      }
-      autoDetectOpenCode()
-      setInterval(autoDetectOpenCode, 12_000).unref()
     }
     createWindow()
     if (!isDemoStage) createTray()
@@ -2020,18 +2294,18 @@ if (!gotLock) {
           }
         })
         .catch(() => undefined)
-      localMedia.startLocalMediaMonitor()
-      startForegroundWatch(
-        handleForegroundSample,
-        displayPhysicalSize(notchDisplay()),
-        getState().settings.browserOnly === true
-      )
       sessions.sessionSendEvents.on('result', (result) => {
-        sendToRenderer('session:send-result', result)
+        if (isLicenseUnlocked()) sendToRenderer('session:send-result', result)
       })
       sessions.sessionReplyEvents.on('reply', (event) => {
-        sendToRenderer('session:reply', event)
+        if (isLicenseUnlocked()) sendToRenderer('session:reply', event)
       })
+      if (isLicenseUnlocked()) {
+        startLicensedServices()
+      }
+    } else {
+      refreshVaultWatcher(true)
+      scheduleReminders()
     }
     if (!isDemoMode) {
       backdrop.setBackdropNearZone(() => {
@@ -2040,32 +2314,44 @@ if (!gotLock) {
         const { tab } = currentMetrics
         return {
           x: bounds.x + tab.x - 240,
-          y: bounds.y,
+          y: bounds.y + Math.max(0, tab.y - 120),
           width: tab.width + 480,
-          height: tab.y + tab.height + 140
+          height: tab.height + 260
         }
       })
-      backdrop.scheduleBackdropRefresh()
-      setInterval(() => {
-        if (expanded || userHidden || autoHidden || sessionLocked) return
+      if (getState().settings.focusMode !== false && isLicenseUnlocked()) {
+        backdrop.scheduleBackdropRefresh()
+      }
+      backdropTimer = setInterval(() => {
+        if (
+          expanded ||
+          userHidden ||
+          autoHidden ||
+          sessionLocked ||
+          !isLicenseUnlocked() ||
+          getState().settings.focusMode === false
+        ) {
+          return
+        }
         backdrop.refreshBackdrop()
-      }, 120_000).unref()
+      }, 120_000)
+      backdropTimer.unref?.()
     }
-    refreshVaultWatcher(true)
-    scheduleReminders()
     if (!isDemoStage) registerGlobalShortcuts()
 
     stateEvents.on('change', (next: AppState) => {
       sendToRenderer('state:updated', next)
-      scheduleRemindersSoon()
-      refreshVaultWatcher()
-      if (!isDemoMode) syncAgentBridge()
+      if (isLicenseUnlocked()) {
+        scheduleRemindersSoon()
+        refreshVaultWatcher()
+        if (!isDemoMode) syncAgentBridge()
+      }
       syncBackgroundThrottling()
     })
 
     const handleDisplayChange = (): void => {
       applyBounds()
-      if (!isDemoMode) setForegroundTarget(displayPhysicalSize(notchDisplay()))
+      if (!isDemoMode && isLicenseUnlocked()) setForegroundTarget(displayPhysicalSize(notchDisplay()))
       if (
         !isDemoStage &&
         mainWindow &&
@@ -2094,16 +2380,22 @@ if (!gotLock) {
         sessionLocked = true
         localMedia.pauseLocalMediaMonitor()
         pauseForegroundWatch()
+        if (windowShown) sendToRenderer('notch:presence', { hidden: true })
         logLine('system suspend')
       })
       powerMonitor.on('resume', () => {
         sessionLocked = false
-        scheduleReminders()
+        if (isLicenseUnlocked()) {
+          scheduleReminders()
+          localMedia.resumeLocalMediaMonitor()
+          if (!userHidden) resumeForegroundWatch()
+        }
         applyBounds()
-        localMedia.resumeLocalMediaMonitor()
-        if (!userHidden) resumeForegroundWatch()
         presenceApplied = null
         applyPresence()
+        if (windowShown && !userHidden && !autoHidden) {
+          sendToRenderer('notch:presence', { hidden: false })
+        }
         assertTopmost()
         logLine('system resume')
       })
@@ -2111,15 +2403,21 @@ if (!gotLock) {
         sessionLocked = true
         localMedia.pauseLocalMediaMonitor()
         pauseForegroundWatch()
+        if (windowShown) sendToRenderer('notch:presence', { hidden: true })
         logLine('session locked')
       })
       powerMonitor.on('unlock-screen', () => {
         sessionLocked = false
         applyBounds()
-        localMedia.resumeLocalMediaMonitor()
-        if (!userHidden) resumeForegroundWatch()
+        if (isLicenseUnlocked()) {
+          localMedia.resumeLocalMediaMonitor()
+          if (!userHidden) resumeForegroundWatch()
+        }
         presenceApplied = null
         applyPresence()
+        if (windowShown && !userHidden && !autoHidden) {
+          sendToRenderer('notch:presence', { hidden: false })
+        }
         assertTopmost()
         logLine('session unlocked')
       })
@@ -2141,14 +2439,24 @@ if (!gotLock) {
       clearTimeout(rendererRecoveryResetTimer)
       rendererRecoveryResetTimer = null
     }
+    if (openCodeTimer) {
+      clearInterval(openCodeTimer)
+      openCodeTimer = null
+    }
+    if (backdropTimer) {
+      clearInterval(backdropTimer)
+      backdropTimer = null
+    }
     logLineSync('quitting')
     disposeUpdater()
     flushState()
     calendar.flushCalendarCache()
     if (!isDemoMode) {
+      stopTransferHook?.()
       agentStatusStop()
       sessions.stopSessionActivity()
       calendar.cancelCalendarConnect()
+      spotify.cancelConnect()
       localMedia.stopLocalMediaMonitor()
       stopForegroundWatch()
     }

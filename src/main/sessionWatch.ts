@@ -728,8 +728,9 @@ async function threadStatus(file: string, rawId: string): Promise<string | null>
     const columns = db.prepare('pragma table_info(thread_turns)').all() as { name: string }[]
     const names = new Set(columns.map((column) => column.name))
     if (!names.has('thread_id') || !names.has('status')) return null
+    const orderCol = names.has('rollout_ordinal') ? 'rollout_ordinal' : 'rowid'
     const row = db
-      .prepare('select status as status from thread_turns where thread_id = ? order by rowid desc limit 1')
+      .prepare(`select status as status from thread_turns where thread_id = ? order by ${orderCol} desc limit 1`)
       .get(rawId) as { status: string | null } | undefined
     return row ? String(row.status || '') : null
   } catch {

@@ -150,7 +150,8 @@ export function CalendarEventEditor({
         placeholder="Notes, links, an agenda…"
         rows={2}
       />
-      {event.url?.startsWith('https://calendar.google.com/') && (
+      {(event.url?.startsWith('https://calendar.google.com/') ||
+        event.url?.startsWith('https://www.google.com/calendar/')) && (
         <a className="event-editor-link" href={event.url} target="_blank" rel="noreferrer">
           Open in Google Calendar
         </a>

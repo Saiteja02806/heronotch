@@ -3,7 +3,12 @@ const { stripTypeScriptTypes } = require('node:module')
 const assert = require('node:assert/strict')
 
 async function main() {
-  const source = stripTypeScriptTypes(fs.readFileSync('src/main/agentStatus.ts', 'utf8'))
+  const qaSource = stripTypeScriptTypes(fs.readFileSync('src/shared/questionAnswers.ts', 'utf8'))
+  const qaUrl = 'data:text/javascript;base64,' + Buffer.from(qaSource).toString('base64')
+  const source = stripTypeScriptTypes(fs.readFileSync('src/main/agentStatus.ts', 'utf8')).replaceAll(
+    "'../shared/questionAnswers'",
+    `'${qaUrl}'`
+  )
   const mod = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'))
   const token = 'b'.repeat(48)
   const port = 17433

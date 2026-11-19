@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Wifi } from 'lucide-react'
+import { ArrowUpRight, Wifi } from 'lucide-react'
 import { useApp } from '../state/AppContext'
 
 export function PhoneTransfer({
@@ -15,7 +15,7 @@ export function PhoneTransfer({
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState('')
   const fileInput = useRef<HTMLInputElement>(null)
-  const { showToast, expanded } = useApp()
+  const { showToast, expanded, setPage } = useApp()
 
   useEffect(() => {
     let active = true
@@ -87,7 +87,7 @@ export function PhoneTransfer({
         <textarea
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          rows={3}
+          rows={bare ? 3 : 2}
           placeholder="Paste anything here — a link, an address, a line of code."
           spellCheck={false}
         />
@@ -253,6 +253,14 @@ export function PhoneTransfer({
             <span className="eyebrow">Same Wi-Fi</span>
             <h2 className="card-title">Phone transfer</h2>
           </div>
+          <button
+            type="button"
+            className="icon-button subtle"
+            onClick={() => setPage('phone')}
+            title="Open phone transfer"
+          >
+            <ArrowUpRight size={14} />
+          </button>
         </div>
       )}
 

@@ -186,6 +186,7 @@ jobs:
         shell: pwsh
         run: |
           npm run dist:signed -- `
+            --publish never `
             "-c.win.signtoolOptions.certificateSha1=$env:THUMBPRINT" `
             "-c.win.signtoolOptions.rfc3161TimeStampServer=http://ts.ssl.com"
           if ($LASTEXITCODE -ne 0) { throw "Signed build failed (exit $LASTEXITCODE)" }
@@ -194,7 +195,7 @@ jobs:
         if: ${{ inputs.unsigned }}
         shell: pwsh
         run: |
-          npm run dist:win
+          npm run dist:win -- --publish never
           if ($LASTEXITCODE -ne 0) { throw "Unsigned build failed (exit $LASTEXITCODE)" }
 
       # ---------------------------------------------------------------------
@@ -245,12 +246,12 @@ jobs:
             "{0}  {1}  {2}" -f $_.Name, $sig.Status, $sig.SignerCertificate.Subject
           }
 
-      - name: Upload eSigner logs
-        if: ${{ always() && !inputs.unsigned }}
+      - name: Upload eSigner logs on failure
+        if: ${{ failure() && !inputs.unsigned }}
         uses: actions/upload-artifact@v4
         with:
           name: esigner-logs-${{ github.run_number }}
-          path: C:\Users\runneradmin\AppData\Roaming\eSignerCKA\KSP
+          path: ~/AppData/Roaming/eSignerCKA/KSP
           if-no-files-found: ignore
           retention-days: 7
 

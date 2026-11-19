@@ -1,20 +1,65 @@
 import { shell } from 'electron'
-import { promises as fs, mkdirSync, watch, writeFileSync, type FSWatcher } from 'node:fs'
+import {
+  promises as fs,
+  mkdirSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  watch,
+  writeFileSync,
+  type FSWatcher
+} from 'node:fs'
 import path from 'node:path'
 import type { NoteSearchResult, VaultNode } from '../shared/types'
 
 const IGNORED_DIRECTORIES = new Set(['.obsidian', '.trash', '.git', '.github', 'node_modules', '.DS_Store'])
 const TEXT_EXTENSIONS = new Set(['.md', '.markdown', '.txt', '.canvas'])
+const WINDOWS_RESERVED_NAME = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i
 
 let watcher: FSWatcher | null = null
 let watchDebounce: NodeJS.Timeout | null = null
 
+function isInsideRoot(root: string, candidate: string): boolean {
+  const rel = path.relative(root, candidate)
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+function resolveRealRootSync(vaultPath: string): string {
+  const lexical = path.resolve(vaultPath)
+  try {
+    return realpathSync(lexical)
+  } catch {
+    return lexical
+  }
+}
+
+function assertRealContainmentSync(rootReal: string, fullPath: string): void {
+  let cursor = fullPath
+  while (true) {
+    try {
+      const real = realpathSync(cursor)
+      if (!isInsideRoot(rootReal, real)) {
+        throw new Error('That path points outside the selected vault.')
+      }
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code
+      if (code !== 'ENOENT') throw error
+      const parent = path.dirname(cursor)
+      if (parent === cursor) return
+      cursor = parent
+    }
+  }
+}
+
 function resolveSafe(vaultPath: string, relativePath: string): string {
   const root = path.resolve(vaultPath)
   const full = path.resolve(root, relativePath || '.')
-  if (full !== root && !full.startsWith(root + path.sep)) {
+  if (!isInsideRoot(root, full)) {
     throw new Error('That path is outside the selected vault.')
   }
+  const rootReal = resolveRealRootSync(root)
+  assertRealContainmentSync(rootReal, full)
   return full
 }
 
@@ -23,8 +68,10 @@ function toPosix(value: string): string {
 }
 
 function sanitizeName(name: string): string {
-  const trimmed = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').replace(/\.+$/, '')
-  if (!trimmed || trimmed === '.' || trimmed === '..') throw new Error('Enter a valid file name.')
+  const trimmed = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').replace(/[. ]+$/, '')
+  if (!trimmed || trimmed === '.' || trimmed === '..' || WINDOWS_RESERVED_NAME.test(trimmed)) {
+    throw new Error('Enter a valid file name.')
+  }
   return trimmed
 }
 
@@ -89,7 +136,12 @@ export async function writeNote(vaultPath: string, relativePath: string, content
   const ext = path.extname(full).toLowerCase()
   if (!TEXT_EXTENSIONS.has(ext)) throw new Error('This file type cannot be edited here.')
   await fs.mkdir(path.dirname(full), { recursive: true })
-  await fs.writeFile(full, content, 'utf8')
+  const temp = `${full}.${process.pid}.${Date.now()}.tmp`
+  await fs.writeFile(temp, content, 'utf8')
+  await fs.rename(temp, full).catch(async () => {
+    await fs.writeFile(full, content, 'utf8')
+    await fs.unlink(temp).catch(() => undefined)
+  })
 }
 
 export function writeNoteSync(vaultPath: string, relativePath: string, content: string): void {
@@ -97,12 +149,24 @@ export function writeNoteSync(vaultPath: string, relativePath: string, content: 
   const ext = path.extname(full).toLowerCase()
   if (!TEXT_EXTENSIONS.has(ext)) throw new Error('This file type cannot be edited here.')
   mkdirSync(path.dirname(full), { recursive: true })
-  writeFileSync(full, content, 'utf8')
+  const temp = `${full}.${process.pid}.sync.tmp`
+  writeFileSync(temp, content, 'utf8')
+  try {
+    renameSync(temp, full)
+  } catch {
+    writeFileSync(full, content, 'utf8')
+    try {
+      unlinkSync(temp)
+    } catch {
+      // Ignore cleanup errors.
+    }
+  }
 }
 
 export async function createFile(vaultPath: string, directory: string, rawName: string): Promise<string> {
   const safe = sanitizeName(rawName)
-  const fileName = path.extname(safe) ? safe : `${safe}.md`
+  const ext = path.extname(safe).toLowerCase()
+  const fileName = TEXT_EXTENSIONS.has(ext) ? safe : `${safe}.md`
   const full = resolveSafe(vaultPath, path.join(directory || '', fileName))
   if (await fs.stat(full).then(() => true).catch(() => false)) {
     throw new Error('A file with that name already exists.')
@@ -126,15 +190,27 @@ export async function renameEntry(vaultPath: string, relativePath: string, rawNa
   const stats = await fs.stat(full)
   let safe = sanitizeName(rawName)
   if (stats.isFile()) {
-    const currentExt = path.extname(full)
-    if (!path.extname(safe) && currentExt) safe += currentExt
+    const currentExt = path.extname(full).toLowerCase()
+    const nextExt = path.extname(safe).toLowerCase()
+    if (!TEXT_EXTENSIONS.has(nextExt)) {
+      const fallbackExt = TEXT_EXTENSIONS.has(currentExt) ? currentExt : '.md'
+      safe += fallbackExt
+    }
   }
   const target = path.join(path.dirname(full), safe)
   if (target === full) return relativePath
-  if (await fs.stat(target).then(() => true).catch(() => false)) {
+  const caseOnlyChange =
+    process.platform === 'win32' && target.toLowerCase() === full.toLowerCase()
+  if (!caseOnlyChange && (await fs.stat(target).then(() => true).catch(() => false))) {
     throw new Error('Something with that name already exists.')
   }
-  await fs.rename(full, target)
+  if (caseOnlyChange) {
+    const intermediate = `${full}.notch-case-${Date.now()}`
+    await fs.rename(full, intermediate)
+    await fs.rename(intermediate, target)
+  } else {
+    await fs.rename(full, target)
+  }
   return toPosix(path.relative(vaultPath, target))
 }
 
@@ -184,6 +260,8 @@ export async function revealEntry(vaultPath: string, relativePath: string | null
 
 export async function openFile(vaultPath: string, relativePath: string): Promise<void> {
   const full = resolveSafe(vaultPath, relativePath)
+  const ext = path.extname(full).toLowerCase()
+  if (!TEXT_EXTENSIONS.has(ext)) throw new Error('This file type cannot be opened from Notch.')
   await shell.openPath(full)
 }
 

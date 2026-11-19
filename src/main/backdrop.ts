@@ -112,7 +112,8 @@ export function resumeBackdropCapture(): void {
 
 export function scheduleBackdropRefresh(): void {
   if (!app.isReady()) return
-  setTimeout(() => {
+  const timer = setTimeout(() => {
     refreshBackdrop()
-  }, 3000)
+  }, 8_000)
+  timer.unref?.()
 }
