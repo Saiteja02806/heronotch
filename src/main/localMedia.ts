@@ -1,5 +1,13 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import type { SpotifyAction, SpotifyPlayback } from '../shared/types'
+import {
+  AUTOMATION_DENIED_MESSAGE,
+  isAutomationDenied,
+  MAC_MONITOR_SCRIPT,
+  readMacSnapshotOnce,
+  runMacControl
+} from './localMediaMac'
+import { isMac, isWin } from './platform'
 
 interface LocalSnapshot {
   available: boolean
@@ -13,6 +21,10 @@ interface LocalSnapshot {
   canPrevious?: boolean
   canSeek?: boolean
   source?: string
+  /** Artwork URL (macOS Spotify only). */
+  art?: string | null
+  /** Why the sample is unavailable, e.g. an AppleScript permission error (macOS). */
+  error?: string
   sampledAt: number
   positionSampledAt?: number
 }
@@ -79,6 +91,8 @@ let buffer = ''
 let stopping = false
 let restartTimer: NodeJS.Timeout | null = null
 let actionQueue: Promise<unknown> = Promise.resolve()
+// macOS: set once a sample or control fails with the Automation refusal.
+let automationDenied = false
 
 function scheduleRestart(): void {
   if (stopping || restartTimer) return
@@ -89,10 +103,14 @@ function scheduleRestart(): void {
 }
 
 export function startLocalMediaMonitor(): void {
-  if (process.platform !== 'win32' || monitor || stopping) return
+  if ((!isWin && !isMac) || monitor || stopping) return
   let child: ChildProcess
   try {
-    child = spawn(
+    child = isMac
+      ? spawn('osascript', ['-l', 'JavaScript', '-e', MAC_MONITOR_SCRIPT], {
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
+      : spawn(
       'powershell.exe',
       [
         '-NoLogo',
@@ -124,6 +142,10 @@ export function startLocalMediaMonitor(): void {
       if (line) {
         try {
           const snapshot = JSON.parse(line) as Omit<LocalSnapshot, 'sampledAt'>
+          if (isMac) {
+            if (snapshot.available) automationDenied = false
+            else if (isAutomationDenied(snapshot.error)) automationDenied = true
+          }
           const previous = latest
           const sampledAt = Date.now()
           const sameTrack =
@@ -215,7 +237,7 @@ export function getLocalPlayback(): SpotifyPlayback {
           name: latest.title,
           artists: latest.artist || 'Spotify',
           album: latest.album || '',
-          image: null,
+          image: latest.art || null,
           duration,
           progress: Math.min(position, duration || position),
           url: null
@@ -301,9 +323,51 @@ interface ControlResult {
   snapshot?: LocalSnapshot
 }
 
+function toSnapshot(parsed: Partial<LocalSnapshot> | null): LocalSnapshot | undefined {
+  if (!parsed?.available) return undefined
+  return {
+    available: true,
+    title: parsed.title,
+    artist: parsed.artist,
+    album: parsed.album,
+    status: parsed.status,
+    position: parsed.position,
+    end: parsed.end,
+    canNext: parsed.canNext,
+    canPrevious: parsed.canPrevious,
+    canSeek: parsed.canSeek,
+    source: parsed.source,
+    art: parsed.art ?? null,
+    sampledAt: Date.now(),
+    positionSampledAt: Date.now()
+  }
+}
+
+async function runMacControlWithSnapshot(
+  action: Extract<SpotifyAction, { type: 'play' | 'pause' | 'next' | 'previous' | 'seek' }>
+): Promise<ControlResult> {
+  const before = latest?.title || null
+  const result = await runMacControl(action)
+  if (result.denied) automationDenied = true
+  if (!result.ok) return { ok: false }
+  automationDenied = false
+  // Like the Windows script: read back the new state, and for a skip wait
+  // (briefly) until Spotify reports the new title.
+  const waitForTitle = action.type === 'next' || action.type === 'previous'
+  const deadline = Date.now() + (waitForTitle ? 2500 : 0)
+  let snapshot = toSnapshot((await readMacSnapshotOnce()) as Partial<LocalSnapshot> | null)
+  while (waitForTitle && Date.now() < deadline && (snapshot?.title || null) === before) {
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    snapshot = toSnapshot((await readMacSnapshotOnce()) as Partial<LocalSnapshot> | null)
+  }
+  return { ok: true, snapshot }
+}
+
 function runControl(
   action: Extract<SpotifyAction, { type: 'play' | 'pause' | 'next' | 'previous' | 'seek' }>
 ): Promise<ControlResult> {
+  if (isMac) return runMacControlWithSnapshot(action)
+  if (!isWin) return Promise.resolve({ ok: false })
   return new Promise((resolve) => {
     execFile(
       'powershell.exe',
@@ -360,6 +424,7 @@ function runControl(
 
 async function performLocalActionNow(action: SpotifyAction): Promise<SpotifyPlayback> {
   if (!isLocalAvailable()) {
+    if (isMac && automationDenied) throw new Error(AUTOMATION_DENIED_MESSAGE)
     throw new Error('Spotify Desktop is not available. Open Spotify and start a track.')
   }
 
@@ -380,6 +445,7 @@ async function performLocalActionNow(action: SpotifyAction): Promise<SpotifyPlay
   const beforeTitle = latest?.title || null
   const result = await runControl(action)
   if (!result.ok) {
+    if (isMac && automationDenied) throw new Error(AUTOMATION_DENIED_MESSAGE)
     throw new Error('Spotify did not accept that control. Make sure Spotify is open and a track is active.')
   }
   if (result.snapshot) latest = result.snapshot
