@@ -1,0 +1,712 @@
+/* ----------------------------------------------------------------
+   Liquid glass layer
+   ----------------------------------------------------------------
+   A restrained material pass over the base theme. The panel keeps a
+   near-black core for legibility; slow, low-opacity light fields behind
+   smoked-glass cards give it depth without turning the dashboard into a
+   screensaver. Everything here degrades to the base theme when motion is
+   reduced. */
+
+:root {
+  --bg: #000000;
+  --panel: #000000;
+  --card: #050505;
+  --ink: #f3f3f3;
+  --muted: #9c9c9c;
+  --muted-2: #7f7f7f;
+  --line: rgba(255, 255, 255, 0.1);
+  --line-strong: rgba(255, 255, 255, 0.18);
+  --cream: #f3f3f3;
+  --spotify: #1ed760;
+  --glass: rgba(10, 10, 10, 0.62);
+  --ease-liquid: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* The shell itself is black glass. Color is reserved for brand marks and
+   content imagery, which opt out of the neutral treatment below. */
+
+/* ----------------------------------------------------------------
+   Panel atmosphere
+   ---------------------------------------------------------------- */
+
+.panel {
+  border-color: rgba(255, 255, 255, 0.08);
+  border-radius: 0 0 28px 28px;
+  background:
+    radial-gradient(120% 80% at 50% -18%, rgba(255, 255, 255, 0.022), transparent 44%),
+    linear-gradient(180deg, #050505 0%, #020202 42%, #000000 100%);
+  box-shadow:
+    0 26px 70px -18px rgba(0, 0, 0, 0.72),
+    0 6px 20px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(0, 0, 0, 0.44);
+}
+
+/* A single travelling highlight on the panel's top lip. It reads as the
+   meniscus of the glass rather than a border. */
+.panel::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 9%;
+  right: 9%;
+  height: 1px;
+  z-index: 21;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.16) 24%,
+    rgba(255, 255, 255, 0.34) 50%,
+    rgba(255, 255, 255, 0.14) 76%,
+    transparent
+  );
+  opacity: 0.7;
+}
+
+.panel-ambient {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.liquid-blob {
+  position: absolute;
+  display: block;
+  border-radius: 50%;
+  transform: translate3d(0, 0, 0);
+}
+
+.liquid-blob.is-accent {
+  width: 480px;
+  height: 320px;
+  left: -60px;
+  top: -160px;
+  background: radial-gradient(
+    ellipse at center,
+    color-mix(in srgb, var(--accent) 8%, transparent),
+    transparent 68%
+  );
+}
+
+html[data-accent='obsidian'] .liquid-blob.is-accent {
+  background: radial-gradient(
+    ellipse at center,
+    rgba(255, 255, 255, 0.03),
+    transparent 68%
+  );
+}
+
+.liquid-blob.is-cool {
+  width: 480px;
+  height: 320px;
+  right: -140px;
+  top: -140px;
+  background: radial-gradient(ellipse at center, rgba(255, 255, 255, 0.03), transparent 70%);
+}
+
+.liquid-blob.is-warm {
+  width: 560px;
+  height: 260px;
+  left: 28%;
+  bottom: -210px;
+  background: radial-gradient(ellipse at center, rgba(255, 255, 255, 0.025), transparent 70%);
+}
+
+.liquid-sheen {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    112deg,
+    transparent 34%,
+    rgba(255, 255, 255, 0.012) 47%,
+    transparent 58%
+  );
+}
+
+.panel-light {
+  --pointer-x: 72%;
+  --pointer-y: 0%;
+  --pointer-o: 0;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: var(--pointer-o);
+  background: radial-gradient(
+    320px circle at var(--pointer-x) var(--pointer-y),
+    rgba(255, 255, 255, 0.055),
+    transparent 68%
+  );
+  transition: opacity 420ms ease;
+}
+
+.panel > .panel-body {
+  position: relative;
+  z-index: 2;
+}
+
+/* ----------------------------------------------------------------
+   Chrome
+   ---------------------------------------------------------------- */
+
+.topbar {
+  border-bottom-color: rgba(255, 255, 255, 0.065);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.008)),
+    rgba(0, 0, 0, 0.34);
+}
+
+.statusbar {
+  border-top-color: rgba(255, 255, 255, 0.065);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 60%),
+    rgba(0, 0, 0, 0.46);
+}
+
+.nav-tabs {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.018)),
+    rgba(255, 255, 255, 0.018);
+  border-color: rgba(255, 255, 255, 0.07);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.055),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.24);
+}
+
+.nav-tab {
+  transition: color 200ms ease, background 200ms ease;
+}
+
+.nav-tab:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.nav-active {
+  background: rgba(255, 255, 255, 0.055);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow:
+    0 5px 14px rgba(0, 0, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.icon-button,
+.close-notch {
+  border-color: rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.015)),
+    rgba(255, 255, 255, 0.012);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition:
+    background 200ms ease,
+    color 200ms ease,
+    border-color 200ms ease,
+    transform 150ms var(--ease-liquid);
+}
+
+.icon-button:hover,
+.close-notch:hover {
+  border-color: rgba(255, 255, 255, 0.11);
+}
+
+.icon-button:active,
+.close-notch:active,
+.soft-button:active,
+.timer-play:active {
+  transform: scale(0.97);
+}
+
+:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.55);
+  outline-offset: 2px;
+}
+
+kbd {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.035));
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.44),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: #b9b9b9;
+}
+
+/* ----------------------------------------------------------------
+   Smoked-glass surfaces
+   ---------------------------------------------------------------- */
+
+.card {
+  border-radius: 20px;
+  border-color: rgba(255, 255, 255, 0.09);
+  background:
+    radial-gradient(110% 80% at 18% -10%, rgba(255, 255, 255, 0.026), transparent 54%),
+    linear-gradient(155deg, rgba(255, 255, 255, 0.024), rgba(255, 255, 255, 0.008) 46%, rgba(255, 255, 255, 0.004)),
+    rgba(6, 6, 6, 0.78);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.075),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.4),
+    0 20px 44px -28px rgba(0, 0, 0, 0.92);
+  transition:
+    border-color 300ms var(--ease-liquid),
+    box-shadow 300ms var(--ease-liquid),
+    transform 300ms var(--ease-liquid);
+}
+
+.music-card,
+.sessions-card {
+  transition:
+    border-color 300ms var(--ease-liquid),
+    box-shadow 300ms var(--ease-liquid),
+    transform 300ms var(--ease-liquid);
+}
+
+.music-card:hover,
+.sessions-card:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.36),
+    0 24px 52px -26px rgba(0, 0, 0, 0.95);
+  transform: translateY(-1px);
+}
+
+.music-card:active,
+.sessions-card:active {
+  transform: translateY(0) scale(0.997);
+}
+
+.obsidian-card {
+  background:
+    radial-gradient(150% 130% at 100% 0%, rgba(157, 142, 255, 0.045), transparent 55%),
+    radial-gradient(110% 80% at 18% -10%, rgba(255, 255, 255, 0.024), transparent 54%),
+    linear-gradient(155deg, rgba(255, 255, 255, 0.022), rgba(255, 255, 255, 0.006)),
+    rgba(6, 6, 6, 0.78);
+}
+
+.sessions-card {
+  background:
+    radial-gradient(130% 110% at 100% 0%, rgba(255, 255, 255, 0.028), transparent 58%),
+    radial-gradient(110% 80% at 18% -10%, rgba(255, 255, 255, 0.024), transparent 54%),
+    linear-gradient(155deg, rgba(255, 255, 255, 0.022), rgba(255, 255, 255, 0.006)),
+    rgba(6, 6, 6, 0.78);
+}
+
+.water-glance {
+  border-color: rgba(126, 200, 227, 0.24);
+  background:
+    radial-gradient(90% 180% at 0% 0%, rgba(126, 200, 227, 0.16), transparent 60%),
+    linear-gradient(90deg, rgba(47, 113, 152, 0.14), rgba(14, 34, 52, 0.2)),
+    rgba(6, 12, 18, 0.68);
+  box-shadow:
+    inset 0 1px 0 rgba(197, 236, 248, 0.12),
+    0 14px 30px -26px rgba(10, 40, 64, 0.9);
+}
+
+.quick-add {
+  border-color: rgba(255, 255, 255, 0.065);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)),
+    rgba(0, 0, 0, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.quick-add:focus-within {
+  border-color: rgba(255, 255, 255, 0.28);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.022)),
+    rgba(0, 0, 0, 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+
+.primary-button {
+  background:
+    radial-gradient(100% 120% at 50% 0%, rgba(255, 255, 255, 0.32), transparent 58%),
+    linear-gradient(180deg, var(--accent-soft), var(--accent));
+  box-shadow:
+    0 8px 22px -10px rgba(255, 255, 255, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.16);
+}
+
+.soft-button {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.02)),
+    rgba(255, 255, 255, 0.01);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+}
+
+.soft-button:hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.03)),
+    rgba(255, 255, 255, 0.015);
+  border-color: rgba(255, 255, 255, 0.13);
+}
+
+.toast,
+.modal-card {
+  border-color: rgba(255, 255, 255, 0.11);
+  background:
+    radial-gradient(100% 80% at 20% 0%, rgba(255, 255, 255, 0.08), transparent 58%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.018)),
+    rgba(8, 8, 8, 0.92);
+  box-shadow:
+    0 28px 70px -20px rgba(0, 0, 0, 0.72),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+/* ----------------------------------------------------------------
+   Focus timer: a liquid meniscus instead of a flat ring
+   ---------------------------------------------------------------- */
+
+.timer-disc {
+  background: transparent;
+  box-shadow: none;
+}
+
+.timer-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+  overflow: visible;
+  pointer-events: none;
+}
+
+.timer-ring-track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.055);
+  stroke-width: 6.5;
+}
+
+.timer-ring-value {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 6.5;
+  stroke-linecap: round;
+  transition: stroke-dasharray 500ms linear;
+}
+
+.timer-disc-face {
+  position: relative;
+  z-index: 1;
+  overflow: hidden;
+  background:
+    radial-gradient(100% 90% at 50% 8%, rgba(255, 255, 255, 0.075), transparent 62%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent),
+    #0a0a0a;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.065),
+    inset 0 -8px 18px rgba(0, 0, 0, 0.28);
+}
+
+.timer-disc-label,
+.timer-disc-time {
+  position: relative;
+  z-index: 1;
+}
+
+.timer-disc.is-running .timer-disc-face {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.11),
+    inset 0 -8px 18px rgba(0, 0, 0, 0.28);
+}
+
+.timer-modes {
+  background: rgba(8, 8, 8, 0.78);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.timer-modes button.is-active {
+  background: rgba(255, 255, 255, 0.065);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.timer-play {
+  background: rgba(255, 255, 255, 0.055);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.timer-ghost {
+  background: rgba(8, 8, 8, 0.58);
+}
+
+.timer-length--edit {
+  padding: 2px 5px;
+  border-radius: 7px;
+  background: rgba(8, 8, 8, 0.58);
+}
+
+.timer-length--edit input {
+  background: rgba(8, 8, 8, 0.72);
+}
+
+.timer-length--edit input:focus {
+  border-color: rgba(255, 255, 255, 0.36);
+}
+
+/* ----------------------------------------------------------------
+   Type rhythm
+   ---------------------------------------------------------------- */
+
+.eyebrow {
+  font-size: 10.3px;
+  font-weight: 620;
+  letter-spacing: 0.125em;
+  color: var(--muted);
+}
+
+.card-title {
+  font-size: 20px;
+  letter-spacing: -0.018em;
+}
+
+.card-heading {
+  gap: 10px;
+}
+
+::selection {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+/* The collapsed tab gets the same wet edge at a much smaller scale. */
+.collapsed-bar {
+  --notch-bg: #050505;
+  background:
+    radial-gradient(140% 120% at 50% -30%, rgba(255, 255, 255, 0.055), transparent 60%),
+    linear-gradient(180deg, color-mix(in srgb, var(--notch-bg) 86%, #fff), var(--notch-bg));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.collapsed-bar:hover {
+  --notch-bg: #0e0e0e;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.085);
+}
+
+/* ----------------------------------------------------------------
+   Compact / focus-mode adjustments
+   ---------------------------------------------------------------- */
+
+.app.is-panel-compact .panel {
+  border-radius: 0 0 24px 24px;
+  box-shadow:
+    0 24px 58px -18px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 0 0 1px rgba(0, 0, 0, 0.44);
+}
+
+.app.is-focus-mode .panel {
+  box-shadow:
+    0 34px 90px -18px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+
+/* Focus mode dims the desktop smoothly so the panel stays readable without blacking out open windows. */
+.focus-backdrop {
+  background:
+    radial-gradient(70% 55% at 50% 0%, rgba(255, 255, 255, 0.04), transparent 70%),
+    rgba(3, 4, 6, 0.86);
+}
+
+.app.is-panel-compact .focus-backdrop {
+  background:
+    radial-gradient(70% 55% at 50% 0%, rgba(255, 255, 255, 0.03), transparent 70%),
+    rgba(3, 4, 6, 0.72);
+}
+
+/* With a desktop snapshot the blurred image does the work and the wash only
+   dims it. Without one (first seconds after launch) the plain wash above stays. */
+.app.is-focus-mode .focus-backdrop-image.is-prepared {
+  display: block;
+  opacity: 1;
+  filter: brightness(0.7) saturate(0.95);
+  transform: scale(1.04);
+  animation: none;
+}
+
+.app.is-focus-mode .focus-backdrop-image.is-prepared ~ .focus-backdrop-tint {
+  background: rgba(3, 4, 6, 0.12);
+}
+
+.focus-backdrop-tint {
+  background: transparent;
+}
+
+/* ----------------------------------------------------------------
+   Reduced motion and transparency
+   ---------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .liquid-blob,
+  .liquid-sheen {
+    animation: none;
+  }
+
+  .liquid-blob.is-accent { transform: translate3d(30px, 22px, 0); }
+  .liquid-blob.is-cool { transform: translate3d(-24px, 14px, 0); }
+  .panel-light { display: none; }
+
+  .music-card:hover,
+  .sessions-card:hover,
+  .timer-disc:hover {
+    transform: none;
+  }
+}
+
+html.reduce-motion .liquid-blob,
+html.reduce-motion .liquid-sheen {
+  animation: none;
+}
+
+html.reduce-motion .panel-light {
+  display: none;
+}
+
+html.reduce-motion .music-card:hover,
+html.reduce-motion .sessions-card:hover,
+html.reduce-motion .timer-disc:hover {
+  transform: none;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .card {
+    background: #0a0a0a;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  .nav-tabs,
+  .statusbar {
+    backdrop-filter: none;
+    background: #050505;
+  }
+
+  .panel-light,
+  .liquid-sheen {
+    display: none;
+  }
+}
+
+/* ----------------------------------------------------------------
+   Brand color exceptions
+   ----------------------------------------------------------------
+   The shell is neutral. These are the only deliberate color sources:
+   the Notch mark and the coding-tool provider marks. Album/cover art is
+   content and also keeps its own color. Everything else that still has a
+   semantic hue in the base theme is neutralized below. */
+
+/* The original Notch mark: warm ceramic tile, coral dot. */
+.logo-dot {
+  background: #ff6f61;
+  box-shadow: 0 0 8px rgba(255, 111, 97, 0.55);
+}
+
+/* Provider marks keep their brand colors (Claude clay, Anti Gravity's
+   starburst, etc.). Album and cover images keep theirs as content. */
+.session-logo,
+.session-logo svg,
+.provider-logo,
+.antigravity-logo,
+.music-art img,
+.music-page-cover img {
+  filter: none;
+}
+
+/* Album art casts a soft ambient glow without allocating huge offscreen blur surfaces. */
+.music-ambient img {
+  filter: blur(24px) saturate(1.2);
+  opacity: 0.24;
+}
+
+/* The flight is transform-only; the content and atmosphere land after it. */
+.app .panel.is-spatial {
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.app .panel.is-spatial:not(.is-opening) {
+  transition:
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 240ms ease;
+}
+
+.app .panel.is-spatial.is-instant {
+  transition: none;
+}
+
+.panel.is-spatial.is-opening {
+  box-shadow: none;
+}
+
+/* The page and status bar are visible from the first frame and rise with the
+   panel body's fade. They used to stay hidden until the flight finished and
+   then fade in, so the Home screen showed up about half a second after the
+   notch had started opening. */
+.panel.is-spatial .panel-body {
+  transition: opacity 120ms ease;
+}
+
+.panel.is-spatial.is-opening .panel-ambient,
+.panel.is-spatial.is-opening .panel-light {
+  opacity: 0;
+}
+
+.panel.is-spatial.is-opening .liquid-blob,
+.panel.is-spatial.is-opening .liquid-sheen {
+  animation-play-state: paused;
+}
+
+.panel-ambient {
+  transition: opacity 300ms ease;
+}
+
+/* The focus wash and hint are chrome, not content. The room goes black
+   immediately so the island has a clean stage; the hint stays flat. */
+.focus-backdrop {
+  animation: none;
+}
+
+.focus-hint {
+  backdrop-filter: none;
+  background: rgba(8, 9, 10, 0.82);
+}
+
+
+/* Light-white music controls: a tinted glass button, not a solid white disc. */
+.control-button.is-primary {
+  color: #f4f4f4;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 4px 10px rgba(0, 0, 0, 0.18);
+}
+
+.control-button.is-primary:hover {
+  filter: none;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.seek-line {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.seek-fill {
+  background: rgba(255, 255, 255, 0.56);
+}

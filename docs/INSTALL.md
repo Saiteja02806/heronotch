@@ -55,7 +55,7 @@ Both contain the same app.
 ## Verify the download (optional, recommended)
 
 ```powershell
-Get-FileHash .\Notch-Portable-1.0.0.exe -Algorithm SHA256
+Get-FileHash .\Notch-Portable-1.0.22.exe -Algorithm SHA256
 ```
 
 Compare the output with the matching line in `SHA256SUMS.txt`. They must match
@@ -64,10 +64,12 @@ two spaces, then the file name.
 
 ## First run
 
-- The notch is collapsed at the top edge of the screen. Hover it to open the
-  tab, or press the shortcut shown in the app.
-- **Esc** or the collapse arrow closes it again. It also closes when you click
-  outside it, unless you pin it.
+- The notch starts as a collapsed tab. Hover it and the workspace grows out of
+  that tab, or press the shortcut shown in the app.
+- **Esc** or the **Collapse** button closes it again. A click outside closes it
+  only while focus mode is on (the default). Turn focus mode off in
+  **Settings → Notch** and the blur stays off; clicks outside the panel reach
+  the desktop. **Pin** only keeps it open when the pointer leaves.
 - Everything runs locally. Notes are plain Markdown files in the vault folder
   you pick. Spotify tokens are stored on your PC.
 
@@ -85,6 +87,14 @@ Deleting `%APPDATA%\notch` resets the app. Your notes are never stored there.
 
 - Installer build: **Settings → Apps → Installed apps → Notch → Uninstall**.
 - Portable build: delete the `.exe`. Optionally delete `%APPDATA%\notch`.
+
+## Updates
+
+Open **Settings → About** (or tray icon → **Check for updates…**).
+
+- **Installer build (`Notch-Setup-*.exe`)**: Downloads the update from GitHub Releases inside Settings and applies it on **Restart to update**. Notes, settings, and connected sessions stay in `%APPDATA%\notch`.
+- **Portable build (`Notch-Portable-*.exe`)**: Shows when a new version is out and opens the new `.exe` download from GitHub Releases so you can replace your portable file without touching `%APPDATA%\notch`.
+- You can turn background update checks off in **Settings → About → Check for updates automatically** and still check manually anytime.
 
 ## If the notch does not appear
 

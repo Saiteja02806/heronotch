@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type ReactNode } from 'react'
+import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 const CompactSlotContext = createContext<{
@@ -8,7 +8,8 @@ const CompactSlotContext = createContext<{
 
 export function CompactSlotProvider({ children }: { children: ReactNode }) {
   const [node, setNode] = useState<HTMLElement | null>(null)
-  return <CompactSlotContext.Provider value={{ node, setNode }}>{children}</CompactSlotContext.Provider>
+  const value = useMemo(() => ({ node, setNode }), [node])
+  return <CompactSlotContext.Provider value={value}>{children}</CompactSlotContext.Provider>
 }
 
 export function CompactSlot() {

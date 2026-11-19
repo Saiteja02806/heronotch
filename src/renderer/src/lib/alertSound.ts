@@ -46,3 +46,45 @@ export function playPostureRing(): void {
     // Sound is a nicety; never let it break the coach.
   }
 }
+
+/**
+ * A clear, pleasant three-note chime for water reminders.
+ */
+export function playWaterRing(): void {
+  try {
+    const Ctor =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!Ctor) return
+    context ??= new Ctor()
+    const audio = context
+    if (audio.state === 'suspended') void audio.resume()
+
+    const start = audio.currentTime + 0.01
+    const master = audio.createGain()
+    master.gain.value = 0.16
+    master.connect(audio.destination)
+
+    const note = (frequency: number, offset: number, length: number): void => {
+      const oscillator = audio.createOscillator()
+      const gain = audio.createGain()
+      oscillator.type = 'sine'
+      oscillator.frequency.setValueAtTime(frequency, start + offset)
+      gain.gain.setValueAtTime(0.0001, start + offset)
+      gain.gain.exponentialRampToValueAtTime(1, start + offset + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + length)
+      oscillator.connect(gain)
+      gain.connect(master)
+      oscillator.start(start + offset)
+      oscillator.stop(start + offset + length + 0.04)
+    }
+
+    note(587.33, 0, 0.2)
+    note(783.99, 0.14, 0.22)
+    note(1046.5, 0.28, 0.34)
+
+    window.setTimeout(() => master.disconnect(), 1400)
+  } catch {
+    // Sound is a nicety; never let it break reminders.
+  }
+}

@@ -43,7 +43,6 @@ import {
 import type { NoteSearchResult, VaultNode } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
 import { useVaultPicker } from '../hooks/useVaultPicker'
-import { CompactSlotPortal } from '../components/CompactSlot'
 import { Modal } from '../components/Modal'
 import { formatDateShort } from '../lib/time'
 
@@ -62,6 +61,20 @@ function flattenFolders(nodes: VaultNode[], output: string[] = []): string[] {
     }
   }
   return output
+}
+
+function flattenNoteFiles(nodes: VaultNode[]): { path: string; name: string }[] {
+  const notes: { path: string; name: string }[] = []
+  const walk = (list: VaultNode[]): void => {
+    for (const node of list) {
+      if (node.type === 'folder') walk(node.children || [])
+      else if (node.ext === '.md' || node.ext === '.markdown') {
+        notes.push({ path: node.path, name: node.name.replace(/\.md$/i, '') })
+      }
+    }
+  }
+  walk(nodes)
+  return notes
 }
 
 function countNotes(nodes: VaultNode[]): number {
@@ -292,10 +305,15 @@ export function NotesPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const dirtyRef = useRef(false)
   const contentRef = useRef('')
+  const lineEndingRef = useRef<'\n' | '\r\n'>('\n')
   const pathRef = useRef<string | null>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previousVault = useRef<string | null | undefined>(undefined)
   const vaultRef = useRef<string | null>(vaultPath)
+
+  const serializeContent = useCallback((value: string): string => {
+    return lineEndingRef.current === '\r\n' ? value.replace(/\r?\n/g, '\r\n') : value
+  }, [])
 
   const loadTree = useCallback(
     async (silent = false) => {
@@ -331,28 +349,33 @@ export function NotesPage() {
     }
     if (previous === vaultPath) return
     if (previous && dirtyRef.current && pathRef.current) {
-      void window.notch.obsidian.write(previous, pathRef.current, contentRef.current)
+      void window.notch.obsidian
+        .write(previous, pathRef.current, serializeContent(contentRef.current))
+        .catch(() => undefined)
     }
     previousVault.current = vaultPath
     pathRef.current = null
     dirtyRef.current = false
     contentRef.current = ''
+    lineEndingRef.current = '\n'
     setContent('')
     setSelectedPath(null)
     setTree([])
     setTreeReady(false)
     setSaveState('idle')
-  }, [vaultPath])
+  }, [vaultPath, serializeContent])
 
   useEffect(() => {
     if (!vaultPath || !selectedPath || dirtyRef.current) return
     let alive = true
     void window.notch.obsidian
       .read(vaultPath, selectedPath)
-      .then((text) => {
-        if (!alive || dirtyRef.current || text === contentRef.current) return
-        contentRef.current = text
-        setContent(text)
+      .then((raw) => {
+        const normalized = raw.replace(/\r\n/g, '\n')
+        if (!alive || dirtyRef.current || normalized === contentRef.current) return
+        lineEndingRef.current = raw.includes('\r\n') ? '\r\n' : '\n'
+        contentRef.current = normalized
+        setContent(normalized)
         setSaveState('saved')
       })
       .catch(() => undefined)
@@ -389,16 +412,19 @@ export function NotesPage() {
   const saveNow = useCallback(async (): Promise<void> => {
     const path = pathRef.current
     if (!path || !vaultPath || !dirtyRef.current) return
+    const snapshot = contentRef.current
     setSaveState('saving')
     try {
-      await window.notch.obsidian.write(vaultPath, path, contentRef.current)
-      dirtyRef.current = false
-      setSaveState('saved')
+      await window.notch.obsidian.write(vaultPath, path, serializeContent(snapshot))
+      if (contentRef.current === snapshot && pathRef.current === path) {
+        dirtyRef.current = false
+        setSaveState('saved')
+      }
     } catch (error) {
       setSaveState('error')
       showToast('Note not saved', error instanceof Error ? error.message : 'Could not write the file.', 'error')
     }
-  }, [vaultPath, showToast])
+  }, [vaultPath, serializeContent, showToast])
 
   const selectFile = useCallback(
     async (path: string) => {
@@ -409,11 +435,13 @@ export function NotesPage() {
       setLoadingNote(true)
       setPreview(false)
       try {
-        const text = await window.notch.obsidian.read(vaultPath, path)
+        const raw = await window.notch.obsidian.read(vaultPath, path)
+        const normalized = raw.replace(/\r\n/g, '\n')
+        lineEndingRef.current = raw.includes('\r\n') ? '\r\n' : '\n'
         pathRef.current = path
-        contentRef.current = text
+        contentRef.current = normalized
         dirtyRef.current = false
-        setContent(text)
+        setContent(normalized)
         setSelectedPath(path)
         setSaveState('idle')
         update({ notes: { lastPath: path } })
@@ -458,23 +486,34 @@ export function NotesPage() {
   }, [vaultPath])
 
   useEffect(() => {
-    const flush = (): void => {
+    const flushSyncOnUnload = (): void => {
       if (!dirtyRef.current || !pathRef.current || !vaultRef.current) return
       try {
-        window.notch.obsidian.writeSync(vaultRef.current, pathRef.current, contentRef.current)
+        window.notch.obsidian.writeSync(
+          vaultRef.current,
+          pathRef.current,
+          serializeContent(contentRef.current)
+        )
         dirtyRef.current = false
       } catch {
         // The async autosave path will surface a toast if the file is still editable.
       }
     }
-    window.addEventListener('beforeunload', flush)
+    window.addEventListener('beforeunload', flushSyncOnUnload)
     return () => {
-      window.removeEventListener('beforeunload', flush)
+      window.removeEventListener('beforeunload', flushSyncOnUnload)
       if (saveTimer.current) {
         clearTimeout(saveTimer.current)
         saveTimer.current = null
       }
-      flush()
+      if (!dirtyRef.current || !pathRef.current || !vaultRef.current) return
+      const vault = vaultRef.current
+      const notePath = pathRef.current
+      const draft = contentRef.current
+      dirtyRef.current = false
+      void window.notch.obsidian.write(vault, notePath, draft).catch(() => {
+        // Ignore unmount save failures if the note or vault is no longer writable.
+      })
     }
   }, [])
 
@@ -514,6 +553,7 @@ export function NotesPage() {
 
   const folders = useMemo(() => flattenFolders(tree), [tree])
   const noteCount = useMemo(() => countNotes(tree), [tree])
+  const noteFiles = useMemo(() => flattenNoteFiles(tree), [tree])
   const visibleResults = useMemo(() => {
     const query = search.trim().toLowerCase()
     if (query && searchResults.length) return searchResults
@@ -536,13 +576,26 @@ export function NotesPage() {
   const folderPath = selectedPath?.split('/').slice(0, -1).join(' / ')
   const words = content.trim() ? content.trim().split(/\s+/).length : 0
   const markdownHtml = useMemo(() => {
-    const text = content.replace(
-      /\[\[([^\]]+)\]\]/g,
-      '<span class="wiki-link">$1</span>'
-    )
+    if (!preview) return ''
+    let inFence = false
+    const text = content
+      .split('\n')
+      .map((line) => {
+        if (/^\s*(`{3,}|~{3,})/.test(line)) {
+          inFence = !inFence
+          return line
+        }
+        if (inFence) return line
+        return line.replace(/\[\[([^\]]+)\]\]/g, '<span class="wiki-link">$1</span>')
+      })
+      .join('\n')
     const raw = marked.parse(text, { gfm: true, breaks: true, async: false }) as string
-    return DOMPurify.sanitize(raw, { ADD_ATTR: ['target'] })
-  }, [content])
+    return DOMPurify.sanitize(raw, {
+      FORBID_TAGS: ['style', 'form', 'svg', 'iframe', 'object', 'embed', 'base', 'meta'],
+      FORBID_ATTR: ['style', 'srcdoc'],
+      ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|obsidian:|#)/i
+    })
+  }, [content, preview])
 
   // Line-based render of the note for the live editor overlay. Each source
   // line becomes one .lm-line element, so blank lines and wrapped lines keep
@@ -886,7 +939,13 @@ export function NotesPage() {
     (index: number): void => {
       const lines = content.split('\n')
       let seen = 0
+      let inFence = false
       for (let i = 0; i < lines.length; i += 1) {
+        if (/^\s*(`{3,}|~{3,})/.test(lines[i])) {
+          inFence = !inFence
+          continue
+        }
+        if (inFence) continue
         const match = lines[i].match(/^(\s*[-*+]\s+)\[([ xX])\](.*)$/)
         if (!match) continue
         if (seen === index) {
@@ -903,6 +962,15 @@ export function NotesPage() {
 
   const togglePreviewTask = (event: ReactMouseEvent<HTMLDivElement>): void => {
     const target = event.target as HTMLElement
+    const anchor = target.closest('a') as HTMLAnchorElement | null
+    if (anchor) {
+      event.preventDefault()
+      const href = (anchor.getAttribute('href') || '').trim()
+      if (/^(?:https?:|obsidian:)/i.test(href)) {
+        window.notch.openExternal(href)
+      }
+      return
+    }
     const item = target.closest('li')
     if (!item) return
     const box = item.querySelector('input[type="checkbox"]') as HTMLInputElement | null
@@ -1021,6 +1089,12 @@ export function NotesPage() {
         setEntryDialog(null)
         showToast('Folder created', path, 'success')
       } else if (entryDialog.targetPath) {
+        if (
+          selectedPath === entryDialog.targetPath ||
+          selectedPath?.startsWith(`${entryDialog.targetPath}/`)
+        ) {
+          await saveNow()
+        }
         const nextPath = await window.notch.obsidian.rename(vaultPath, entryDialog.targetPath, name)
         if (
           selectedPath === entryDialog.targetPath ||
@@ -1029,6 +1103,7 @@ export function NotesPage() {
           const rebased = `${nextPath}${selectedPath.slice(entryDialog.targetPath.length)}`
           pathRef.current = rebased
           setSelectedPath(rebased)
+          update({ notes: { lastPath: rebased } })
         }
         await loadTree(true)
         setEntryDialog(null)
@@ -1080,7 +1155,7 @@ export function NotesPage() {
         <h1>Your notes, one hover away.</h1>
         <p>
           Open a folder of Markdown notes to browse it, create notes and edit drafts in place.
-          Nothing syncs anywhere else — Notch works directly with your files. You can create a new
+          Nothing syncs anywhere else — {window.notchDemo ? 'Hero Notch' : 'Notch'} works directly with your files. You can create a new
           folder in the picker.
         </p>
         <button className="primary-button" onClick={() => void chooseVault()}>
@@ -1247,32 +1322,30 @@ export function NotesPage() {
         </div>
       </aside>
 
-      {compact && (
-        <CompactSlotPortal>
-          <div className="notes-compact-bar">
-            <div className="sidebar-vault">
-              <span className="vault-avatar">{vaultPath.split(/[\\/]/).filter(Boolean).pop()?.slice(0, 1).toUpperCase()}</span>
-              <div>
-                <span className="eyebrow">Folder</span>
-                <strong>{vaultPath.split(/[\\/]/).filter(Boolean).pop()}</strong>
-              </div>
-            </div>
-            <div className="sidebar-actions">
-              <button className="icon-button subtle" onClick={() => void loadTree()} title="Refresh folder">
-                <RefreshCw size={13} className={loadingTree ? 'spin' : ''} />
-              </button>
-              <button className="icon-button subtle" onClick={() => void createNoteNow()} title="New note">
-                <FilePlus2 size={14} />
-              </button>
-              <button className="icon-button subtle" onClick={() => setEntryDialog({ mode: 'folder', parent: currentFolder })} title="New folder">
-                <FolderPlus size={14} />
-              </button>
-            </div>
-          </div>
-        </CompactSlotPortal>
-      )}
-
       <main className="note-workspace">
+        {compact && (
+          <div className="note-switcher">
+            <select
+              aria-label="Choose a note"
+              value={selectedPath || ''}
+              onChange={(event) => {
+                const next = event.target.value
+                if (next) void selectFile(next)
+              }}
+            >
+              <option value="">{noteFiles.length === 0 ? 'No notes yet' : 'Choose a note'}</option>
+              {noteFiles.map((note) => (
+                <option key={note.path} value={note.path}>
+                  {note.name}
+                </option>
+              ))}
+            </select>
+            <button className="icon-button" onClick={() => void createNoteNow()} title="New note">
+              <FilePlus2 size={14} />
+            </button>
+          </div>
+        )}
+
         {!selectedPath ? (
           <div className="note-welcome">
             <div className="note-welcome-icon"><FileText size={26} /></div>
@@ -1372,8 +1445,10 @@ export function NotesPage() {
                     <Pencil size={13} />
                   </button>
                   <button
-                    className="icon-button subtle"
-                    title="Open in default app"
+                    className="icon-button subtle demo-open-obsidian-btn"
+                    data-demo-open-obsidian="true"
+                    title={window.notchDemo ? 'Open in Obsidian' : 'Open in default app'}
+                    aria-label={window.notchDemo ? 'Open in Obsidian' : 'Open in default app'}
                     onClick={async () => {
                       if (saveTimer.current) {
                         clearTimeout(saveTimer.current)
@@ -1384,6 +1459,11 @@ export function NotesPage() {
                     }}
                   >
                     <Wand2 size={13} />
+                    {window.notchDemo && (
+                      <span className="demo-tooltip" aria-hidden="true">
+                        Open in Obsidian
+                      </span>
+                    )}
                   </button>
                   <button
                     className={`preview-toggle ${preview ? 'is-on' : ''}`}
@@ -1566,6 +1646,7 @@ function TreeNodes({
           return (
             <div key={node.path} className="tree-group">
               <div
+                data-folder-path={node.path}
                 className={`tree-row folder-row ${dropTarget === node.path ? 'is-drop-target' : ''} ${dragPath === node.path ? 'is-dragging' : ''}`}
                 style={{ paddingLeft: 8 + depth * 13 }}
                 draggable
@@ -1648,6 +1729,7 @@ function TreeNodes({
         return (
           <div
             key={node.path}
+            data-note-path={node.path}
             className={`tree-row file-row ${selectedPath === node.path ? 'is-selected' : ''} ${!editable ? 'is-muted' : ''} ${dragPath === node.path ? 'is-dragging' : ''}`}
             style={{ paddingLeft: 20 + depth * 13 }}
             draggable

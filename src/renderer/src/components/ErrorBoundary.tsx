@@ -15,6 +15,12 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('Notch renderer error', error, info.componentStack)
+    try {
+      window.notch?.setShape(null)
+      void window.notch?.setExpanded(true).catch(() => undefined)
+    } catch {
+      // Best-effort unshape so Reload / Quit remain clickable.
+    }
   }
 
   render(): ReactNode {

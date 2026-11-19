@@ -1,0 +1,38 @@
+/* Connected calendar: the connection controls live in a small strip, and a
+   menu keeps reconnect/disconnect reachable without listing events there. */
+.google-calendar-manage {
+  position: relative;
+  display: flex;
+}
+
+.google-calendar-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 40;
+  display: grid;
+  gap: 5px;
+  width: 148px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: #0a0a0a;
+  box-shadow:
+    0 18px 40px -18px #000,
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+.google-calendar-menu .soft-button {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.day-nav-cluster {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
+

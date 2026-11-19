@@ -11,9 +11,12 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "demo:preview": "node demo/scripts/preview-demo.mjs",
+    "demo:record": "node demo/scripts/record-demo.mjs",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder --win portable",
     "dist:win": "npm run build && electron-builder --win portable nsis",
+    "dist:store": "npm run build && electron-builder --win appx",
     "dist:signed": "npm run build && electron-builder --win portable nsis -c.forceCodeSigning=true",
     "verify:signatures": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-signatures.ps1",
     "dist:installer": "npm run build && electron-builder --win nsis"
@@ -24,6 +27,7 @@
     "@fontsource/instrument-serif": "^5.3.0",
     "@mediapipe/tasks-vision": "^1.2.2",
     "dompurify": "^3.4.17",
+    "electron-updater": "^6.8.11",
     "framer-motion": "^14.12.0",
     "lucide-react": "^1.72.0",
     "marked": "^18.2.0",
@@ -38,6 +42,7 @@
     "electron": "^45.3.0",
     "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",
+    "playwright": "^1.65.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
   },
@@ -81,7 +86,27 @@
       "createDesktopShortcut": true,
       "shortcutName": "Notch",
       "artifactName": "Notch-Setup-${version}.${ext}"
-    }
+    },
+    "asarUnpack": [
+      "resources/notch-media-art.dll",
+      "resources/notch-foreground.exe"
+    ],
+    "appx": {
+      "applicationId": "Notch",
+      "displayName": "Notch",
+      "identityName": "Notch.HeroNotch",
+      "publisherDisplayName": "Notch",
+      "publisher": "CN=00000000-0000-0000-0000-000000000000",
+      "backgroundColor": "#050607",
+      "customExtensionsPath": "build/appx-extensions.xml"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Saiteja02806",
+        "repo": "heronotch"
+      }
+    ]
   },
   "type": "commonjs"
 }

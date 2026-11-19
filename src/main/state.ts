@@ -1,13 +1,17 @@
 import { app } from 'electron'
 import { EventEmitter } from 'node:events'
-import { promises as fs, mkdirSync, writeFileSync } from 'node:fs'
+import { promises as fs, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { normalizeSectionPrefs, sectionsEqual } from '../shared/sections'
 import {
+  POSTURE_DAYS_MAX,
   WATER_GLASS_ML,
   WATER_GOAL_MAX,
   WATER_GOAL_MIN,
+  WATER_REMINDER_MAX,
   type AppState,
   type AppStatePatch,
+  type PostureDay,
   type Settings,
   type Task,
   type WaterState
@@ -16,20 +20,34 @@ import {
 export const stateEvents = new EventEmitter()
 
 const DEFAULT_SETTINGS: Settings = {
-  accent: 'coral',
+  accent: 'obsidian',
   vaultPath: null,
   hoverDelay: 140,
   openTrigger: 'hover',
   notchPosition: { x: 0.5, y: 0 },
   notchStyle: 'minimal',
-  launchAtLogin: false,
+  launchAtLogin: true,
   notifications: true,
   timerNotifications: true,
+  agentStatus: true,
+  agentStatusPort: 7432,
+  codingReplySound: true,
   spotifyClientId: '',
   spotifyRedirectPort: 43821,
   userName: '',
   pinOnOpen: false,
-  panelSize: 'full'
+  panelSize: 'full',
+  focusMode: true,
+  mediaSource: 'auto',
+  autoHideFullscreen: true,
+  browserOnly: false,
+  notchDisplay: 'primary',
+  pillOnOtherDisplays: true,
+  neverOver: [],
+  reduceMotion: false,
+  autoCheckUpdates: true,
+  welcomeSeen: false,
+  plannerTimeZone: 'local'
 }
 
 function localDayKey(date = new Date()): string {
@@ -39,31 +57,8 @@ function localDayKey(date = new Date()): string {
   return `${year}-${month}-${day}`
 }
 
-function id(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-}
-
 function createDefaultState(): AppState {
   const today = localDayKey()
-  const now = Date.now()
-  const starterTasks: Task[] = [
-    {
-      id: id(),
-      title: 'Connect your Obsidian vault',
-      date: today,
-      done: false,
-      createdAt: now,
-      priority: 'high'
-    },
-    {
-      id: id(),
-      title: 'Add a reminder to your day',
-      date: today,
-      done: false,
-      createdAt: now,
-      priority: 'normal'
-    }
-  ]
 
   return {
     settings: { ...DEFAULT_SETTINGS },
@@ -77,7 +72,7 @@ function createDefaultState(): AppState {
       completedToday: 0,
       dayKey: today
     },
-    tasks: starterTasks,
+    tasks: [],
     notes: {
       lastPath: null,
       favorites: []
@@ -87,19 +82,24 @@ function createDefaultState(): AppState {
       notifications: true,
       threshold: 65,
       baseline: null,
+      profile: null,
       dayKey: today,
       goodSeconds: 0,
       badSeconds: 0,
-      lastAlertAt: null
+      lastAlertAt: null,
+      days: []
     },
     water: {
       enabled: false,
       goalGlasses: 8,
       glassMl: WATER_GLASS_ML,
       dayKey: today,
-      pours: []
+      pours: [],
+      reminderMinutes: 0,
+      remindAt: null
     },
-    focusLog: []
+    focusLog: [],
+    spotifyMemory: null
   }
 }
 
@@ -109,7 +109,7 @@ let saveTimeout: NodeJS.Timeout | null = null
 let lastGoodJson: string | null = null
 
 function stateFile(): string {
-  if (process.env.NOTCH_STATE_PATH) return process.env.NOTCH_STATE_PATH
+  if (!app.isPackaged && process.env.NOTCH_STATE_PATH) return process.env.NOTCH_STATE_PATH
   return path.join(app.getPath('userData'), 'notch-state.json')
 }
 
@@ -117,10 +117,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
 function merge<T>(base: T, patch: unknown): T {
   if (!isPlainObject(base) || !isPlainObject(patch)) return (patch === undefined ? base : patch) as T
   const next: Record<string, unknown> = { ...base }
   for (const [key, value] of Object.entries(patch)) {
+    if (FORBIDDEN_KEYS.has(key)) continue
     next[key] = merge((base as Record<string, unknown>)[key], value)
   }
   return next as T
@@ -136,12 +139,23 @@ function normalizeWater(state: AppState, today: string): WaterState {
   const pours = Array.isArray(water?.pours)
     ? water.pours.filter((value) => typeof value === 'number' && Number.isFinite(value))
     : []
+  const rawReminder = Math.round(Number(water?.reminderMinutes) || 0)
+  const reminderMinutes =
+    rawReminder > 0 ? Math.min(WATER_REMINDER_MAX, Math.max(1, rawReminder)) : 0
+  const remindAt =
+    reminderMinutes > 0
+      ? typeof water?.remindAt === 'number' && Number.isFinite(water.remindAt)
+        ? water.remindAt
+        : Date.now() + reminderMinutes * 60 * 1000
+      : null
   return {
     enabled: Boolean(water?.enabled),
     goalGlasses,
     glassMl,
     dayKey: today,
-    pours: water?.dayKey === today ? pours : []
+    pours: water?.dayKey === today ? pours : [],
+    reminderMinutes,
+    remindAt
   }
 }
 
@@ -152,29 +166,92 @@ function sameWater(left: WaterState | undefined, right: WaterState): boolean {
     left.goalGlasses !== right.goalGlasses ||
     left.glassMl !== right.glassMl ||
     left.dayKey !== right.dayKey ||
-    left.pours.length !== right.pours.length
+    left.pours.length !== right.pours.length ||
+    (left.reminderMinutes || 0) !== (right.reminderMinutes || 0) ||
+    (left.remindAt ?? null) !== (right.remindAt ?? null)
   ) {
     return false
   }
   return left.pours.every((value, index) => value === right.pours[index])
 }
 
+/**
+ * File a finished posture day into the history before its totals are reset.
+ * Runs on the main side for every way the day can turn (app start, a read after
+ * midnight, a renderer write that zeroes the totals), so no day is lost however
+ * it ends. A day already filed keeps the larger of the two readings.
+ */
+function archivePostureDay(prev: AppState, next: AppState): AppState {
+  const before = prev.posture
+  const after = next.posture
+  if (!before || !after || !before.dayKey || before.dayKey >= after.dayKey) return next
+  const goodSeconds = Math.max(0, Math.round(Number(before.goodSeconds) || 0))
+  const badSeconds = Math.max(0, Math.round(Number(before.badSeconds) || 0))
+  if (goodSeconds + badSeconds <= 0) return next
+  const days: PostureDay[] = Array.isArray(after.days) ? [...after.days] : []
+  const index = days.findIndex((day) => day.dayKey === before.dayKey)
+  if (index >= 0) {
+    days[index] = {
+      dayKey: before.dayKey,
+      goodSeconds: Math.max(days[index].goodSeconds, goodSeconds),
+      badSeconds: Math.max(days[index].badSeconds, badSeconds)
+    }
+  } else {
+    days.push({ dayKey: before.dayKey, goodSeconds, badSeconds })
+  }
+  days.sort((a, b) => (a.dayKey < b.dayKey ? -1 : a.dayKey > b.dayKey ? 1 : 0))
+  return { ...next, posture: { ...after, days: days.slice(-POSTURE_DAYS_MAX) } }
+}
+
 function normalizeDay(state: AppState): AppState {
   const today = localDayKey()
-  const settings =
-    state.settings.timerNotifications === undefined
-      ? { ...state.settings, timerNotifications: true }
-      : state.settings
-  const needsTimerFix = state.timer.durations.long === 15
-  const timer = needsTimerFix
-    ? { ...state.timer, durations: { ...state.timer.durations, long: 45 } }
-    : state.timer
+  const baseSettings = isPlainObject(state.settings) ? state.settings : { ...DEFAULT_SETTINGS }
+  let settings =
+    baseSettings.timerNotifications === undefined
+      ? { ...baseSettings, timerNotifications: true }
+      : baseSettings
+  const sections = normalizeSectionPrefs(settings.sections, Boolean(state.water?.enabled))
+  if (typeof settings.browserOnly !== 'boolean') settings = { ...settings, browserOnly: false }
+  if (typeof settings.agentStatus !== 'boolean') settings = { ...settings, agentStatus: true }
+  const port = Number(settings.agentStatusPort)
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    settings = { ...settings, agentStatusPort: 7432 }
+  }
+  if (settings.openCodeApprovalPort !== undefined) {
+    const ocPort = Number(settings.openCodeApprovalPort)
+    if (!Number.isInteger(ocPort) || ocPort < 0 || ocPort > 65535) {
+      settings = { ...settings, openCodeApprovalPort: 0 }
+    }
+  }
+  if (typeof settings.codingReplySound !== 'boolean')
+    settings = { ...settings, codingReplySound: true }
+  if (typeof settings.autoCheckUpdates !== 'boolean')
+    settings = { ...settings, autoCheckUpdates: true }
+  if (typeof settings.welcomeSeen !== 'boolean')
+    settings = { ...settings, welcomeSeen: false }
+  if (typeof settings.plannerTimeZone !== 'string' || !settings.plannerTimeZone.trim())
+    settings = { ...settings, plannerTimeZone: 'local' }
+  if (!sectionsEqual(settings.sections, sections)) settings = { ...settings, sections }
+  const defaults = createDefaultState()
+  const tasks = Array.isArray(state.tasks) ? state.tasks : []
+  const focusLog = Array.isArray(state.focusLog) ? state.focusLog : []
+  const notes = isPlainObject(state.notes)
+    ? {
+        lastPath: typeof state.notes.lastPath === 'string' ? state.notes.lastPath : null,
+        favorites: Array.isArray(state.notes.favorites) ? state.notes.favorites : []
+      }
+    : defaults.notes
+  const timer = isPlainObject(state.timer) ? state.timer : defaults.timer
   const water = normalizeWater(state, today)
   if (
-    state.timer.dayKey === today &&
+    timer === state.timer &&
+    tasks === state.tasks &&
+    focusLog === state.focusLog &&
+    notes.lastPath === state.notes?.lastPath &&
+    notes.favorites === state.notes?.favorites &&
+    timer.dayKey === today &&
     state.posture?.dayKey === today &&
     settings === state.settings &&
-    !needsTimerFix &&
     sameWater(state.water, water)
   ) {
     return state
@@ -182,20 +259,23 @@ function normalizeDay(state: AppState): AppState {
   return {
     ...state,
     settings,
+    tasks,
+    focusLog,
+    notes,
     timer: {
       ...timer,
       dayKey: today,
-      sessionsToday: state.timer.dayKey === today ? timer.sessionsToday : 0,
-      completedToday: state.timer.dayKey === today ? timer.completedToday : 0
+      sessionsToday: timer.dayKey === today ? timer.sessionsToday : 0,
+      completedToday: timer.dayKey === today ? timer.completedToday : 0
     },
-    posture: state.posture
+    posture: isPlainObject(state.posture)
       ? {
           ...state.posture,
           dayKey: today,
           goodSeconds: state.posture.dayKey === today ? state.posture.goodSeconds : 0,
           badSeconds: state.posture.dayKey === today ? state.posture.badSeconds : 0
         }
-      : state.posture,
+      : defaults.posture,
     water: sameWater(state.water, water) && state.water ? state.water : water
   }
 }
@@ -208,12 +288,14 @@ export async function initState(): Promise<AppState> {
     return JSON.parse(raw.replace(/^\uFEFF/, '')) as Partial<AppState>
   }
   try {
-    current = normalizeDay(merge(createDefaultState(), await readJson(file)))
+    const raw = merge(createDefaultState(), await readJson(file))
+    current = archivePostureDay(raw, normalizeDay(raw))
   } catch {
     try {
       // A malformed primary file should not erase the user's state when a
       // recent backup is available.
-      current = normalizeDay(merge(createDefaultState(), await readJson(`${file}.bak`)))
+      const raw = merge(createDefaultState(), await readJson(`${file}.bak`))
+      current = archivePostureDay(raw, normalizeDay(raw))
     } catch {
       current = normalizeDay(createDefaultState())
     }
@@ -230,14 +312,21 @@ export async function initState(): Promise<AppState> {
 export function getState(): AppState {
   const normalized = normalizeDay(current)
   if (normalized !== current) {
-    current = normalized
+    current = archivePostureDay(current, normalized)
     queueSave()
   }
   return current
 }
 
 export function setState(patch: AppStatePatch): AppState {
-  current = normalizeDay(merge(current, patch))
+  current = archivePostureDay(current, normalizeDay(merge(current, patch)))
+  queueSave()
+  stateEvents.emit('change', getState())
+  return current
+}
+
+export function replaceState(next: AppState): AppState {
+  current = normalizeDay(merge(createDefaultState(), next))
   queueSave()
   stateEvents.emit('change', getState())
   return current
@@ -288,6 +377,7 @@ export function persistNow(): Promise<void> {
 }
 
 export function flushState(): void {
+  if (!loaded) return
   if (saveTimeout) {
     clearTimeout(saveTimeout)
     saveTimeout = null
@@ -295,12 +385,24 @@ export function flushState(): void {
   revision += 1
   try {
     const file = stateFile()
+    const snapshot = JSON.stringify(current, null, 2)
     mkdirSync(path.dirname(file), { recursive: true })
     if (lastGoodJson) {
       writeFileSync(`${file}.bak`, lastGoodJson, 'utf8')
     }
-    writeFileSync(file, JSON.stringify(current, null, 2), 'utf8')
-    lastGoodJson = JSON.stringify(current, null, 2)
+    const temp = `${file}.${process.pid}.flush.tmp`
+    writeFileSync(temp, snapshot, 'utf8')
+    try {
+      renameSync(temp, file)
+    } catch {
+      writeFileSync(file, snapshot, 'utf8')
+      try {
+        unlinkSync(temp)
+      } catch {
+        // Ignore cleanup failure during shutdown.
+      }
+    }
+    lastGoodJson = snapshot
   } catch {
     // A last-moment disk failure should not stop the app from quitting.
   }

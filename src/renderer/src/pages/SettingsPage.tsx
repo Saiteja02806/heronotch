@@ -1,51 +1,90 @@
 import {
   ArrowUpRight,
   Bell,
+  Blocks,
   Check,
   ChevronRight,
   Copy,
   ExternalLink,
   FolderOpen,
+  GripVertical,
   Info,
   Keyboard,
+  LayoutGrid,
   Loader2,
   LogOut,
-  Blocks,
   Music2,
   NotebookPen,
   Palette,
   PanelTop,
+  Plus,
   Power,
   Save,
   ShieldCheck,
   SlidersHorizontal,
-  Sparkles
+  Smartphone,
+  Sparkles,
+  Wifi,
+  X
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import {
   useEffect,
+  useRef,
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent
 } from 'react'
-import type { Accent, NotchPosition, NotchStyle } from '../../../shared/types'
+import type { Accent, NotchDisplay, NotchPosition, NotchStyle } from '../../../shared/types'
+import { placementPreview } from '../../../shared/notchLayout'
+import { friendlyMediaName, normalizeMediaPreference } from '../../../shared/mediaFollow'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
 import { useVaultPicker } from '../hooks/useVaultPicker'
-import { ACCENTS } from '../lib/theme'
-import { OPTIONAL_SECTIONS } from '../lib/sections'
+import { ACCENTS, PRESET_ACCENTS, resolveAccent } from '../lib/theme'
+import {
+  HOME_CARD_META,
+  SECTION_META,
+  homeCardAvailable,
+  homeLayoutFor,
+  moveSection,
+  sectionPrefs,
+  sectionVisible,
+  toggleSection,
+  visibleSections,
+  type SectionId
+} from '../lib/sections'
 import { formatTime } from '../lib/time'
-import { waterCount, waterFill } from '../lib/water'
-import { WaterPreview } from './WaterPage'
+import { PhoneTransfer } from '../components/PhoneTransfer'
+import { LicenseCard } from '../components/LicenseCard'
+import { AgentConnections } from '../components/AgentConnections'
+import { UpdatesCard } from '../components/UpdatesCard'
+import {
+  DEFAULT_HOME_HIDDEN,
+  HOME_CARD_IDS,
+  addHomeCard,
+  hiddenHomeCards,
+  homeGridColumns,
+  homeSlotLabel,
+  moveHomeCard,
+  removeHomeCard,
+  reorderHomeCards,
+  setHomeCardCount,
+  shownHomeCards,
+  type HomeCardId
+} from '../../../shared/homeLayout'
 
-type Section = 'appearance' | 'notch' | 'sections' | 'obsidian' | 'spotify' | 'about'
+type Section = 'appearance' | 'notch' | 'behavior' | 'home' | 'sections' | 'obsidian' | 'spotify' | 'phone' | 'about'
 
 const SECTIONS: { id: Section; label: string; icon: typeof Palette }[] = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'notch', label: 'Notch', icon: PanelTop },
+  { id: 'behavior', label: 'Behavior', icon: SlidersHorizontal },
+  { id: 'home', label: 'Home', icon: LayoutGrid },
   { id: 'sections', label: 'Sections', icon: Blocks },
   { id: 'obsidian', label: 'Notes', icon: NotebookPen },
   { id: 'spotify', label: 'Spotify', icon: Music2 },
+  { id: 'phone', label: 'Phone', icon: Smartphone },
   { id: 'about', label: 'About', icon: Info }
 ]
 
@@ -65,6 +104,383 @@ const NOTCH_STYLES: { id: NotchStyle; label: string; description: string }[] = [
   { id: 'notch-wide', label: 'Notch wide', description: 'Bare, wide tab.' },
   { id: 'notch-micro', label: 'Notch micro', description: 'Bare, extra tiny.' }
 ]
+
+function NeverOverField() {
+  const { state, updateSettings } = useApp()
+  const [text, setText] = useState((state.settings.neverOver || []).join(', '))
+  return (
+    <label className="setting-field">
+      <span>Never show over</span>
+      <input
+        value={text}
+        placeholder="obs64, League of Legends"
+        onChange={(event) => setText(event.target.value)}
+        onBlur={() => {
+          const names = text
+            .split(',')
+            .map((name) => name.trim())
+            .filter((name) => name.length > 0)
+          updateSettings({ neverOver: names })
+        }}
+      />
+      <small>Process names, separated by commas. The tab stays hidden while one of these is in front.</small>
+    </label>
+  )
+}
+
+function SectionManager() {
+  const { state, updateSettings, showToast } = useApp()
+  const prefs = sectionPrefs(state)
+  const compact = state.settings.panelSize === 'compact'
+  const visible = visibleSections(prefs, { compact })
+  const [dragId, setDragId] = useState<SectionId | null>(null)
+  const [overId, setOverId] = useState<SectionId | null>(null)
+  const visibleCount = prefs.order.length - prefs.hidden.length
+
+  const toggle = (id: SectionId): void => {
+    const next = toggleSection(prefs, id)
+    const meta = SECTION_META[id]
+    if (!next) {
+      showToast('Keep one section', 'The notch needs at least one section on the bar.')
+      return
+    }
+    const nowOn = !next.hidden.includes(id)
+    updateSettings({ sections: next })
+    showToast(
+      nowOn ? `${meta.label} is back` : `${meta.label} hidden`,
+      nowOn ? 'Everything you saved is still there.' : meta.kept,
+      'success'
+    )
+  }
+
+  const dropOn = (target: SectionId): void => {
+    if (!dragId || dragId === target) return
+    updateSettings({ sections: moveSection(prefs, dragId, prefs.order.indexOf(target)) })
+    setDragId(null)
+    setOverId(null)
+  }
+
+  return (
+    <div className="section-manager">
+      {prefs.order.map((id) => {
+        const meta = SECTION_META[id]
+        const Icon = meta.icon
+        const on = !prefs.hidden.includes(id)
+        const shortcut = visible.indexOf(id)
+        return (
+          <div
+            key={id}
+            data-demo-section-row={id}
+            className={`section-row ${on ? 'is-on' : ''} ${dragId === id ? 'is-dragging' : ''} ${overId === id && dragId !== id ? 'is-over' : ''}`}
+            onDragOver={(event) => {
+              event.preventDefault()
+              if (overId !== id) setOverId(id)
+            }}
+            onDrop={() => dropOn(id)}
+          >
+            <button
+              type="button"
+              className="section-handle"
+              draggable
+              aria-label={`Reorder ${meta.label}`}
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = 'move'
+                event.dataTransfer.setData('text/plain', id)
+                setDragId(id)
+              }}
+              onDragEnd={() => {
+                setDragId(null)
+                setOverId(null)
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+                event.preventDefault()
+                const index = prefs.order.indexOf(id)
+                updateSettings({
+                  sections: moveSection(prefs, id, event.key === 'ArrowUp' ? index - 1 : index + 1)
+                })
+              }}
+            >
+              <GripVertical size={14} />
+            </button>
+            <span className="section-row-icon" aria-hidden="true">
+              <Icon size={15} />
+            </span>
+            <span className="section-row-copy">
+              <strong>{meta.label}</strong>
+              <small>{meta.kept}</small>
+            </span>
+            <span className="section-shortcut">{shortcut >= 0 ? <kbd>{shortcut + 1}</kbd> : ''}</span>
+            <button
+              type="button"
+              data-demo-section-toggle={id}
+              className={`switch ${on ? 'is-on' : ''}`}
+              role="switch"
+              aria-checked={on}
+              aria-label={`${on ? 'Hide' : 'Show'} ${meta.label}`}
+              title={
+                on && visibleCount <= 1
+                  ? 'At least one section stays on the notch'
+                  : on
+                    ? 'Hide this section'
+                    : 'Show this section'
+              }
+              onClick={() => toggle(id)}
+            >
+              <motion.span animate={{ x: on ? 16 : 0 }} transition={{ type: 'spring', stiffness: 520, damping: 32 }} />
+            </button>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Personalizes the Home section: choose 2, 4, 6 or any custom set of cards,
+ * remove any section, add available sections like Water, Posture or Phone,
+ * and drag cards to reorder them.
+ */
+function HomeLayoutManager() {
+  const { state, updateSettings, showToast } = useApp()
+  const avail = (id: HomeCardId): boolean => homeCardAvailable(state, id)
+  const layout = homeLayoutFor(state)
+  const shown = shownHomeCards(layout, avail)
+  const hidden = hiddenHomeCards(layout, avail)
+  const availableCount = HOME_CARD_IDS.filter(avail).length
+  const columns = homeGridColumns(shown.length)
+  const [dragId, setDragId] = useState<HomeCardId | null>(null)
+  const [overIndex, setOverIndex] = useState<number | null>(null)
+
+  const saveOrder = (visibleOrder: HomeCardId[]): void => {
+    updateSettings({
+      homeLayout: reorderHomeCards(layout, visibleOrder)
+    })
+  }
+
+  const place = (id: HomeCardId, index: number): void => {
+    saveOrder(moveHomeCard(shown, id, index))
+    setDragId(null)
+    setOverIndex(null)
+  }
+
+  const moveBy = (id: HomeCardId, index: number, delta: number): void => {
+    const target = Math.max(0, Math.min(shown.length - 1, index + delta))
+    if (target !== index) saveOrder(moveHomeCard(shown, id, target))
+  }
+
+  const applyPreset = (count: number): void => {
+    const next = setHomeCardCount(layout, count, avail)
+    const nextShown = shownHomeCards(next, avail)
+    updateSettings({ homeLayout: next })
+    showToast(
+      `Home · ${nextShown.length} sections`,
+      `Showing ${nextShown.length} sections in a ${homeGridColumns(nextShown.length)}-column layout.`,
+      'success'
+    )
+  }
+
+  const handleAdd = (id: HomeCardId): void => {
+    const meta = HOME_CARD_META[id]
+    const next = addHomeCard(layout, id, undefined, avail)
+    const nextShown = shownHomeCards(next, avail)
+    updateSettings({ homeLayout: next })
+    showToast(
+      `${meta.label} added to Home`,
+      `Home now shows ${nextShown.length} sections.`,
+      'success'
+    )
+  }
+
+  const handleRemove = (id: HomeCardId): void => {
+    const meta = HOME_CARD_META[id]
+    const next = removeHomeCard(layout, id, avail)
+    if (!next) {
+      showToast('Keep one section', 'At least one section stays on the home panel.')
+      return
+    }
+    updateSettings({ homeLayout: next })
+    showToast(
+      `${meta.label} removed from Home`,
+      'You can add it back below whenever you want.',
+      'success'
+    )
+  }
+
+  const reset = (): void => {
+    updateSettings({
+      homeLayout: {
+        order: [...HOME_CARD_IDS],
+        hidden: [...DEFAULT_HOME_HIDDEN]
+      }
+    })
+    setDragId(null)
+    setOverIndex(null)
+    showToast('Home layout reset', 'Back to the default six sections.', 'success')
+  }
+
+  return (
+    <div className="home-layout">
+      <div className="home-layout-presets" role="group" aria-label="Home section count presets">
+        <span className="home-layout-presets-label">Quick layout</span>
+        <div className="home-layout-preset-buttons">
+          {([2, 4, 6] as const)
+            .filter((count) => count <= availableCount)
+            .map((count) => (
+              <button
+                key={count}
+                type="button"
+                data-settings-home-preset={count}
+                className={`soft-button compact ${shown.length === count ? 'is-active' : ''}`}
+                onClick={() => applyPreset(count)}
+                aria-pressed={shown.length === count}
+              >
+                {count} sections
+              </button>
+            ))}
+        </div>
+        <span className="home-layout-count-badge">
+          {shown.length} on Home · {columns} {columns === 1 ? 'column' : 'columns'}
+        </span>
+      </div>
+
+      <div
+        className={`home-layout-map is-cols-${columns}`}
+        role="list"
+        aria-label="Home card positions"
+      >
+        {shown.map((id, index) => {
+          const meta = HOME_CARD_META[id]
+          const Icon = meta.icon
+          const slotLabel = homeSlotLabel(index, shown.length)
+          return (
+            <div
+              key={id}
+              role="listitem"
+              className={`home-layout-slot ${dragId === id ? 'is-dragging' : ''} ${
+                overIndex === index && dragId !== id ? 'is-over' : ''
+              }`}
+              onDragOver={(event) => {
+                event.preventDefault()
+                if (overIndex !== index) setOverIndex(index)
+              }}
+              onDrop={(event) => {
+                event.preventDefault()
+                if (dragId) place(dragId, index)
+              }}
+            >
+              <div className="home-layout-card-shell">
+                <button
+                  type="button"
+                  className="home-layout-card"
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = 'move'
+                    event.dataTransfer.setData('text/plain', id)
+                    setDragId(id)
+                  }}
+                  onDragEnd={() => {
+                    setDragId(null)
+                    setOverIndex(null)
+                  }}
+                  onKeyDown={(event) => {
+                    const deltas: Record<string, number> = {
+                      ArrowLeft: -1,
+                      ArrowRight: 1,
+                      ArrowUp: -columns,
+                      ArrowDown: columns
+                    }
+                    const delta = deltas[event.key]
+                    if (delta === undefined) return
+                    event.preventDefault()
+                    moveBy(id, index, delta)
+                  }}
+                  aria-label={`${meta.label}, ${slotLabel}. Drag it, or use the arrow keys to move it.`}
+                  title={meta.note}
+                >
+                  <span className="home-layout-icon" aria-hidden="true">
+                    <Icon size={14} />
+                  </span>
+                  <span className="home-layout-copy">
+                    <strong>{meta.label}</strong>
+                    <small>{slotLabel}</small>
+                  </span>
+                  <GripVertical size={13} className="home-layout-grip" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  data-settings-home-remove={id}
+                  className="home-layout-remove"
+                  disabled={shown.length <= 1}
+                  onClick={() => handleRemove(id)}
+                  aria-label={`Remove ${meta.label} from Home`}
+                  title={
+                    shown.length <= 1
+                      ? 'At least one section stays on Home'
+                      : `Remove ${meta.label} from Home`
+                  }
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="home-layout-available">
+        <div className="home-layout-available-head">
+          <strong>Available sections to add</strong>
+          <small>
+            {hidden.length > 0
+              ? 'Add any enabled section to the home panel — turn on sections like Water in Sections first.'
+              : 'Every enabled section is currently on the home panel.'}
+          </small>
+        </div>
+        {hidden.length > 0 && (
+          <div className="home-layout-available-grid" role="list" aria-label="Available sections to add to Home">
+            {hidden.map((id) => {
+              const meta = HOME_CARD_META[id]
+              const Icon = meta.icon
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="listitem"
+                  data-settings-home-add={id}
+                  className="home-layout-add-card"
+                  onClick={() => handleAdd(id)}
+                  title={`Add ${meta.label} to Home`}
+                >
+                  <span className="home-layout-icon" aria-hidden="true">
+                    <Icon size={14} />
+                  </span>
+                  <span className="home-layout-copy">
+                    <strong>{meta.label}</strong>
+                    <small>{meta.note}</small>
+                  </span>
+                  <span className="home-layout-add-pill">
+                    <Plus size={12} />
+                    Add
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="home-layout-footer">
+        <span>
+          Drag any card to reorder, remove sections you do not need, or switch between 2, 4 and 6 sections anytime.
+        </span>
+        <button className="soft-button compact" onClick={reset}>
+          Reset layout
+        </button>
+      </div>
+    </div>
+  )
+}
 
 function Toggle({
   checked,
@@ -91,6 +507,7 @@ function Toggle({
 }
 
 export function SettingsPage() {
+  const mainRef = useRef<HTMLElement>(null)
   const {
     state,
     update,
@@ -102,9 +519,11 @@ export function SettingsPage() {
     setPage,
     settingsSection,
     setSettingsSection,
-    setWaterEnabled
+    updateState
   } = useApp()
-  const { status, connecting, connect, disconnect } = useMedia()
+  const hasUpdateNotice =
+    updateState?.status === 'available' || updateState?.status === 'downloaded'
+  const { status, connecting, connect, disconnect, playerName } = useMedia()
   const { chooseVault } = useVaultPicker()
   const [version, setVersion] = useState('')
   useEffect(() => {
@@ -112,19 +531,46 @@ export function SettingsPage() {
   }, [])
   const section = settingsSection as Section
   const setSection = setSettingsSection
-  const [name, setName] = useState(state.settings.userName)
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0 })
+  }, [section])
   const [clientId, setClientId] = useState(state.settings.spotifyClientId)
   const [port, setPort] = useState(String(state.settings.spotifyRedirectPort))
   const [position, setPosition] = useState<NotchPosition>(
     state.settings.notchPosition || { x: 0.5, y: 0 }
   )
   const [draggingPlacement, setDraggingPlacement] = useState(false)
+  const [displays, setDisplays] = useState<NotchDisplay[]>([])
+  const [effectiveStyle, setEffectiveStyle] = useState<NotchStyle | undefined>(undefined)
+  const preview = placementPreview(effectiveStyle || state.settings.notchStyle)
+  const previewCenter = `calc(${position.x} * (100% - ${preview.width}px) + ${preview.width / 2}px)`
   const [focusMin, setFocusMin] = useState(String(state.timer.durations.focus))
   const [shortMin, setShortMin] = useState(String(state.timer.durations.short))
   const [longMin, setLongMin] = useState(String(state.timer.durations.long || 45))
   const [copied, setCopied] = useState(false)
   const [savingSpotify, setSavingSpotify] = useState(false)
   const [showSpotifyAdvanced, setShowSpotifyAdvanced] = useState(false)
+
+  // Refresh the monitor list whenever the notch section is opened, so a screen
+  // plugged in while Settings was closed still appears.
+  useEffect(() => {
+    if (section !== 'notch') return
+    let alive = true
+    void window.notch.displays().then((list) => {
+      if (alive) setDisplays(list)
+    })
+    void window.notch.getMetrics().then((metrics) => {
+      if (alive) setEffectiveStyle(metrics?.style)
+    })
+    return () => {
+      alive = false
+    }
+  }, [section])
+
+  const savedDisplay = state.settings.notchDisplay || 'primary'
+  const primaryDisplay = displays.find((display) => display.primary)
+  const savedDisplayMissing =
+    savedDisplay !== 'primary' && !displays.some((display) => display.id === savedDisplay)
 
   // Keep the form in sync if state is recovered or updated from another view.
   useEffect(() => {
@@ -133,9 +579,6 @@ export function SettingsPage() {
   useEffect(() => {
     setPort(String(state.settings.spotifyRedirectPort))
   }, [state.settings.spotifyRedirectPort])
-  useEffect(() => {
-    setName(state.settings.userName)
-  }, [state.settings.userName])
 
   useEffect(() => {
     if (!draggingPlacement) {
@@ -144,14 +587,14 @@ export function SettingsPage() {
   }, [state.settings.notchPosition, draggingPlacement])
   const active = SECTIONS.find((item) => item.id === section) || SECTIONS[0]
   const ActiveIcon = active.icon
-  const accent = ACCENTS[state.settings.accent]
+  const accent = resolveAccent(state.settings.accent, state.settings.customAccent)
+  const customHex = state.settings.customAccent || '#7ec8e3'
   const vaultName = state.settings.vaultPath?.split(/[\\/]/).filter(Boolean).pop()
   const redirectUri = status?.redirectUri || `http://127.0.0.1:${state.settings.spotifyRedirectPort}/callback`
-
-  const saveName = (): void => {
-    updateSettings({ userName: name.trim() })
-    showToast('Saved', name.trim() ? `Calling you ${name.trim()}.` : 'Name cleared.', 'success')
-  }
+  const mediaPreference = normalizeMediaPreference(state.settings.mediaSource)
+  const savedSourceMissing =
+    mediaPreference !== 'auto' &&
+    !(status?.mediaSources || []).some((source) => source.id === mediaPreference)
 
   const saveSpotify = async (): Promise<void> => {
     setSavingSpotify(true)
@@ -196,7 +639,7 @@ export function SettingsPage() {
     updateSettings({ notchPosition: next })
     showToast(
       'Notch position saved',
-      `It will open at the ${positionLabel(next).toLowerCase()} of the screen.`,
+      `The tab sits at the ${positionLabel(next).toLowerCase()}. The workspace opens along the top.`,
       'success'
     )
   }
@@ -265,6 +708,7 @@ export function SettingsPage() {
             return (
               <button
                 key={item.id}
+                data-demo-settings-nav={item.id}
                 className={`settings-nav ${section === item.id ? 'is-active' : ''}`}
                 onClick={() => setSection(item.id)}
               >
@@ -272,18 +716,46 @@ export function SettingsPage() {
                   <motion.span layoutId="settings-active" className="settings-nav-bg" transition={{ type: 'spring', stiffness: 430, damping: 34 }} />
                 )}
                 <Icon size={14} />
-                {item.label}
+                <span>{item.label}</span>
+                {item.id === 'about' && hasUpdateNotice && (
+                  <span className="settings-nav-pill">
+                    {updateState?.status === 'downloaded' ? 'Ready' : 'New'}
+                  </span>
+                )}
               </button>
             )
           })}
         </nav>
         <div className="settings-rail-foot">
-          <span className="status-dot online" />
-          Notch {version}
+          <span className={`status-dot ${hasUpdateNotice ? 'update' : 'online'}`} />
+          <span>{window.notchDemo ? `Hero Notch ${version}` : `Notch ${version}`}</span>
+          {hasUpdateNotice && (
+            <button type="button" className="settings-rail-update" onClick={() => setSection('about')}>
+              {updateState?.status === 'downloaded' ? 'Restart' : `v${updateState?.availableVersion}`}
+            </button>
+          )}
         </div>
       </aside>
 
-      <main className="settings-main">
+      <main className="settings-main" ref={mainRef}>
+        {state.settings.panelSize === 'compact' && (
+          <div className="settings-compact-nav" role="tablist" aria-label="Settings sections">
+            {SECTIONS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                className={`${section === item.id ? 'is-active' : ''} ${
+                  item.id === 'about' && hasUpdateNotice ? 'has-update' : ''
+                }`}
+                aria-selected={section === item.id}
+                onClick={() => setSection(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        )}
         <motion.div
           key={section}
           initial={{ opacity: 0, y: 7 }}
@@ -296,9 +768,12 @@ export function SettingsPage() {
             <h1>
               {section === 'appearance' && 'A little more you.'}
               {section === 'notch' && 'Tune the notch.'}
-              {section === 'sections' && 'Add a section.'}
+              {section === 'behavior' && 'Decide how it behaves.'}
+              {section === 'home' && 'Put every card where you want it.'}
+              {section === 'sections' && 'Choose what stays on the notch.'}
               {section === 'obsidian' && 'Your notes, connected.'}
               {section === 'spotify' && 'Let the music in.'}
+              {section === 'phone' && 'Meet your phone halfway.'}
               {section === 'about' && 'Small app, big flow.'}
             </h1>
           </div>
@@ -307,11 +782,11 @@ export function SettingsPage() {
             <div className="settings-sections">
               <section className="setting-group">
                 <div className="setting-group-head">
-                  <h3>Accent</h3>
-                  <p>The thread of color across timer, tasks and controls.</p>
+                  <h3>Finish</h3>
+                  <p>Default Obsidian black glass, rich presets, or your own custom color across timer, tasks, notifications and controls.</p>
                 </div>
                 <div className="accent-picker">
-                  {(Object.keys(ACCENTS) as Accent[]).map((key) => {
+                  {PRESET_ACCENTS.map((key) => {
                     const value = ACCENTS[key]
                     return (
                       <button
@@ -326,44 +801,89 @@ export function SettingsPage() {
                       </button>
                     )
                   })}
+                  <label
+                    className={`accent-swatch ${state.settings.accent === 'custom' ? 'is-active' : ''}`}
+                    title="Pick your own custom color"
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <span
+                      style={{
+                        background: customHex,
+                        position: 'relative',
+                        overflow: 'hidden'
+                      }}
+                    >
+                      <input
+                        type="color"
+                        value={customHex}
+                        onChange={(event) =>
+                          updateSettings({ accent: 'custom', customAccent: event.target.value })
+                        }
+                        aria-label="Custom accent color"
+                        style={{
+                          position: 'absolute',
+                          inset: -4,
+                          width: 'calc(100% + 8px)',
+                          height: 'calc(100% + 8px)',
+                          opacity: 0,
+                          cursor: 'pointer'
+                        }}
+                      />
+                    </span>
+                    <small>Custom</small>
+                    {state.settings.accent === 'custom' && <Check size={11} />}
+                  </label>
                 </div>
                 <div className="accent-preview" style={{ '--preview-accent': accent.color } as CSSProperties}>
-                  <div className="preview-notch">
-                    <span className="preview-dot" />
-                    <span className="preview-lines">
-                      <i /><i />
-                    </span>
-                    <span className="preview-time">24:18</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div className="preview-notch">
+                      <span className="preview-dot" />
+                      <span className="preview-lines">
+                        <i /><i />
+                      </span>
+                      <span className="preview-time">24:18</span>
+                    </div>
+                    <div
+                      className="notch-notice notice-default is-preview"
+                      style={
+                        {
+                          '--notice-tint': accent.color,
+                          position: 'relative',
+                          top: 0,
+                          left: 0,
+                          transform: 'none',
+                          width: 268,
+                          margin: 0,
+                          pointerEvents: 'none',
+                          borderColor: `color-mix(in srgb, ${accent.color} 28%, rgba(255,255,255,0.12))`
+                        } as CSSProperties
+                      }
+                    >
+                      <span className="notice-orb" aria-hidden="true">
+                        <Bell size={13} strokeWidth={2.1} />
+                      </span>
+                      <div className="notice-copy">
+                        <div className="notice-eyebrow-row">
+                          <span className="notice-badge">Reminder</span>
+                          <span className="notice-jump">Plan</span>
+                        </div>
+                        <strong>Deep work block</strong>
+                        <span>Today at 3:30 PM</span>
+                      </div>
+                      <div className="notice-rail">
+                        <span className="notice-action-btn is-primary">Done</span>
+                      </div>
+                    </div>
                   </div>
                   <div className="preview-caption">
-                    <span>Live preview</span>
-                    <strong>{accent.label} mood</strong>
+                    <span>Live notch &amp; notification preview</span>
+                    <strong>
+                      {accent.label} finish{state.settings.accent === 'custom' ? ` · ${accent.color}` : ''}
+                    </strong>
                   </div>
                 </div>
               </section>
 
-              <section className="setting-group">
-                <div className="setting-group-head">
-                  <h3>Personal</h3>
-                  <p>A name for the small moments.</p>
-                </div>
-                <label className="setting-field">
-                  <span>What should Notch call you?</span>
-                  <div className="inline-field">
-                    <input
-                      value={name}
-                      onChange={(event) => setName(event.target.value)}
-                      placeholder="Your name"
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') saveName()
-                      }}
-                    />
-                    <button className="soft-button compact" onClick={saveName}>
-                      <Save size={12} /> Save
-                    </button>
-                  </div>
-                </label>
-              </section>
             </div>
           )}
 
@@ -371,69 +891,53 @@ export function SettingsPage() {
             <div className="settings-sections">
               <section className="setting-group">
                 <div className="setting-group-head">
-                  <h3>Optional</h3>
-                  <p>Home, notes, music, plan, sessions and posture stay on the notch.</p>
+                  <h3>On the notch</h3>
+                  <p>Drag to reorder. At least one stays.</p>
                 </div>
-                <div className="section-shelf">
-                  {OPTIONAL_SECTIONS.map((item) => {
-                    const added = item.id === 'water' && Boolean(state.water?.enabled)
-                    const count = added ? waterCount(state.water) : 0
-                    const fill = added ? waterFill(count, state.water.goalGlasses) : 0.62
-                    return (
-                      <article key={item.id} className={`section-card ${added ? 'is-added' : ''}`}>
-                        <div className="section-card-glass">
-                          <WaterPreview fill={fill} />
-                        </div>
-                        <div className="section-card-copy">
-                          <span className="eyebrow">{added ? 'On your notch' : 'Available'}</span>
-                          <h3>{item.label}</h3>
-                          <p>{item.detail}</p>
-                          {added && (
-                            <p className="section-card-live">
-                              {count} of {state.water.goalGlasses} today · press {item.shortcut} to open
-                            </p>
-                          )}
-                        </div>
-                        <div className="section-card-actions">
-                          {added ? (
-                            <>
-                              <button type="button" className="primary-button" onClick={() => setPage('water')}>
-                                Open
-                              </button>
-                              <button
-                                type="button"
-                                className="soft-button"
-                                onClick={() => {
-                                  setWaterEnabled(false)
-                                  showToast('Water removed', 'The tab is gone. Today’s glasses stay saved.', 'success')
-                                }}
-                              >
-                                Remove section
-                              </button>
-                            </>
-                          ) : (
-                            <button
-                              type="button"
-                              className="primary-button"
-                              onClick={() => {
-                                setWaterEnabled(true)
-                                showToast('Water added', 'It now has a tab on the notch.', 'success')
-                              }}
-                            >
-                              Add section
-                            </button>
-                          )}
-                        </div>
-                      </article>
-                    )
-                  })}
+                <p className="section-manager-note">
+                  Hiding a section only takes it off the bar, the home cards, and its number key. Notes,
+                  tasks, Spotify, posture and water stay saved. Turn it back on and it is as you left it.
+                </p>
+                <SectionManager />
+              </section>
+            </div>
+          )}
+
+          {section === 'home' && (
+            <div className="settings-sections">
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Home sections</h3>
+                  <p>Choose 2, 4, 6 or any custom mix of sections for the home panel.</p>
                 </div>
+                <p className="section-manager-note">
+                  Remove any section you do not need, add sections like Water, Posture or Phone, or drag
+                  cards to rearrange them. You can also personalize this directly from the bar at the top
+                  of the Home tab.
+                </p>
+                <HomeLayoutManager />
               </section>
             </div>
           )}
 
           {section === 'notch' && (
             <div className="settings-sections">
+              <section className="setting-group">
+                <Toggle
+                  checked={state.settings.browserOnly === true}
+                  onChange={(value) => updateSettings({ browserOnly: value })}
+                  label="Show only when a browser is open"
+                  description="A minimized browser counts. When the last browser window closes, the notch hides. Use the tray icon to open it at any time."
+                />
+                <div data-demo-focus-toggle="true">
+                  <Toggle
+                    checked={state.settings.focusMode !== false}
+                    onChange={(value) => updateSettings({ focusMode: value })}
+                    label="Focus mode"
+                    description="Dim the desktop behind the notch. When this is off, the panel stands alone and clicks outside it reach the desktop."
+                  />
+                </div>
+              </section>
               <section className="setting-group">
                 <div className="setting-group-head">
                   <h3>Style</h3>
@@ -443,6 +947,7 @@ export function SettingsPage() {
                   {NOTCH_STYLES.map((style) => (
                     <button
                       key={style.id}
+                      data-demo-notch-style={style.id}
                       className={`notch-style-card ${
                         state.settings.notchStyle === style.id ? 'is-active' : ''
                       }`}
@@ -479,10 +984,64 @@ export function SettingsPage() {
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">
+                  <h3>Display</h3>
+                  <p>Which monitor the notch sits on.</p>
+                </div>
+                <div className="setting-row">
+                  <span className="setting-copy">
+                    <strong>Show on</strong>
+                    <small>
+                      {displays.length > 1
+                        ? 'An unplugged monitor falls back to the primary screen and comes back when reconnected.'
+                        : 'Connect a second monitor to move the notch there.'}
+                    </small>
+                  </span>
+                  <select
+                    data-demo-display-select="true"
+                    className="setting-select"
+                    value={savedDisplay}
+                    onChange={(event) => {
+                      const next = event.target.value
+                      updateSettings({ notchDisplay: next })
+                      const target = displays.find((display) => display.id === next)
+                      showToast(
+                        'Display saved',
+                        target
+                          ? `The notch will sit on ${target.label} (${target.width}×${target.height}).`
+                          : 'The notch will sit on the primary display.',
+                        'success'
+                      )
+                    }}
+                  >
+                    <option value="primary">
+                      Primary display{primaryDisplay ? ` · ${primaryDisplay.width}×${primaryDisplay.height}` : ''}
+                    </option>
+                    {displays
+                      .filter((display) => !display.primary)
+                      .map((display) => (
+                        <option key={display.id} value={display.id}>
+                          {display.label} · {display.width}×{display.height}
+                        </option>
+                      ))}
+                    {savedDisplayMissing && (
+                      <option value={savedDisplay}>Last screen (unplugged)</option>
+                    )}
+                  </select>
+                </div>
+                <Toggle
+                  checked={state.settings.pillOnOtherDisplays !== false}
+                  onChange={(value) => updateSettings({ pillOnOtherDisplays: value })}
+                  label="Small pill on other displays"
+                  description="On a monitor without a physical notch, the tab shrinks to a small pill. Turn this off to keep your chosen style everywhere."
+                />
+              </section>
+              <section className="setting-group">
+                <div className="setting-group-head">
                   <h3>Placement</h3>
                   <p>Drag the notch anywhere on the screen map.</p>
                 </div>
                 <div
+                  data-demo-placement-map="true"
                   className={`placement-map ${draggingPlacement ? 'is-dragging' : ''}`}
                   onPointerDown={startPlacementDrag}
                   onPointerMove={movePlacementDrag}
@@ -493,10 +1052,18 @@ export function SettingsPage() {
                 >
                   <span className="placement-map-grid" aria-hidden="true" />
                   <span
+                    className="placement-panel-hint"
+                    style={{ left: previewCenter }}
+                    aria-hidden="true"
+                  />
+                  <span
                     className="placement-preview"
                     style={{
-                      left: `calc(${position.x} * (100% - 58px))`,
-                      top: `calc(${position.y} * (100% - 20px))`
+                      left: `calc(${position.x} * (100% - ${preview.width}px))`,
+                      top: `calc(${position.y} * (100% - ${preview.height}px))`,
+                      width: preview.width,
+                      height: preview.height,
+                      borderRadius: preview.radius
                     }}
                   >
                     <i />
@@ -506,7 +1073,7 @@ export function SettingsPage() {
                   <span className="placement-map-caption">{positionLabel(position)}</span>
                 </div>
                 <div className="placement-footer">
-                  <span>Saved automatically. The notch reopens in this spot.</span>
+                  <span>The tab sits on this spot. The workspace opens along the top, lined up with the tab.</span>
                   <div className="placement-buttons">
                     <button
                       className="soft-button compact"
@@ -526,33 +1093,40 @@ export function SettingsPage() {
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">
-                  <h3>Behavior</h3>
-                  <p>How the notch opens, sits and stays out of the way.</p>
+                  <h3>Focus lengths</h3>
+                  <p>Set the three timer presets to match the way you work.</p>
                 </div>
-                <Toggle
-                  checked={state.settings.pinOnOpen}
-                  onChange={setPinned}
-                  label="Keep the notch pinned"
-                  description="Stop it collapsing when the pointer leaves."
-                />
-                <Toggle
-                  checked={state.settings.launchAtLogin}
-                  onChange={(value) => updateSettings({ launchAtLogin: value })}
-                  label="Launch at login"
-                  description="Have the notch waiting after you sign in."
-                />
-                <Toggle
-                  checked={state.settings.notifications}
-                  onChange={(value) => updateSettings({ notifications: value })}
-                  label="Reminder notifications"
-                  description="System alerts for tasks and completed focus sessions."
-                />
-                <Toggle
-                  checked={state.settings.timerNotifications ?? true}
-                  onChange={(value) => updateSettings({ timerNotifications: value })}
-                  label="Focus session alerts"
-                  description="Chime and notification when a focus session or break ends."
-                />
+                <div className="number-grid three">
+                  <label>
+                    <span>Focus (min)</span>
+                    <input type="number" min={1} max={180} value={focusMin} onChange={(event) => setFocusMin(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>Break (min)</span>
+                    <input type="number" min={1} max={60} value={shortMin} onChange={(event) => setShortMin(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>Long focus (min)</span>
+                    <input type="number" min={1} max={180} value={longMin} onChange={(event) => setLongMin(event.target.value)} />
+                  </label>
+                </div>
+                <div className="button-row">
+                  <button className="soft-button" onClick={saveRhythm}>
+                    <Save size={13} /> Save focus lengths
+                  </button>
+                  <span className="settings-note">Saving resets the timer to the new focus length.</span>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {section === 'behavior' && (
+            <div className="settings-sections">
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Opening</h3>
+                  <p>How the notch opens and how long it stays.</p>
+                </div>
                 <div className="setting-row">
                   <span className="setting-copy">
                     <strong>Open with</strong>
@@ -591,6 +1165,24 @@ export function SettingsPage() {
                     <option value={400}>400 ms</option>
                   </select>
                 </div>
+                <Toggle
+                  checked={state.settings.pinOnOpen}
+                  onChange={setPinned}
+                  label="Keep the notch pinned"
+                  description="Stays open when the pointer leaves. Collapse and Esc still close it."
+                />
+                <Toggle
+                  checked={state.settings.launchAtLogin}
+                  onChange={(value) => updateSettings({ launchAtLogin: value })}
+                  label="Launch at login"
+                  description="Have the notch waiting after you sign in."
+                />
+                <Toggle
+                  checked={state.settings.reduceMotion === true}
+                  onChange={(value) => updateSettings({ reduceMotion: value })}
+                  label="Reduce motion"
+                  description="Opens and closes in place, and turns off the other animations in the notch."
+                />
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">
@@ -601,32 +1193,77 @@ export function SettingsPage() {
                   <span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Space</kbd></span>
                   <strong>Toggle the notch</strong>
                 </div>
+                <div className="shortcut-card">
+                  <span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>Space</kbd></span>
+                  <strong>Hide or show the tab</strong>
+                </div>
               </section>
               <section className="setting-group">
                 <div className="setting-group-head">
-                  <h3>Focus lengths</h3>
-                  <p>Set the three timer presets to match the way you work.</p>
+                  <h3>Get out of the way</h3>
+                  <p>The tab steps aside for fullscreen apps, and for any app you name.</p>
                 </div>
-                <div className="number-grid three">
-                  <label>
-                    <span>Focus (min)</span>
-                    <input type="number" min={1} max={180} value={focusMin} onChange={(event) => setFocusMin(event.target.value)} />
-                  </label>
-                  <label>
-                    <span>Break (min)</span>
-                    <input type="number" min={1} max={60} value={shortMin} onChange={(event) => setShortMin(event.target.value)} />
-                  </label>
-                  <label>
-                    <span>Long focus (min)</span>
-                    <input type="number" min={1} max={180} value={longMin} onChange={(event) => setLongMin(event.target.value)} />
-                  </label>
+                <Toggle
+                  checked={state.settings.autoHideFullscreen !== false}
+                  onChange={(value) => updateSettings({ autoHideFullscreen: value })}
+                  label="Hide over fullscreen apps"
+                  description="When another window covers the display the notch is on, the tab disappears until you come back."
+                />
+                <NeverOverField />
+              </section>
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Coding tools</h3>
+                  <p>Local ports the notch listens on to show agent status and approvals. Most people never need to change them.</p>
                 </div>
-                <div className="button-row">
-                  <button className="soft-button" onClick={saveRhythm}>
-                    <Save size={13} /> Save focus lengths
-                  </button>
-                  <span className="settings-note">Saving resets the timer to the new focus length.</span>
+                <Toggle
+                  checked={state.settings.agentStatus !== false}
+                  onChange={(value) => updateSettings({ agentStatus: value })}
+                  label="Coding tool status"
+                  description="Approve, deny and answer questions from Claude Code, Cursor, Codex, OpenCode and Anti Gravity right in the notch."
+                />
+                <label className="setting-row">Status bridge port
+                  <input
+                    type="number"
+                    min={1024}
+                    max={65535}
+                    defaultValue={state.settings.agentStatusPort || 7432}
+                    onBlur={(event) => {
+                      const value = Number(event.target.value)
+                      if (event.target.validity.valid && value >= 1024 && value <= 65535)
+                        updateSettings({ agentStatusPort: value })
+                    }}
+                  />
+                </label>
+                <label className="setting-row">OpenCode local server port
+                  <input type="number" min={1} max={65535} placeholder="Off" defaultValue={state.settings.openCodeApprovalPort || ''}
+                    onBlur={event=>{if(event.target.validity.valid)updateSettings({openCodeApprovalPort:Number(event.target.value)||0})}} />
+                </label>
+                <AgentConnections />
+              </section>
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Alerts</h3>
+                  <p>Reminders, finished focus sessions and coding tool chimes.</p>
                 </div>
+                <Toggle
+                  checked={state.settings.notifications}
+                  onChange={(value) => updateSettings({ notifications: value })}
+                  label="Reminder notifications"
+                  description="Notch notices for reminders, and Windows alerts for reminders, finished focus sessions, and posture nudges."
+                />
+                <Toggle
+                  checked={state.settings.timerNotifications ?? true}
+                  onChange={(value) => updateSettings({ timerNotifications: value })}
+                  label="Focus session alerts"
+                  description="Chime and notification when a focus session or break ends."
+                />
+                <Toggle
+                  checked={state.settings.codingReplySound === true}
+                  onChange={(value) => updateSettings({codingReplySound:value})}
+                  label="Coding reply sound"
+                  description="Chime when a coding tool finishes or asks for approval."
+                />
               </section>
             </div>
           )}
@@ -636,7 +1273,7 @@ export function SettingsPage() {
               <section className="setting-group">
                 <div className="setting-group-head">
                   <h3>Notes folder</h3>
-                  <p>Notch edits your local Markdown files directly. No sync layer, no account.</p>
+                  <p>{window.notchDemo ? 'Hero Notch' : 'Notch'} edits your local Markdown files directly. No sync layer, no account.</p>
                 </div>
                 {state.settings.vaultPath ? (
                   <div className="vault-connected">
@@ -645,6 +1282,11 @@ export function SettingsPage() {
                       <strong>{vaultName}</strong>
                       <span>{state.settings.vaultPath}</span>
                     </div>
+                    {window.notchDemo && (
+                      <span className="vault-ignored-pill" title="Ignored folders">
+                        .obsidian · .trash · .git ignored
+                      </span>
+                    )}
                     <span className="connected-pill"><ShieldCheck size={11} /> Connected</span>
                   </div>
                 ) : (
@@ -657,7 +1299,11 @@ export function SettingsPage() {
                   </div>
                 )}
                 <div className="button-row">
-                  <button className="primary-button" onClick={() => void chooseVault()}>
+                  <button
+                    className="primary-button"
+                    data-demo-choose-vault="true"
+                    onClick={() => void chooseVault({ stay: Boolean(window.notchDemo) })}
+                  >
                     <FolderOpen size={14} />
                     {state.settings.vaultPath ? 'Change folder' : 'Open folder'}
                   </button>
@@ -666,9 +1312,15 @@ export function SettingsPage() {
                       <button className="soft-button" onClick={() => void window.notch.obsidian.reveal(state.settings.vaultPath!, null)}>
                         <ExternalLink size={13} /> Show in Explorer
                       </button>
-                      <button className="soft-button" onClick={() => setPage('notes')}>
-                        <NotebookPen size={13} /> Open notes
-                      </button>
+                      {sectionVisible(state, 'notes') && (
+                        <button
+                          className="soft-button"
+                          data-demo-open-notes="true"
+                          onClick={() => setPage('notes')}
+                        >
+                          <NotebookPen size={13} /> Open notes
+                        </button>
+                      )}
                     </>
                   )}
                 </div>
@@ -694,33 +1346,62 @@ export function SettingsPage() {
                   <h3>Connection</h3>
                   <p>
                     {status?.connected
-                      ? 'Full Spotify control is connected.'
+                      ? 'Full Spotify control is connected. YouTube Music still follows through Windows.'
                       : status?.localAvailable
-                        ? 'Spotify Desktop is detected — no setup needed for basic controls.'
-                        : 'Open Spotify on this computer to use the local session.'}
+                        ? 'Spotify is playing on this PC — no setup needed for basic controls.'
+                        : 'Play in Spotify and it shows up here, with no setup.'}
                   </p>
                 </div>
-                {status?.connected ? (
-                  <div className="spotify-connected">
-                    {status.profile?.image ? (
-                      <img src={status.profile.image} alt="" />
-                    ) : (
-                      <span className="profile-fallback">{status.profile?.name?.slice(0, 1) || 'S'}</span>
+                <label className="setting-field">
+                  <span>Player</span>
+                  <select
+                    className="setting-select"
+                    value={mediaPreference}
+                    onChange={(event) => updateSettings({ mediaSource: event.target.value })}
+                  >
+                    <option value="auto">Spotify (preferred)</option>
+                    {(status?.mediaSources || []).map((source) => (
+                      <option key={source.id} value={source.id}>
+                        {source.label}
+                      </option>
+                    ))}
+                    {savedSourceMissing && (
+                      <option value={mediaPreference}>{friendlyMediaName(mediaPreference)} (not running)</option>
                     )}
-                    <div>
-                      <strong>{status.profile?.name || 'Spotify listener'}</strong>
-                      <span>{status.profile?.product === 'premium' ? 'Premium' : 'Free'} account · connected</span>
+                  </select>
+                  <small>Notch follows Spotify and YouTube Music only. Other apps and browser videos are ignored.</small>
+                </label>
+                {status?.connected ? (
+                  <>
+                    <div className="spotify-connected">
+                      {status.profile?.image ? (
+                        <img src={status.profile.image} alt="" />
+                      ) : (
+                        <span className="profile-fallback">{status.profile?.name?.slice(0, 1) || 'S'}</span>
+                      )}
+                      <div>
+                        <strong>{status.profile?.name || 'Spotify listener'}</strong>
+                        <span>{status.profile?.product === 'premium' ? 'Premium' : 'Free'} account · connected</span>
+                      </div>
+                      <button className="soft-button compact" onClick={() => void disconnect()}>
+                        <LogOut size={12} /> Disconnect
+                      </button>
                     </div>
-                    <button className="soft-button compact" onClick={() => void disconnect()}>
-                      <LogOut size={12} /> Disconnect
-                    </button>
-                  </div>
+                    {status.needsConsent && (
+                      <div className="settings-note">
+                        Reconnect once so Notch can show recently played. Playback control stays as it is.
+                        <button className="link-button" onClick={() => void connect()} disabled={connecting}>
+                          Reconnect
+                        </button>
+                      </div>
+                    )}
+                  </>
                 ) : status?.localAvailable ? (
                   <>
                     <div className="spotify-local-connected">
                       <span className="local-spotify-icon"><Music2 size={18} /></span>
                       <div>
-                        <strong>Spotify Desktop</strong>
+                        <strong>{playerName}</strong>
                         <span>
                           {status.localTitle
                             ? `${status.localTitle}${status.localArtist ? ` · ${status.localArtist}` : ''}`
@@ -731,8 +1412,8 @@ export function SettingsPage() {
                     </div>
                     <p className="settings-note">
                       <ShieldCheck size={12} /> Current track, play/pause, previous/next and seek work
-                      without a Spotify app. Queue, volume, shuffle and repeat need the optional full
-                      connection.
+                      through the Windows media session, without a Client ID. Queue, volume, shuffle
+                      and repeat need the optional full connection.
                     </p>
                     <div className="button-row">
                       <button className="primary-button" onClick={() => setShowSpotifyAdvanced(true)}>
@@ -745,8 +1426,18 @@ export function SettingsPage() {
                     <Music2 size={20} />
                     <div>
                       <strong>No Spotify session detected</strong>
-                      <span>Open Spotify, then the notch can control it through Windows. Full queue controls are optional below.</span>
+                      <span>Open the Spotify app, then the notch can control it through Windows. Full queue controls are optional below.</span>
                     </div>
+                    <button
+                      className="soft-button compact"
+                      onClick={() => {
+                        void window.notch.spotify.launch('spotify:').then((opened) => {
+                          if (!opened) window.notch.openExternal('https://open.spotify.com')
+                        })
+                      }}
+                    >
+                      <ExternalLink size={12} /> Open Spotify
+                    </button>
                   </div>
                 )}
               </section>
@@ -802,6 +1493,32 @@ export function SettingsPage() {
             </div>
           )}
 
+          {section === 'phone' && (
+            <div className="settings-sections">
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>Phone transfer</h3>
+                  <p className="phone-network-note">
+                    <Wifi size={12} aria-hidden="true" />
+                    <strong>Same Wi-Fi only</strong>
+                    <span>No account · nothing uploaded.</span>
+                  </p>
+                </div>
+                <PhoneTransfer bare />
+              </section>
+              <section className="setting-group">
+                <div className="setting-group-head">
+                  <h3>How it works</h3>
+                </div>
+                <ol className="phone-steps">
+                  <li>Pick a file or this clipboard, or wait for your phone to send.</li>
+                  <li>Scan the code with your phone camera. The phone must be on the same Wi-Fi network as this laptop — it will not work over mobile data.</li>
+                  <li>The link expires after five minutes.</li>
+                </ol>
+              </section>
+            </div>
+          )}
+
           {section === 'about' && (
             <div className="settings-sections">
               <section className="setting-group about-card">
@@ -810,7 +1527,7 @@ export function SettingsPage() {
                   <span className="about-dot" />
                 </div>
                 <div>
-                  <span className="eyebrow">Notch {version}</span>
+                  <span className="eyebrow">{window.notchDemo ? `Hero Notch ${version}` : `Notch ${version}`}</span>
                   <h3>A calmer top of screen.</h3>
                   <p>
                     Notes, music, focus, coding sessions and the day ahead — folded into the
@@ -819,6 +1536,8 @@ export function SettingsPage() {
                   </p>
                 </div>
               </section>
+              <LicenseCard />
+              <UpdatesCard version={version} />
               <section className="setting-group">
                 <div className="setting-group-head">
                   <h3>Keyboard</h3>
@@ -826,8 +1545,7 @@ export function SettingsPage() {
                 <div className="shortcut-list">
                   <div><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Space</kbd></span><strong>Toggle notch</strong></div>
                   <div><span><kbd>Esc</kbd></span><strong>Collapse</strong></div>
-                  <div><span><kbd>1</kbd>–<kbd>7</kbd></span><strong>Switch sections</strong></div>
-                  <div><span><kbd>8</kbd></span><strong>Water, once added</strong></div>
+                  <div><span><kbd>1</kbd>–<kbd>N</kbd></span><strong>Open the sections on the bar, in order</strong></div>
                   <div><span><kbd>Ctrl</kbd><kbd>K</kbd></span><strong>Search notes</strong></div>
                   <div><span><kbd>Ctrl</kbd><kbd>S</kbd></span><strong>Save note</strong></div>
                 </div>
@@ -841,7 +1559,7 @@ export function SettingsPage() {
                     <ExternalLink size={13} /> Spotify
                   </button>
                   <button className="soft-button danger-text" onClick={() => window.notch.quit()}>
-                    <Power size={13} /> Quit Notch
+                    <Power size={13} /> {window.notchDemo ? 'Quit Hero Notch' : 'Quit Notch'}
                   </button>
                 </div>
               </section>
