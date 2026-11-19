@@ -1,6 +1,6 @@
 # Notch
 
-A personal dashboard that lives at the top of your screen — built for Windows with Electron, React and TypeScript.
+A personal dashboard that lives at the top of your screen — built for Windows and macOS with Electron, React and TypeScript.
 
 Hover the top-center notch and it unfolds into a full workspace: your Obsidian vault, Spotify controls, a focus timer, live coding sessions, a private posture coach, tasks, calendar reminders, and the settings that make it yours. The notch always starts tucked away. Use the **Collapse** arrow at the top right (or `Esc`) to fold it back into a slim now-playing / countdown / session bar.
 
@@ -48,6 +48,28 @@ npm run dist:installer
 It writes `release/Notch-Setup-1.0.0.exe`. On locked-down machines, Windows Application Control can block the temporary unsigned uninstaller used during packaging; use the portable build in that case. `npm run pack` creates an unpacked build in `release/win-unpacked/` for testing.
 
 > Electron downloads its native binary on first run. On first launch, grant notification permission if Windows asks.
+
+macOS app (run on a Mac):
+
+```bash
+npm run dist:mac
+```
+
+This writes `release/Notch-<version>-arm64.dmg` and `release/Notch-<version>-x64.dmg` (plus `.zip` versions). The app is ad-hoc signed and not notarized; see [docs/INSTALL-mac.md](docs/INSTALL-mac.md) for the Gatekeeper steps users need on first launch.
+
+## macOS
+
+Notch runs as a menu-bar app on macOS 12 and later (no Dock icon). The tab sits in the menu bar at the top centre. The menu-bar icon toggles the notch, and right-click opens its menu. The shortcut is `Cmd Shift Space`.
+
+What differs from Windows:
+
+- **Spotify** basic controls use AppleScript instead of the Windows media session. macOS asks once for *Automation* permission to control Spotify.
+- **Focus backdrop blur** needs *Screen Recording* permission. Notch never asks for it automatically; without it the backdrop is a plain dim layer. Settings › Notch › macOS permissions links to the right pane.
+- **Posture coach** asks for *Camera* access the first time it starts.
+- **Coding sessions** detect apps with `ps` and find the `codex` / `opencode` CLIs on your login-shell `PATH` (Homebrew, npm, nvm), even when Notch was started from Finder.
+- **No auto-update**: download the new DMG from GitHub Releases.
+
+Install steps: [docs/INSTALL-mac.md](docs/INSTALL-mac.md).
 
 ## Releasing for the website
 
@@ -265,7 +287,7 @@ src/
 - `NOTCH_STATE_PATH` overrides the state file location (useful for testing).
 - `NOTCH_DEMO_MEDIA=1` serves a fake Now Playing session so the player UI can be developed without Spotify credentials. It has no effect on normal launches.
 - `npm run typecheck` checks both the Node and renderer TypeScript projects.
-- The app is Windows-first (top-edge docking, tray, Windows notifications), but the Electron shell is portable.
+- Platform-specific code in the main process is behind `isMac` / `isWin` from `src/main/platform.ts`; the renderer reads `window.notch.platform` through `src/renderer/src/lib/platform.ts`.
 
 ## Known limits
 

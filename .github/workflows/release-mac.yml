@@ -1,0 +1,111 @@
+name: Release (macOS, unsigned)
+
+# Builds the macOS downloads and attaches them to the same GitHub Release the
+# Windows workflow (release-unsigned.yml) publishes for the tag:
+#   Notch-<version>-arm64.dmg / .zip   (Apple Silicon)
+#   Notch-<version>-x64.dmg / .zip     (Intel)
+#   Notch-arm64.dmg, Notch-x64.dmg     (stable names for "latest" links)
+#   SHA256SUMS-mac.txt
+#
+# There is no Apple Developer account: the app is ad-hoc signed (see
+# scripts/adhoc-sign-mac.cjs) and not notarized, so Gatekeeper blocks the first
+# launch. docs/INSTALL-mac.md explains "Open Anyway" to users.
+#
+# This is a separate workflow on purpose: a macOS failure must never block the
+# Windows release. The Windows job creates the release; this job waits for it
+# and uploads into it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to attach the macOS build to (for example v1.0.23). Leave empty to only build artifacts.'
+        type: string
+        required: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-mac-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  # No certificate: stop electron-builder from looking for one in the keychain.
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+jobs:
+  release:
+    name: Build macOS DMGs
+    runs-on: macos-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build arm64 and x64
+        run: |
+          npm run build
+          # The app has no native modules, so one Apple Silicon runner builds both.
+          npx electron-builder --mac --arm64 --x64 --publish never
+
+      - name: Verify signatures and architectures
+        run: npm run verify:mac
+
+      - name: Checksums and stable names
+        run: |
+          cd release
+          ls -la
+          for arch in arm64 x64; do
+            dmg=$(ls Notch-*-"$arch".dmg | head -n1)
+            test -n "$dmg" || { echo "missing $arch dmg"; exit 1; }
+            cp "$dmg" "Notch-$arch.dmg"
+          done
+          shasum -a 256 Notch-*.dmg Notch-*.zip | tee SHA256SUMS-mac.txt
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: notch-mac-${{ github.run_number }}
+          path: |
+            release/Notch-*.dmg
+            release/Notch-*.zip
+            release/SHA256SUMS-mac.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # The Windows workflow creates the release. Wait for it (up to ~45 min)
+          # rather than racing it to create the same release.
+          for attempt in $(seq 1 90); do
+            if gh release view "$TAG" >/dev/null 2>&1; then break; fi
+            echo "Waiting for release $TAG ($attempt/90)…"
+            sleep 30
+          done
+          gh release view "$TAG" >/dev/null || { echo "Release $TAG was never created."; exit 1; }
+          gh release upload "$TAG" --clobber \
+            release/Notch-*.dmg \
+            release/Notch-*.zip \
+            release/SHA256SUMS-mac.txt
