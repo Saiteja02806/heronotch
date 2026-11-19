@@ -22,6 +22,7 @@ import type { AppState, AppStatePatch, NotchStyle } from '../shared/types'
 import * as backdrop from './backdrop'
 import * as localMedia from './localMedia'
 import * as obsidian from './obsidian'
+import { isMac, isWin } from './platform'
 import * as sessions from './sessions'
 import * as spotify from './spotify'
 import { flushState, getState, initState, setState, stateEvents, updateTask } from './state'
@@ -65,6 +66,13 @@ let revealTimer: NodeJS.Timeout | null = null
 let topmostTimer: NodeJS.Timeout | null = null
 let rendererRecoveries = 0
 let failureDialogOpen = false
+// macOS has no window shaping (setShape is Windows/Linux only), so the
+// collapsed window's transparent margin is made click-through by toggling
+// setIgnoreMouseEvents while the pointer is outside the tab. See
+// applyMacInputRegion().
+let macHitTimer: NodeJS.Timeout | null = null
+let macIgnoringMouse: boolean | null = null
+const MAC_HIT_INTERVAL_MS = 40
 
 function logLine(message: string): void {
   try {
@@ -110,7 +118,10 @@ function boundsFor(isExpanded: boolean): Electron.Rectangle {
       height: display.bounds.height
     }
   }
-  const workArea = display.workArea
+  // On macOS the work area excludes the menu bar (and the strip beside a
+  // MacBook's camera housing), which would put the tab below the menu bar. A
+  // notch belongs in the menu bar, so anchor to the full display there.
+  const workArea = isMac ? display.bounds : display.workArea
   const size = COLLAPSED_SIZES[state.settings.notchStyle] || COLLAPSED_SIZES.minimal
   const width = Math.min(
     Math.max(size.width, COLLAPSED_NOTICE_WIDTH),
@@ -225,6 +236,10 @@ function nudgePointerHover(): void {
 // receive the mouse normally while the tab keeps working.
 function applyWindowShape(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
+  if (isMac) {
+    applyMacInputRegion()
+    return
+  }
   try {
     const bounds = mainWindow.getBounds()
     const full = { x: 0, y: 0, width: bounds.width + 2, height: bounds.height + 2 }
@@ -236,6 +251,66 @@ function applyWindowShape(): void {
   } catch {
     // setShape is experimental; if it is unavailable the window still works,
     // it just keeps its rectangular input area.
+  }
+}
+
+function setMacIgnoreMouse(ignore: boolean): void {
+  if (!mainWindow || mainWindow.isDestroyed() || macIgnoringMouse === ignore) return
+  macIgnoringMouse = ignore
+  if (ignore) {
+    // forward: true keeps mousemove events flowing to the renderer, so hover
+    // effects still track the pointer while clicks fall through.
+    mainWindow.setIgnoreMouseEvents(true, { forward: true })
+  } else {
+    mainWindow.setIgnoreMouseEvents(false)
+  }
+}
+
+function stopMacHitTest(): void {
+  if (macHitTimer) {
+    clearInterval(macHitTimer)
+    macHitTimer = null
+  }
+}
+
+function updateMacMouseIgnore(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (expanded || !collapsedShape) {
+    setMacIgnoreMouse(false)
+    return
+  }
+  const cursor = screen.getCursorScreenPoint()
+  const bounds = mainWindow.getBounds()
+  const x = cursor.x - bounds.x
+  const y = cursor.y - bounds.y
+  const inside =
+    x >= collapsedShape.x &&
+    y >= collapsedShape.y &&
+    x < collapsedShape.x + collapsedShape.width &&
+    y < collapsedShape.y + collapsedShape.height
+  setMacIgnoreMouse(!inside)
+}
+
+// macOS replacement for setShape. Expanded: the whole window takes input (the
+// backdrop closes the notch on click). Collapsed: only the tab and its notice
+// take input; everything else in the window is click-through.
+function applyMacInputRegion(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (expanded || !collapsedShape) {
+    stopMacHitTest()
+    setMacIgnoreMouse(false)
+    return
+  }
+  updateMacMouseIgnore()
+  if (!macHitTimer) {
+    macHitTimer = setInterval(() => {
+      if (quitting || !mainWindow || mainWindow.isDestroyed()) {
+        stopMacHitTest()
+        return
+      }
+      if (!mainWindow.isVisible()) return
+      updateMacMouseIgnore()
+    }, MAC_HIT_INTERVAL_MS)
   }
 }
 
@@ -328,7 +403,9 @@ function showRendererFailure(details: Electron.RenderProcessGoneDetails): void {
     : [
         `The notch window could not draw because its renderer process stopped (${details.reason}, exit code ${details.exitCode}).`,
         '',
-        'On Windows 11 this is usually caused by Smart App Control or an Application Control policy blocking unsigned Electron components. Signing the app, or testing on a PC without that policy, resolves it.',
+        isWin
+          ? 'On Windows 11 this is usually caused by Smart App Control or an Application Control policy blocking unsigned Electron components. Signing the app, or testing on a PC without that policy, resolves it.'
+          : 'Try Retry first. If it keeps happening, quit Notch and open it again, and include the log below in a bug report.',
         '',
         `A log was written to: ${logPath}`
       ].join('\n')
@@ -399,6 +476,8 @@ function showRendererFailure(details: Electron.RenderProcessGoneDetails): void {
 function createWindow(): void {
   const initial = boundsFor(false)
   windowShown = false
+  macIgnoringMouse = null
+  stopMacHitTest()
   rendererRecoveries = 0
   if (revealTimer) {
     clearTimeout(revealTimer)
@@ -422,7 +501,12 @@ function createWindow(): void {
     // skipTaskbar flag alone calls ITaskbarList::DeleteTab, which the taskbar
     // silently undoes the next time the window is activated (e.g. clicking
     // into the notch to type).
-    ...(process.platform === 'win32' ? { type: 'toolbar' } : {}),
+    ...(isWin ? { type: 'toolbar' } : {}),
+    // macOS: an NSPanel floats over full-screen apps and does not drag the
+    // rest of the app forward when clicked. enableLargerThanScreen stops macOS
+    // from pushing a frameless window below the menu bar, which is where the
+    // notch has to sit.
+    ...(isMac ? { type: 'panel', enableLargerThanScreen: true } : {}),
     hasShadow: false,
     alwaysOnTop: true,
     acceptFirstMouse: true,
@@ -439,7 +523,12 @@ function createWindow(): void {
   })
 
   mainWindow.setAlwaysOnTop(true, 'screen-saver')
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  mainWindow.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+    // The app is already an accessory app on macOS (LSUIElement / dock.hide),
+    // so skip Electron's process-type switch, which makes the Dock icon flicker.
+    ...(isMac ? { skipTransformProcessType: true } : {})
+  })
   // Windows/Electron otherwise clamps the collapsed window to ~40px high,
   // leaving a strip below the tab that swallowed hover from the window
   // underneath. The tab only needs 26.
@@ -517,6 +606,7 @@ function createWindow(): void {
   })
 
   mainWindow.on('closed', () => {
+    stopMacHitTest()
     if (revealTimer) {
       clearTimeout(revealTimer)
       revealTimer = null
@@ -574,8 +664,16 @@ function createWindow(): void {
 
 function createTray(): void {
   try {
-    const trayIconPath = path.join(__dirname, '../../resources/tray.png')
+    // macOS menu-bar icons are monochrome "template" images that the system
+    // tints for light and dark menu bars. nativeImage picks up the @2x file
+    // next to it automatically.
+    const trayIconPath = path.join(
+      __dirname,
+      '../../resources',
+      isMac ? 'trayTemplate.png' : 'tray.png'
+    )
     const icon = nativeImage.createFromPath(trayIconPath)
+    if (isMac && !icon.isEmpty()) icon.setTemplateImage(true)
     tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon)
     const menu = Menu.buildFromTemplate([
       {
@@ -603,7 +701,14 @@ function createTray(): void {
       }
     ])
     tray.setToolTip('Notch')
-    tray.setContextMenu(menu)
+    if (isMac) {
+      // With setContextMenu on macOS, a left click opens the menu and 'click'
+      // never fires. Keep Windows behavior instead: left click toggles the
+      // notch, right click (or Ctrl-click) shows the menu.
+      tray.on('right-click', () => tray?.popUpContextMenu(menu))
+    } else {
+      tray.setContextMenu(menu)
+    }
     tray.on('click', () => {
       if (!mainWindow) createWindow()
       revealWindow('tray')
@@ -719,10 +824,11 @@ function registerIpc(): void {
       patch.settings?.launchAtLogin !== undefined &&
       patch.settings.launchAtLogin !== before.settings.launchAtLogin
     ) {
-      app.setLoginItemSettings({
-        openAtLogin: patch.settings.launchAtLogin,
-        path: process.execPath
-      })
+      app.setLoginItemSettings(
+        isMac
+          ? { openAtLogin: patch.settings.launchAtLogin }
+          : { openAtLogin: patch.settings.launchAtLogin, path: process.execPath }
+      )
     }
 
     if (patch.settings?.notchPosition !== undefined || patch.settings?.notchStyle !== undefined) {
@@ -947,6 +1053,20 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
     } catch {
       // Fall back to common install locations. Those only start the app.
     }
+    if (isMac) {
+      const fs = await import('node:fs')
+      const os = await import('node:os')
+      const bundles = [
+        '/Applications/Spotify.app',
+        path.join(os.homedir(), 'Applications', 'Spotify.app')
+      ]
+      for (const bundle of bundles) {
+        if (!fs.existsSync(bundle)) continue
+        const error = await shell.openPath(bundle)
+        if (!error) return true
+      }
+      return false
+    }
     const candidates = [
       'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Roaming\\Spotify\\Spotify.exe',
       'C:\\Program Files\\Spotify\\Spotify.exe',
@@ -973,6 +1093,17 @@ async function startTrackOnDesktop(clientId: string, uri: string) {
     return sessions.sendSessionMessage(sessionId, message)
   })
   ipcMain.handle('sessions:focus-codex', () => {
+    if (isMac) {
+      // `open -a` brings an already-running app forward (and starts it if it
+      // is not running). The Codex desktop app may ship as "Codex" or inside
+      // "ChatGPT"; try both.
+      const activate = (name: string): Promise<boolean> =>
+        new Promise((resolve) => {
+          execFile('open', ['-a', name], { timeout: 5000 }, (error) => resolve(!error))
+        })
+      return activate('Codex').then((ok) => ok || activate('ChatGPT'))
+    }
+    if (!isWin) return false
     return new Promise<boolean>((resolve) => {
       const command =
         "$p = Get-Process ChatGPT -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; if ($p -and (New-Object -ComObject WScript.Shell).AppActivate($p.Id)) { 'ok' } else { 'no' }"
@@ -1015,7 +1146,10 @@ if (!gotLock) {
   })
 
   app.whenReady().then(async () => {
-    app.setAppUserModelId('com.notch.dashboard')
+    if (isWin) app.setAppUserModelId('com.notch.dashboard')
+    // Menu-bar app: no Dock icon or app-switcher entry. LSUIElement does this in
+    // the packaged app; dock.hide() also covers `npm run dev`.
+    if (isMac) app.dock?.hide()
     // Native widgets (the select popup, date pickers, scrollbars) follow this,
     // not just the page CSS. Without it the select menu is a white Windows list
     // with near-white option labels.
@@ -1023,7 +1157,7 @@ if (!gotLock) {
     logLine(
       `start v${app.getVersion()} packaged=${app.isPackaged} exe=${process.execPath} userData=${app.getPath('userData')}`
     )
-    logLine(`smart app control=${smartAppControlState()}`)
+    if (isWin) logLine(`smart app control=${smartAppControlState()}`)
     const primaryDisplay = screen.getPrimaryDisplay()
     logLine(
       `display bounds=${JSON.stringify(primaryDisplay.bounds)} workArea=${JSON.stringify(primaryDisplay.workArea)} scale=${primaryDisplay.scaleFactor}`
@@ -1058,10 +1192,11 @@ if (!gotLock) {
     }
 
     if (app.isPackaged) {
-      app.setLoginItemSettings({
-        openAtLogin: getState().settings.launchAtLogin,
-        path: process.execPath
-      })
+      app.setLoginItemSettings(
+        isMac
+          ? { openAtLogin: getState().settings.launchAtLogin }
+          : { openAtLogin: getState().settings.launchAtLogin, path: process.execPath }
+      )
     }
     registerIpc()
     localMedia.startLocalMediaMonitor()

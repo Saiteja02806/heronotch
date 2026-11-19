@@ -1,4 +1,5 @@
-import { app, desktopCapturer, screen } from 'electron'
+import { app, desktopCapturer, screen, systemPreferences } from 'electron'
+import { isMac } from './platform'
 
 let cachedBackdrop: string | null = null
 let cachedAt = 0
@@ -7,6 +8,22 @@ let suspended = false
 
 export function getCachedBackdrop(): string | null {
   return cachedBackdrop
+}
+
+/**
+ * macOS needs the Screen Recording permission to capture the desktop. Without
+ * it, every capture attempt can raise the system prompt again, and the refresh
+ * runs on a timer. So on macOS only capture once the user has granted it (the
+ * Settings page links to the right System Settings pane); otherwise the
+ * renderer falls back to a plain dimmed backdrop.
+ */
+export function screenCaptureAllowed(): boolean {
+  if (!isMac) return true
+  try {
+    return systemPreferences.getMediaAccessStatus('screen') === 'granted'
+  } catch {
+    return false
+  }
 }
 
 export function getCachedAt(): number {
@@ -18,6 +35,7 @@ export function getCachedAt(): number {
 // frames instead of seconds. That matters because a slow capture used to delay
 // (or cancel) opening the notch and stall mouse input while it ran.
 async function capture(force: boolean): Promise<string | null> {
+  if (!screenCaptureAllowed()) return null
   try {
     const display = screen.getPrimaryDisplay()
     const scale = display.scaleFactor || 1
