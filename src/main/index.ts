@@ -13,6 +13,7 @@ import {
   screen,
   session,
   shell,
+  systemPreferences,
   Tray
 } from 'electron'
 import { execFile, execFileSync, spawn } from 'node:child_process'
@@ -804,6 +805,38 @@ function requireVault(requested?: string): string {
 }
 
 function registerIpc(): void {
+  ipcMain.handle('system:request-camera', async () => {
+    if (!isMac) return true
+    try {
+      const status = systemPreferences.getMediaAccessStatus('camera')
+      if (status === 'granted') return true
+      if (status === 'denied' || status === 'restricted') return false
+      return await systemPreferences.askForMediaAccess('camera')
+    } catch {
+      return false
+    }
+  })
+  ipcMain.handle('system:screen-capture-status', () => {
+    if (!isMac) return 'granted'
+    try {
+      return systemPreferences.getMediaAccessStatus('screen')
+    } catch {
+      return 'unknown'
+    }
+  })
+  ipcMain.on('system:open-privacy', (_event, pane: string) => {
+    if (!isMac) return
+    const anchors: Record<string, string> = {
+      camera: 'Privacy_Camera',
+      screen: 'Privacy_ScreenCapture',
+      automation: 'Privacy_Automation'
+    }
+    const anchor = anchors[pane]
+    if (!anchor) return
+    void shell.openExternal(
+      `x-apple.systempreferences:com.apple.preference.security?${anchor}`
+    )
+  })
   ipcMain.handle('app:get-state', () => getState())
   ipcMain.handle('app:version', () => app.getVersion())
 

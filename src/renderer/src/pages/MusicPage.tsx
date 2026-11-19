@@ -22,6 +22,7 @@ import {
 import { motion } from 'framer-motion'
 import { useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react'
 import { formatDuration } from '../lib/time'
+import { LOCAL_MEDIA_SESSION, LOCAL_MEDIA_SOURCE, THIS_COMPUTER } from '../lib/platform'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
 
@@ -347,7 +348,7 @@ export function MusicPage() {
                 ? `Spotify is connected${
                     status?.profile?.name ? ` as ${status.profile.name}` : ''
                   }. Press play on any device and the track will appear here.`
-                : 'Open Spotify on this computer and press play. Notch reads the Windows media session, so there is nothing to set up.'}
+                : `Open Spotify on ${THIS_COMPUTER} and press play. Notch reads ${LOCAL_MEDIA_SESSION}, so there is nothing to set up.`}
             </p>
             <div>
               <button
@@ -390,7 +391,7 @@ export function MusicPage() {
             <h3>Playing from Spotify Desktop</h3>
             <p>
               Your current track and transport controls work without any setup. Spotify does not
-              expose the upcoming queue through Windows, so connect a Spotify app to see what is next,
+              expose the upcoming queue through {LOCAL_MEDIA_SOURCE}, so connect a Spotify app to see what is next,
               use volume, shuffle and repeat.
             </p>
             <button className="primary-button" onClick={() => openSettings('spotify')}>
@@ -463,7 +464,7 @@ export function MusicPage() {
               <strong>{status?.profile?.name || (localMode ? 'Spotify Desktop' : 'Spotify listener')}</strong>
               <span>
                 {localMode
-                  ? 'Local Windows media session'
+                  ? `Local ${LOCAL_MEDIA_SOURCE} media control`
                   : `${status?.profile?.product === 'premium' ? 'Premium' : 'Free'} account`}
               </span>
             </div>

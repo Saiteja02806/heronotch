@@ -28,12 +28,13 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent
 } from 'react'
-import type { Accent, NotchPosition, NotchStyle } from '../../../shared/types'
+import type { Accent, MediaAccessState, NotchPosition, NotchStyle } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
 import { useMedia } from '../state/MediaContext'
 import { useVaultPicker } from '../hooks/useVaultPicker'
 import { ACCENTS } from '../lib/theme'
 import { OPTIONAL_SECTIONS } from '../lib/sections'
+import { FILE_MANAGER, isMac, LOCAL_MEDIA_SESSION, LOCAL_MEDIA_SOURCE, MOD_KEY } from '../lib/platform'
 import { formatTime } from '../lib/time'
 import { waterCount, waterFill } from '../lib/water'
 import { WaterPreview } from './WaterPage'
@@ -125,6 +126,26 @@ export function SettingsPage() {
   const [copied, setCopied] = useState(false)
   const [savingSpotify, setSavingSpotify] = useState(false)
   const [showSpotifyAdvanced, setShowSpotifyAdvanced] = useState(false)
+  const [screenAccess, setScreenAccess] = useState<MediaAccessState | null>(null)
+
+  // macOS: show whether the blurred focus backdrop can capture the screen.
+  // Reading the status never triggers the system prompt.
+  useEffect(() => {
+    if (!isMac || section !== 'notch') return
+    let alive = true
+    const read = (): void => {
+      void window.notch.system.screenCaptureStatus().then((value) => {
+        if (alive) setScreenAccess(value)
+      })
+    }
+    read()
+    // Re-check when the user comes back from System Settings.
+    window.addEventListener('focus', read)
+    return () => {
+      alive = false
+      window.removeEventListener('focus', read)
+    }
+  }, [section])
 
   // Keep the form in sync if state is recovered or updated from another view.
   useEffect(() => {
@@ -592,13 +613,63 @@ export function SettingsPage() {
                   </select>
                 </div>
               </section>
+              {isMac && (
+                <section className="setting-group">
+                  <div className="setting-group-head">
+                    <h3>macOS permissions</h3>
+                    <p>Notch asks only when a feature needs it. You can change these any time in System Settings.</p>
+                  </div>
+                  <div className="setting-row">
+                    <span className="setting-copy">
+                      <strong>Blurred desktop behind the open notch</strong>
+                      <small>
+                        {screenAccess === 'granted'
+                          ? 'Screen Recording is allowed.'
+                          : 'Needs Screen Recording. Without it the backdrop is a plain dim layer.'}
+                      </small>
+                    </span>
+                    {screenAccess !== 'granted' && (
+                      <button
+                        className="soft-button compact"
+                        onClick={() => window.notch.system.openPrivacySettings('screen')}
+                      >
+                        <ExternalLink size={12} /> Open settings
+                      </button>
+                    )}
+                  </div>
+                  <div className="setting-row">
+                    <span className="setting-copy">
+                      <strong>Camera for the posture coach</strong>
+                      <small>macOS asks the first time you turn the coach on.</small>
+                    </span>
+                    <button
+                      className="soft-button compact"
+                      onClick={() => window.notch.system.openPrivacySettings('camera')}
+                    >
+                      <ExternalLink size={12} /> Open settings
+                    </button>
+                  </div>
+                  <div className="setting-row">
+                    <span className="setting-copy">
+                      <strong>Controlling Spotify</strong>
+                      <small>macOS asks the first time Notch plays, pauses or skips (Automation).</small>
+                    </span>
+                    <button
+                      className="soft-button compact"
+                      onClick={() => window.notch.system.openPrivacySettings('automation')}
+                    >
+                      <ExternalLink size={12} /> Open settings
+                    </button>
+                  </div>
+                </section>
+              )}
               <section className="setting-group">
                 <div className="setting-group-head">
                   <h3>Shortcut</h3>
                   <p>The notch is always one keystroke away.</p>
                 </div>
                 <div className="shortcut-card">
-                  <span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Space</kbd></span>
+                  <span><kbd>{MOD_KEY}</kbd><kbd>Shift</kbd><kbd>Space</kbd></span>
                   <strong>Toggle the notch</strong>
                 </div>
               </section>
@@ -664,7 +735,7 @@ export function SettingsPage() {
                   {state.settings.vaultPath && (
                     <>
                       <button className="soft-button" onClick={() => void window.notch.obsidian.reveal(state.settings.vaultPath!, null)}>
-                        <ExternalLink size={13} /> Show in Explorer
+                        <ExternalLink size={13} /> Show in {FILE_MANAGER}
                       </button>
                       <button className="soft-button" onClick={() => setPage('notes')}>
                         <NotebookPen size={13} /> Open notes
@@ -724,7 +795,7 @@ export function SettingsPage() {
                         <span>
                           {status.localTitle
                             ? `${status.localTitle}${status.localArtist ? ` · ${status.localArtist}` : ''}`
-                            : 'Connected through the Windows media session'}
+                            : `Connected through ${LOCAL_MEDIA_SESSION}`}
                         </span>
                       </div>
                       <span className="connected-pill"><ShieldCheck size={11} /> Local</span>
@@ -745,7 +816,7 @@ export function SettingsPage() {
                     <Music2 size={20} />
                     <div>
                       <strong>No Spotify session detected</strong>
-                      <span>Open Spotify, then the notch can control it through Windows. Full queue controls are optional below.</span>
+                      <span>Open Spotify, then the notch can control it through {LOCAL_MEDIA_SOURCE}. Full queue controls are optional below.</span>
                     </div>
                   </div>
                 )}
@@ -824,12 +895,12 @@ export function SettingsPage() {
                   <h3>Keyboard</h3>
                 </div>
                 <div className="shortcut-list">
-                  <div><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Space</kbd></span><strong>Toggle notch</strong></div>
+                  <div><span><kbd>{MOD_KEY}</kbd><kbd>Shift</kbd><kbd>Space</kbd></span><strong>Toggle notch</strong></div>
                   <div><span><kbd>Esc</kbd></span><strong>Collapse</strong></div>
                   <div><span><kbd>1</kbd>–<kbd>7</kbd></span><strong>Switch sections</strong></div>
                   <div><span><kbd>8</kbd></span><strong>Water, once added</strong></div>
-                  <div><span><kbd>Ctrl</kbd><kbd>K</kbd></span><strong>Search notes</strong></div>
-                  <div><span><kbd>Ctrl</kbd><kbd>S</kbd></span><strong>Save note</strong></div>
+                  <div><span><kbd>{MOD_KEY}</kbd><kbd>K</kbd></span><strong>Search notes</strong></div>
+                  <div><span><kbd>{MOD_KEY}</kbd><kbd>S</kbd></span><strong>Save note</strong></div>
                 </div>
               </section>
               <section className="setting-group">

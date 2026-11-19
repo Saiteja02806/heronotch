@@ -16,7 +16,7 @@
   --line-strong: rgba(255, 255, 255, 0.12);
   --cream: #f3efe5;
   --spotify: #a8e36b;
-  --sans: 'Inter Variable', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+  --sans: 'Inter Variable', 'Segoe UI Variable', 'Segoe UI', -apple-system, 'SF Pro Text', system-ui, sans-serif;
   --serif: 'Instrument Serif', Georgia, 'Times New Roman', serif;
   --mono: 'JetBrains Mono Variable', 'Cascadia Code', ui-monospace, monospace;
   color-scheme: dark;

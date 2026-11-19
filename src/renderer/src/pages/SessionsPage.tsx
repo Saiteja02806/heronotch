@@ -17,6 +17,7 @@ import type { CodingSession } from '../../../shared/types'
 import { useApp } from '../state/AppContext'
 import { SESSION_META, SessionBadge, sessionAge } from '../components/SessionBits'
 import { Modal } from '../components/Modal'
+import { MOD_KEY_TEXT } from '../lib/platform'
 
 const SENDABLE = new Set(['codex', 'opencode', 'antigravity'])
 
@@ -328,7 +329,7 @@ export function SessionsPage() {
             />
             <div className="session-compose-meta">
               <span>{message.length.toLocaleString()} / 12,000</span>
-              <span>Ctrl Enter to send</span>
+              <span>{MOD_KEY_TEXT} Enter to send</span>
             </div>
             <p className="session-compose-note">
               The message goes to the existing local {SESSION_META[composer.provider].label} session.

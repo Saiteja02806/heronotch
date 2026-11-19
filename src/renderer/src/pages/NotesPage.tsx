@@ -46,6 +46,7 @@ import { useVaultPicker } from '../hooks/useVaultPicker'
 import { CompactSlotPortal } from '../components/CompactSlot'
 import { Modal } from '../components/Modal'
 import { formatDateShort } from '../lib/time'
+import { FILE_MANAGER, MOD_KEY, MOD_KEY_TEXT } from '../lib/platform'
 
 interface EntryDialog {
   mode: 'note' | 'folder' | 'rename'
@@ -1130,7 +1131,7 @@ export function NotesPage() {
             onChange={(event) => setSearch(event.target.value)}
             placeholder="Search notes…"
           />
-          <kbd>Ctrl K</kbd>
+          <kbd>{MOD_KEY} K</kbd>
         </div>
 
         <div className="tree-scroll">
@@ -1400,8 +1401,8 @@ export function NotesPage() {
             {!preview && (
               <div className="editor-toolbar">
                 <div className="toolbar-group">
-                  <button type="button" className={marks.bold ? 'is-on' : ''} aria-pressed={marks.bold} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleInline('**')} title="Bold (Ctrl+B)"><Bold size={14} /></button>
-                  <button type="button" className={marks.italic ? 'is-on' : ''} aria-pressed={marks.italic} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleInline('*')} title="Italic (Ctrl+I)"><Italic size={14} /></button>
+                  <button type="button" className={marks.bold ? 'is-on' : ''} aria-pressed={marks.bold} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleInline('**')} title={`Bold (${MOD_KEY_TEXT}+B)`}><Bold size={14} /></button>
+                  <button type="button" className={marks.italic ? 'is-on' : ''} aria-pressed={marks.italic} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleInline('*')} title={`Italic (${MOD_KEY_TEXT}+I)`}><Italic size={14} /></button>
                   <button type="button" className={marks.heading ? 'is-on' : ''} aria-pressed={marks.heading} onMouseDown={(event) => event.preventDefault()} onClick={toggleHeading} title="Heading"><Heading2 size={14} /></button>
                 </div>
                 <div className="toolbar-group">
@@ -1414,7 +1415,7 @@ export function NotesPage() {
                   <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat('[[', ']]')} title="Wiki link"><FileText size={14} /></button>
                 </div>
                 <span className="toolbar-spacer" />
-                <button type="button" className="toolbar-save" onClick={() => void saveNow()} title="Save now (Ctrl+S)"><Save size={14} /></button>
+                <button type="button" className="toolbar-save" onClick={() => void saveNow()} title={`Save now (${MOD_KEY_TEXT}+S)`}><Save size={14} /></button>
               </div>
             )}
 
@@ -1455,7 +1456,7 @@ export function NotesPage() {
               <span>{selectedPath.split('/').length > 1 ? 'Nested note' : 'Root folder'}</span>
               <span className="footer-path">{selectedPath}</span>
               <button onClick={() => void window.notch.obsidian.reveal(vaultPath, selectedPath)}>
-                Reveal in Explorer
+                Reveal in {FILE_MANAGER}
               </button>
             </div>
           </div>

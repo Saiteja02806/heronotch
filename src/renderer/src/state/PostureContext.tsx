@@ -12,6 +12,7 @@ import type { PostureBaseline } from '../../../shared/types'
 import { useApp } from './AppContext'
 import { playPostureRing } from '../lib/alertSound'
 import { todayKey } from '../lib/time'
+import { CAMERA_SETTINGS_HINT } from '../lib/platform'
 
 const WASM_PATH = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.2/wasm'
 const MODEL_PATH =
@@ -365,6 +366,12 @@ export function PostureProvider({ children }: { children: ReactNode }) {
       invalidFramesRef.current = 0
       staleFramesRef.current = 0
       try {
+        // macOS asks for camera access per app, outside Chromium. Ask through the
+        // main process first so the system prompt appears once and a refusal
+        // shows a clear hint instead of a generic getUserMedia error.
+        if (!(await window.notch.system.requestCameraAccess())) {
+          throw new Error(CAMERA_SETTINGS_HINT)
+        }
         const media = await navigator.mediaDevices.getUserMedia({
           video: {
             width: { ideal: 640 },

@@ -6,6 +6,7 @@ import { todayKey } from '../lib/time'
 import { CompactSlot } from './CompactSlot'
 import { SectionNav } from './Header'
 import { Logo } from './Logo'
+import { MOD_KEY } from '../lib/platform'
 
 export function Footer() {
   const { state, setPage } = useApp()
@@ -62,7 +63,7 @@ export function Footer() {
       </div>
       <div className="shortcut-hints">
         <span>
-          <kbd>Ctrl</kbd>
+          <kbd>{MOD_KEY}</kbd>
           <kbd>⇧</kbd>
           <kbd>Space</kbd> toggle
         </span>

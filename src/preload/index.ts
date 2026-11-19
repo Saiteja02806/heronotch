@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppState,
+  MediaAccessState,
   NotchApi,
   NoteSearchResult,
   ReminderEvent,
@@ -20,6 +21,13 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): () => vo
 }
 
 const api: NotchApi = {
+  platform: process.platform,
+  system: {
+    requestCameraAccess: () => ipcRenderer.invoke('system:request-camera') as Promise<boolean>,
+    screenCaptureStatus: () =>
+      ipcRenderer.invoke('system:screen-capture-status') as Promise<MediaAccessState>,
+    openPrivacySettings: (pane) => ipcRenderer.send('system:open-privacy', pane)
+  },
   getState: () => ipcRenderer.invoke('app:get-state') as Promise<AppState>,
   setState: (patch) => ipcRenderer.invoke('app:set-state', patch) as Promise<AppState>,
   getVersion: () => ipcRenderer.invoke('app:version') as Promise<string>,

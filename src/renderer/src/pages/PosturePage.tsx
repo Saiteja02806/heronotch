@@ -15,6 +15,7 @@ import { ProgressRing } from '../components/ProgressRing'
 import { useApp } from '../state/AppContext'
 import { usePosture } from '../state/PostureContext'
 import { formatMinutes } from '../lib/time'
+import { CAMERA_SETTINGS_HINT, isMac } from '../lib/platform'
 
 function scoreColor(score: number, threshold: number): string {
   if (score >= threshold) return '#a8e36b'
@@ -144,7 +145,7 @@ export function PosturePage() {
                   <>
                     <CameraOff size={30} />
                     <strong>Camera unavailable</strong>
-                    <span>{posture.error || 'Check Windows camera privacy settings.'}</span>
+                    <span>{posture.error || CAMERA_SETTINGS_HINT}</span>
                     <button
                       className="soft-button"
                       onClick={() => {
@@ -259,7 +260,7 @@ export function PosturePage() {
                 ? 'Shoulders and ears need to be visible. Sit back a little if you are too close.'
                 : posture.status === 'error'
                   ? posture.error || 'Camera unavailable.'
-                  : 'Runs continuously while on. The Windows camera indicator stays lit.'}
+                  : `Runs continuously while on. The ${isMac ? 'green camera light' : 'Windows camera indicator'} stays lit.`}
           </p>
         </div>
 
@@ -349,7 +350,7 @@ export function PosturePage() {
                 <span>
                   <strong>Always coaching</strong>
                   <small>
-                    Camera and Windows indicator stay on while the coach is on. Turn it off
+                    Camera and {isMac ? 'the green camera light' : 'Windows indicator'} stay on while the coach is on. Turn it off
                     below to release both.
                   </small>
                 </span>

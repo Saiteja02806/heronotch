@@ -267,7 +267,26 @@ export type SpotifyAction =
   | { type: 'repeat'; state: 'off' | 'track' | 'context' }
   | { type: 'transfer'; deviceId: string }
 
+export type MediaAccessState =
+  | 'granted'
+  | 'denied'
+  | 'not-determined'
+  | 'restricted'
+  | 'unknown'
+
+export type PrivacyPane = 'camera' | 'screen' | 'automation'
+
 export interface NotchApi {
+  /** process.platform of the main process ('win32', 'darwin', ...). */
+  platform: string
+  system: {
+    /** Asks for camera access where the OS requires it (macOS). Resolves true when allowed. */
+    requestCameraAccess: () => Promise<boolean>
+    /** Screen Recording permission state; 'granted' on platforms that need none. */
+    screenCaptureStatus: () => Promise<MediaAccessState>
+    /** Opens the matching OS privacy settings pane (macOS only; no-op elsewhere). */
+    openPrivacySettings: (pane: PrivacyPane) => void
+  }
   getState: () => Promise<AppState>
   getVersion: () => Promise<string>
   setState: (patch: AppStatePatch) => Promise<AppState>
