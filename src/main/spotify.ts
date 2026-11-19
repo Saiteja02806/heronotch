@@ -675,7 +675,7 @@ export async function performAction(clientId: string, action: SpotifyAction): Pr
   } catch {
     return {
       connected: true,
-      playing: action.type === 'play' || action.type === 'play-track',
+      playing: action.type === 'play',
       track: null,
       device: null,
       shuffle: false,

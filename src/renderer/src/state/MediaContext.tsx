@@ -125,7 +125,7 @@ export function MediaProvider({ children }: { children: ReactNode }) {
             }
             const visible = playbackRef.current
             const unchanged =
-              visible?.track?.id === frozen.track.id &&
+              visible?.track?.id === cached.track.id &&
               visible.playing === false &&
               (visible.device?.id ?? null) === (frozen.device?.id ?? null)
             if (!unchanged) applyPlayback(frozen)
