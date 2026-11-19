@@ -24,6 +24,7 @@ import * as backdrop from './backdrop'
 import * as localMedia from './localMedia'
 import * as obsidian from './obsidian'
 import { isMac, isWin } from './platform'
+import { ensureLoginShellPath } from './shellPath'
 import * as sessions from './sessions'
 import * as spotify from './spotify'
 import { flushState, getState, initState, setState, stateEvents, updateTask } from './state'
@@ -1183,6 +1184,9 @@ if (!gotLock) {
     // Menu-bar app: no Dock icon or app-switcher entry. LSUIElement does this in
     // the packaged app; dock.hide() also covers `npm run dev`.
     if (isMac) app.dock?.hide()
+    // Resolve the login-shell PATH in the background so the first session scan
+    // or send from a Finder-launched app can find Homebrew/npm CLIs.
+    void ensureLoginShellPath()
     // Native widgets (the select popup, date pickers, scrollbars) follow this,
     // not just the page CSS. Without it the select menu is a white Windows list
     // with near-white option labels.

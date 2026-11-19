@@ -7,6 +7,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { shell } from 'electron'
+import { appSupportDir, isMac, isWin, localAppDataDir } from './platform'
+import { ensureLoginShellPath, findCommandOnPath } from './shellPath'
 import type {
   AppPresence,
   CodingSession,
@@ -68,19 +70,70 @@ function baseName(directory: string | null): string | null {
   return parts[parts.length - 1] || cleaned || null
 }
 
+// Process names arrive as "Cursor.exe" on Windows and "Cursor" (the app
+// bundle) or "codex" (a CLI) on macOS. Compare them in one form.
+function normalizeProcessName(name: string): string {
+  return (name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.(exe|app)$/, '')
+}
+
 function providerForProcess(name: string): SessionProvider | null {
-  const normalizedName = (name || '').toLowerCase()
-  if (normalizedName.startsWith('codex') || normalizedName === 'chatgpt.exe') return 'codex'
+  const normalizedName = normalizeProcessName(name)
+  if (normalizedName.startsWith('codex') || normalizedName === 'chatgpt') return 'codex'
   if (normalizedName.includes('opencode')) return 'opencode'
   if (normalizedName.includes('antigravity')) return 'antigravity'
-  if (normalizedName === 'claude.exe' || normalizedName === 'claude') return 'claude'
-  if (normalizedName === 'cursor.exe') return 'cursor'
+  if (normalizedName === 'claude') return 'claude'
+  if (normalizedName === 'cursor') return 'cursor'
   if (normalizedName.includes('windsurf')) return 'windsurf'
-  if (normalizedName === 'zed.exe') return 'zed'
+  if (normalizedName === 'zed') return 'zed'
   return null
 }
 
+// macOS: `ps -o comm` prints the executable path. A GUI app's main process
+// runs from Foo.app/Contents/MacOS/; its helpers live in nested .app bundles
+// under Contents/Frameworks and are skipped so each app counts once. Anything
+// outside a bundle (a CLI such as codex or opencode) is named by its file.
+function macProcessName(executable: string): string | null {
+  const bundles = executable.split('.app/')
+  if (bundles.length > 2) return null
+  if (bundles.length === 2) {
+    if (!bundles[1].startsWith('Contents/MacOS/')) return null
+    return path.basename(bundles[0])
+  }
+  return path.basename(executable)
+}
+
+function scanMacProcesses(): Promise<ProcessInfo[]> {
+  return new Promise((resolve) => {
+    execFile(
+      'ps',
+      ['-axo', 'pid=,comm='],
+      { timeout: 5000, maxBuffer: 8 * 1024 * 1024 },
+      (error, stdout) => {
+        if (error || !stdout.trim()) {
+          resolve([])
+          return
+        }
+        const processes: ProcessInfo[] = []
+        for (const row of stdout.split('\n')) {
+          const match = row.match(/^\s*(\d+)\s+(.+)$/)
+          if (!match) continue
+          const executable = match[2].trim()
+          const name = macProcessName(executable)
+          if (!name || !providerForProcess(name)) continue
+          processes.push({ Id: Number(match[1]), Name: name, Title: null, Path: executable })
+        }
+        resolve(processes)
+      }
+    )
+  })
+}
+
 function scanProcesses(): Promise<ProcessInfo[]> {
+  if (isMac) return scanMacProcesses()
+  if (!isWin) return Promise.resolve([])
   return new Promise((resolve) => {
     execFile(
       'tasklist.exe',
@@ -444,7 +497,10 @@ export async function openSessionProject(directory: string): Promise<void> {
 }
 
 async function findOpenCodeCli(): Promise<string | null> {
-  const base = path.join(process.env.APPDATA || '', 'ai.opencode.desktop', 'cli')
+  // The desktop app keeps a versioned CLI next to its data on both systems
+  // (%APPDATA% on Windows, ~/Library/Application Support on macOS [verify]).
+  const base = path.join(appSupportDir(), 'ai.opencode.desktop', 'cli')
+  const binary = isWin ? 'opencode-cli.exe' : 'opencode-cli'
   try {
     const entries = await fs.readdir(base, { withFileTypes: true })
     const versions = entries
@@ -453,19 +509,34 @@ async function findOpenCodeCli(): Promise<string | null> {
       .sort()
       .reverse()
     for (const version of versions) {
-      const candidate = path.join(base, version, 'opencode-cli.exe')
+      const candidate = path.join(base, version, binary)
       if (await fs.stat(candidate).then((stat) => stat.isFile()).catch(() => false)) {
         return candidate
       }
     }
   } catch {
-    // OpenCode is not installed.
+    // OpenCode desktop is not installed.
   }
+  if (!isWin) return findCommandOnPath('opencode')
   return null
 }
 
 async function findCodexCli(): Promise<string | null> {
-  const base = path.join(process.env.LOCALAPPDATA || '', 'OpenAI', 'Codex', 'bin')
+  if (isMac) {
+    const onPath = await findCommandOnPath('codex')
+    if (onPath) return onPath
+    // CLIs bundled inside the desktop apps [verify the exact locations].
+    for (const candidate of [
+      '/Applications/Codex.app/Contents/Resources/codex',
+      '/Applications/ChatGPT.app/Contents/Resources/codex',
+      path.join(os.homedir(), 'Applications', 'Codex.app', 'Contents', 'Resources', 'codex')
+    ]) {
+      if (await fs.stat(candidate).then((stat) => stat.isFile()).catch(() => false)) return candidate
+    }
+    return null
+  }
+  if (!isWin) return findCommandOnPath('codex')
+  const base = path.join(localAppDataDir(), 'OpenAI', 'Codex', 'bin')
   const candidates: { full: string; mtime: number }[] = []
 
   const consider = async (full: string): Promise<void> => {
@@ -491,6 +562,12 @@ async function findCodexCli(): Promise<string | null> {
 }
 
 function isProcessRunning(imageName: string): Promise<boolean> {
+  if (!isWin) {
+    const wanted = normalizeProcessName(imageName)
+    return scanProcesses().then((processes) =>
+      processes.some((process) => normalizeProcessName(process.Name) === wanted)
+    )
+  }
   return new Promise((resolve) => {
     execFile(
       'tasklist',
@@ -507,6 +584,12 @@ async function codexThreadIsOpen(rawId: string): Promise<boolean> {
   const lock = path.join(os.homedir(), '.codex', 'thread-writer-locks', `${rawId}.lock`)
   const hasLock = await fs.stat(lock).then((stat) => stat.isFile()).catch(() => false)
   if (!hasLock) return false
+  // Same rule as Windows: a lock file plus a running desktop app means the
+  // thread may be open there, so do not write into it from the CLI. On macOS
+  // the desktop app may be "Codex" or "ChatGPT".
+  if (isMac) {
+    return (await isProcessRunning('Codex')) || (await isProcessRunning('ChatGPT'))
+  }
   return isProcessRunning('ChatGPT.exe')
 }
 
@@ -559,6 +642,38 @@ async function findAntiGravityAddress(): Promise<string | null> {
   return null
 }
 
+async function findAntiGravityLanguageServer(): Promise<string | null> {
+  const isFile = (candidate: string): Promise<boolean> =>
+    fs.stat(candidate).then((stat) => stat.isFile()).catch(() => false)
+  if (isWin) {
+    const executable = path.join(
+      localAppDataDir(),
+      'Programs',
+      'antigravity',
+      'resources',
+      'bin',
+      'language_server.exe'
+    )
+    return (await isFile(executable)) ? executable : null
+  }
+  if (!isMac) return null
+  // [verify] Where the macOS app bundle keeps its language server binary.
+  const arch = process.arch === 'arm64' ? 'arm' : 'x64'
+  const roots = ['/Applications/Antigravity.app', path.join(os.homedir(), 'Applications', 'Antigravity.app')]
+  for (const root of roots) {
+    for (const name of ['language_server', `language_server_macos_${arch}`]) {
+      for (const dir of [
+        path.join(root, 'Contents', 'Resources', 'bin'),
+        path.join(root, 'Contents', 'Resources', 'app', 'extensions', 'antigravity', 'bin')
+      ]) {
+        const candidate = path.join(dir, name)
+        if (await isFile(candidate)) return candidate
+      }
+    }
+  }
+  return null
+}
+
 function cleanProcessError(output: string): string {
   return output
     .replace(/\u001b\[[0-9;]*m/g, '')
@@ -581,6 +696,8 @@ export async function sendSessionMessage(
     return { ok: false, error: 'A message is already being sent to this session.' }
   }
 
+  // macOS: make Homebrew/npm-installed CLIs (and the node they need) visible.
+  await ensureLoginShellPath()
   let command: string
   let args: string[]
   let env: NodeJS.ProcessEnv = process.env
@@ -613,15 +730,8 @@ export async function sendSessionMessage(
         error: 'Anti Gravity is not running. Open it once so its local agent service is available.'
       }
     }
-    const executable = path.join(
-      process.env.LOCALAPPDATA || '',
-      'Programs',
-      'antigravity',
-      'resources',
-      'bin',
-      'language_server.exe'
-    )
-    if (!(await fs.stat(executable).then((stat) => stat.isFile()).catch(() => false))) {
+    const executable = await findAntiGravityLanguageServer()
+    if (!executable) {
       return { ok: false, error: 'Anti Gravity local agent CLI was not found.' }
     }
     command = executable
@@ -677,7 +787,7 @@ export async function sendSessionMessage(
     const detail = cleanProcessError(output) || `Agent command exited with code ${code}.`
     const configHint =
       session.provider === 'codex' && /config\.toml/i.test(output)
-        ? ' Fix the flagged setting in %USERPROFILE%\\.codex\\config.toml and try again.'
+        ? ` Fix the flagged setting in ${isWin ? '%USERPROFILE%\\.codex\\config.toml' : '~/.codex/config.toml'} and try again.`
         : ''
     finish(false, `${detail}${configHint}`)
   })
